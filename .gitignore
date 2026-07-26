@@ -1,0 +1,16 @@
+# build output
+main.js
+*.js.map
+dist/
+
+# dependencies
+node_modules/
+
+# environment
+.env
+
+# os
+.DS_Store
+
+# obsidian dev vault artifacts
+data.json

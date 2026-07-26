@@ -1,0 +1,31 @@
+{
+	"name": "obsidian-glide-outline",
+	"version": "0.1.0",
+	"description": "A fluid editor-margin outline with dock-style proximity magnification.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc --noEmit && node esbuild.config.mjs production",
+		"lint": "eslint src tests",
+		"test": "vitest run"
+	},
+	"keywords": [
+		"obsidian",
+		"obsidian-plugin",
+		"outline",
+		"toc"
+	],
+	"author": "Ongiei",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^22.10.0",
+		"builtin-modules": "^4.0.0",
+		"esbuild": "^0.25.0",
+		"eslint": "^9.18.0",
+		"obsidian": "^1.8.7",
+		"tslib": "^2.8.1",
+		"typescript": "^5.7.2",
+		"typescript-eslint": "^8.20.0",
+		"vitest": "^3.0.0"
+	}
+}
