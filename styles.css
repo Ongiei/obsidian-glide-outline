@@ -14,6 +14,13 @@
      1. .glide-outline-hit-zone  – thin transparent strip over the rail
      2. .glide-outline-marker    – rail-width hit slots (line drawn via ::before)
      3. .glide-outline-card      – visible label cards, expanded state only
+     4. .glide-outline-motion    – EXPANDED ONLY: the interaction corridor.
+        Its box is exactly marker + column-gap + card (width: max-content,
+        full row height), so while browsing, the transparent gap between
+        marker and label and the slack above/below the text stay inside
+        the outline's hover envelope — crossing them no longer collapses
+        the list. Collapsed, it reverts to pointer-transparent, and it
+        never extends past the card into the text body.
    The editor underneath stays fully clickable everywhere else.
 
    Transform responsibilities:
@@ -210,6 +217,19 @@
 	transform: translateY(var(--glide-shift-y, 0px));
 	transition: transform 140ms cubic-bezier(0.33, 0, 0.2, 1);
 	pointer-events: none;
+}
+
+/* Interaction corridor: while the outline is expanded (or focused), the
+   whole motion box — marker, the gap between marker and card, the card
+   and the row slack around the text — accepts the pointer. This is what
+   keeps hover alive when the pointer crosses the transparent gap or sits
+   in the blank space beside a short label. The box is width: max-content
+   inside an edge-anchored button, so it can never grow into a full-width
+   editor-blocking bar. Clicks in the corridor bubble to the item button,
+   which enlarges the effective click target for edge cases too. */
+.glide-outline-root.is-expanded .glide-outline-motion,
+.glide-outline-root:focus-within .glide-outline-motion {
+	pointer-events: auto;
 }
 
 /* DOM order is marker → reveal; on the right edge the marker must sit at
