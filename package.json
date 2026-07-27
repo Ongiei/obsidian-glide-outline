@@ -17,6 +17,7 @@
 	],
 	"author": "Ongiei",
 	"license": "MIT",
+	"packageManager": "pnpm@9.12.3",
 	"devDependencies": {
 		"@types/node": "^22.10.0",
 		"builtin-modules": "^4.0.0",
