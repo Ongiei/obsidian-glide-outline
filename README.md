@@ -42,6 +42,22 @@ pnpm test
 
 Symlink (or copy) the repository into `<vault>/.obsidian/plugins/glide-outline/` for live testing.
 
+### Manual stress test
+
+`tests/fixtures/glide-outline-stress-test.md` is a real, readable manual with 120+ headings designed to break outlines. Copy it into a test vault and walk through this checklist:
+
+1. **Overflow & edge fades** — the outline must overflow any laptop viewport; the top/bottom fades appear only on the edges that hide more content and follow every scroll.
+2. **Auto-scroll** — park the pointer in the lower fifth of the rail: scrolling starts softly after a short dwell and speeds up toward the edge. Flick the pointer downward from the middle: the list pre-scrolls to meet the gesture. Hold the mouse button: scrolling pauses; release: it resumes.
+3. **Level badges** — the H1–H6 badges align in one column on the rail-facing card edge; 附录 L's eight consecutive H3 cards must line up perfectly; 附录 M jumps H2 → H5 with no intermediate badge.
+4. **Magnification at the extremes** — the very long first and last titles must stay fully visible at peak scale, never clipped by the pane edges.
+5. **Long tokens** — the space-less `Supercalifragilisticexpialidocious…` heading gets a single-line ellipsis; long English titles with spaces do too.
+6. **Duplicates** — three identical `常见问题` H3s and the two-level `监控` pair all highlight and jump independently.
+7. **Code fences** — none of the fake `# headings` inside fenced blocks appear in the rail.
+8. **Narrow pane** — drag the split narrow: cards shrink text budget first, badges and paddings last; nothing overlaps the editor text.
+9. **Reduced motion** — with the system reduced-motion preference (or Animation off), magnification snaps without transitions and auto-scroll disables entirely.
+
+Structural properties of the fixture are pinned by `tests/stress-fixture.test.ts`, so edits cannot silently destroy this coverage.
+
 ## Settings
 
 Settings are grouped into **General**, **Marker**, **Motion**, **Typography**, **Label card**, **Rendering** and **Show heading levels**, plus a one-click **Restore default appearance** button (position, shown levels and Markdown rendering are preserved).
@@ -58,7 +74,9 @@ Settings are grouped into **General**, **Marker**, **Motion**, **Typography**, *
 | Base font size | 12 px | Label font size before magnification. |
 | Maximum label width | 240 px | Longer headings get a single-line ellipsis. |
 | Background opacity | 78 % | Label card background; 0 turns cards into pure text. |
-| Border / Shadow / Text shadow | off | Optional card chrome. |
+| Border / Shadow | off | Optional card chrome. |
+| Level badge | on | H1–H6 badge on the rail-facing edge of each card. |
+| Text effect | none | `halo` (symmetric multi-layer glow) or `stroke` (0.5 px hairline) for readability on busy backgrounds — never a directional drop shadow. |
 | Corner radius | 4 px | Card corner rounding. |
 | Horizontal / vertical padding | 7 / 1 px | Card padding. |
 | Render Markdown in labels | off | Show inline bold/code/links in labels. |

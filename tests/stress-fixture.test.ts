@@ -102,4 +102,27 @@ describe("stress fixture structure", () => {
 		// and auto-scroll coverage in manual testing.
 		expect(fixture.split("\n").length).toBeGreaterThan(400);
 	});
+
+	it("contains a run of 8+ consecutive same-level headings", () => {
+		// Badge column alignment + steady auto-scroll need a long uniform
+		// stretch (附录 L 值班速查卡).
+		let best = 0;
+		let run = 0;
+		let prev = 0;
+		for (const h of headings) {
+			run = h.level === prev ? run + 1 : 1;
+			prev = h.level;
+			best = Math.max(best, run);
+		}
+		expect(best).toBeGreaterThanOrEqual(8);
+	});
+
+	it("contains a level jump of 3+ (badge must not show intermediate levels)", () => {
+		// 附录 M jumps H2 → H5 directly.
+		let maxJump = 0;
+		for (let i = 1; i < headings.length; i++) {
+			maxJump = Math.max(maxJump, headings[i].level - headings[i - 1].level);
+		}
+		expect(maxJump).toBeGreaterThanOrEqual(3);
+	});
 });
