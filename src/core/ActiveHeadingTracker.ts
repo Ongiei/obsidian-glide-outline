@@ -23,7 +23,7 @@ interface CmView {
  */
 export class ActiveHeadingTracker {
 	private readonly disposables = new DisposableStore();
-	private readonly win: Window;
+	private readonly win: Window & typeof globalThis;
 	private items: readonly HeadingItem[] = [];
 	private activeKey: string | null = null;
 	private rafId = 0;
@@ -33,13 +33,16 @@ export class ActiveHeadingTracker {
 		private readonly view: MarkdownView,
 		private readonly onChange: (key: string | null) => void,
 	) {
-		const win = view.contentEl.ownerDocument.defaultView;
+		const win = view.contentEl.ownerDocument.defaultView as
+			| (Window & typeof globalThis)
+			| null;
 		if (!win) throw new Error("glide-outline: detached document");
 		this.win = win;
 
 		const onScroll = (event: Event): void => {
 			const target = event.target;
-			if (!(target instanceof HTMLElement)) return;
+			// Pop-out safe: use the owner window's constructor (P1-1).
+			if (!(target instanceof this.win.HTMLElement)) return;
 			if (
 				!target.classList.contains("cm-scroller") &&
 				!target.classList.contains("markdown-preview-view")
