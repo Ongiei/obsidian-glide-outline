@@ -19,6 +19,14 @@ export interface ResponsiveWidthInput {
 	safeSlack: number;
 	/** Below this effective text width the outline enters compact mode. */
 	compactThreshold: number;
+	/** Distance between the rail and the pane edge it is anchored to, px. */
+	horizontalOffset: number;
+	/**
+	 * Largest hierarchy indent among visible headings, px:
+	 * `(deepestVisibleLevel - 1) * levelIndent`. Deeper cards step toward
+	 * the text body, so the widest layout must budget for it.
+	 */
+	maxLevelIndent: number;
 }
 
 export interface ResponsiveWidthResult {
@@ -34,13 +42,16 @@ export interface ResponsiveWidthResult {
  * Narrow-pane adaptation (pure function).
  *
  * `maxLabelWidth` is the TEXT content budget; the card adds padding and
- * border on both sides, magnification multiplies the whole card, and the
- * shadow needs painting room outside the card:
+ * border on both sides, magnification multiplies the whole card, the
+ * shadow needs painting room outside the card, deeper headings step
+ * toward the text body by up to `maxLevelIndent`, and the whole root is
+ * pushed inward from the pane edge by `horizontalOffset`:
  *
  *   cardBaseWidth      = text + 2*paddingX + 2*borderWidth
  *   magnifiedCardWidth = ceil(cardBaseWidth * maxScale)
- *   rootWidth          = rail + gap + magnifiedCardWidth
- *                        + shadowAllowance + safeSlack   (clamped to host)
+ *   rootWidth          = rail + gap + maxLevelIndent + magnifiedCardWidth
+ *                        + shadowAllowance + safeSlack
+ *                        (clamped to hostWidth - horizontalOffset)
  *
  * When the host clamps the root, the text budget is solved in reverse so
  * the *complete* magnified card still fits. Below `compactThreshold`
@@ -51,23 +62,32 @@ export function computeResponsiveWidth(
 	input: ResponsiveWidthInput,
 ): ResponsiveWidthResult {
 	const scale = Math.max(1, input.maxScale);
+	const offset = Math.max(0, input.horizontalOffset);
+	const maxLevelIndent = Math.max(0, input.maxLevelIndent);
 	const chromeX = 2 * input.cardPaddingX + 2 * input.cardBorderWidth;
 	const cardBaseWidth = input.maxLabelWidth + chromeX;
 	const idealWidth =
 		input.railWidth +
 		input.labelGap +
+		maxLevelIndent +
 		Math.ceil(cardBaseWidth * scale) +
 		input.shadowAllowance +
 		input.safeSlack;
-	const hostWidth = Math.max(0, Math.floor(input.hostWidth));
+	// The offset eats into the host: the root may never be pushed out of
+	// the opposite side of the pane.
+	const effectiveHostWidth = Math.max(
+		0,
+		Math.floor(input.hostWidth) - offset,
+	);
 	const rootWidth = Math.max(
-		Math.min(input.railWidth, hostWidth),
-		Math.min(idealWidth, hostWidth),
+		Math.min(input.railWidth, effectiveHostWidth),
+		Math.min(idealWidth, effectiveHostWidth),
 	);
 	const availableCardWidth =
 		(rootWidth -
 			input.railWidth -
 			input.labelGap -
+			maxLevelIndent -
 			input.shadowAllowance -
 			input.safeSlack) /
 		scale;

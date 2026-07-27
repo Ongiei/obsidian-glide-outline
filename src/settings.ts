@@ -5,6 +5,25 @@ import type GlideOutlinePlugin from "./main";
 export type OutlinePosition = "left" | "right";
 export type MarkerStyle = "line" | "dot";
 
+/**
+ * Structured text shadow. Replaces the old `textShadow: boolean`; legacy
+ * boolean values are migrated in `normalizeSettings` (enabled = oldBoolean,
+ * every other field falls back to the defaults below).
+ */
+export interface TextShadowSettings {
+	enabled: boolean;
+	/** Hex color, `#rgb` or `#rrggbb`. Invalid values fall back to default. */
+	color: string;
+	/** Shadow alpha in percent, 0–100. */
+	opacity: number;
+	/** Blur radius in px. */
+	blur: number;
+	/** Horizontal offset in px (negative = left). */
+	offsetX: number;
+	/** Vertical offset in px (negative = up). */
+	offsetY: number;
+}
+
 /** Visual style of the label card behind each heading. */
 export interface LabelAppearanceSettings {
 	/** Card background opacity in percent (0 = pure text mode). */
@@ -19,8 +38,8 @@ export interface LabelAppearanceSettings {
 	paddingX: number;
 	/** Vertical padding in px. */
 	paddingY: number;
-	/** Text shadow for readability in pure text mode. */
-	textShadow: boolean;
+	/** Text shadow behind label text (readability on busy backgrounds). */
+	textShadow: TextShadowSettings;
 }
 
 export interface GlideOutlineSettings {
@@ -28,6 +47,23 @@ export interface GlideOutlineSettings {
 	position: OutlinePosition;
 	/** px, shifts the rail down (positive) or up (negative). */
 	verticalOffset: number;
+	/**
+	 * px, distance between the outline rail and the pane edge it is
+	 * anchored to. On the right this keeps the rail clear of the editor
+	 * scrollbar.
+	 */
+	horizontalOffset: number;
+	/**
+	 * px added toward the text body per heading depth step:
+	 * H1 = 0, H2 = 1×, … H6 = 5× levelIndent.
+	 */
+	levelIndent: number;
+	/** Soft fade at the top/bottom edges when the list overflows. */
+	edgeFadeEnabled: boolean;
+	/** Fade size in px. */
+	edgeFadeSize: number;
+	/** Slowly scroll the list when the pointer dwells near an edge. */
+	pointerAutoScroll: boolean;
 	markerStyle: MarkerStyle;
 	/** Peak scale at pointer distance 0. */
 	maxScale: number;
@@ -50,6 +86,15 @@ export interface GlideOutlineSettings {
 	card: LabelAppearanceSettings;
 }
 
+export const DEFAULT_TEXT_SHADOW: TextShadowSettings = {
+	enabled: false,
+	color: "#000000",
+	opacity: 55,
+	blur: 4,
+	offsetX: 0,
+	offsetY: 1,
+};
+
 export const DEFAULT_CARD: LabelAppearanceSettings = {
 	opacity: 78,
 	border: false,
@@ -57,13 +102,18 @@ export const DEFAULT_CARD: LabelAppearanceSettings = {
 	shadow: false,
 	paddingX: 7,
 	paddingY: 1,
-	textShadow: false,
+	textShadow: { ...DEFAULT_TEXT_SHADOW },
 };
 
 export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	enabled: true,
 	position: "right",
 	verticalOffset: 0,
+	horizontalOffset: 12,
+	levelIndent: 3,
+	edgeFadeEnabled: true,
+	edgeFadeSize: 28,
+	pointerAutoScroll: true,
 	markerStyle: "line",
 	maxScale: 1.25,
 	radius: 90,
@@ -73,11 +123,17 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	showLevels: [true, true, true, true, true, true],
 	animationEnabled: true,
 	renderMarkdown: false,
-	card: { ...DEFAULT_CARD },
+	card: {
+		...DEFAULT_CARD,
+		textShadow: { ...DEFAULT_TEXT_SHADOW },
+	},
 };
 
 export const RANGES = {
 	verticalOffset: { min: -400, max: 400 },
+	horizontalOffset: { min: 0, max: 64 },
+	levelIndent: { min: 0, max: 8 },
+	edgeFadeSize: { min: 12, max: 64 },
 	maxScale: { min: 1, max: 1.75 },
 	radius: { min: 40, max: 240 },
 	baseFontSize: { min: 9, max: 18 },
@@ -87,6 +143,9 @@ export const RANGES = {
 	cardRadius: { min: 0, max: 16 },
 	cardPaddingX: { min: 0, max: 18 },
 	cardPaddingY: { min: 0, max: 10 },
+	textShadowOpacity: { min: 0, max: 100 },
+	textShadowBlur: { min: 0, max: 12 },
+	textShadowOffset: { min: -6, max: 6 },
 } as const;
 
 function clamp(value: unknown, min: number, max: number, fallback: number): number {
@@ -96,6 +155,70 @@ function clamp(value: unknown, min: number, max: number, fallback: number): numb
 
 function bool(value: unknown, fallback: boolean): boolean {
 	return typeof value === "boolean" ? value : fallback;
+}
+
+const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
+
+function hexColor(value: unknown, fallback: string): string {
+	return typeof value === "string" && HEX_COLOR_RE.test(value)
+		? value
+		: fallback;
+}
+
+/**
+ * Migrate + normalize the text shadow.
+ * Legacy `data.json` stored `card.textShadow` as a boolean — that maps to
+ * `enabled` and every other field takes the default.
+ */
+export function normalizeTextShadow(raw: unknown): TextShadowSettings {
+	if (typeof raw === "boolean") {
+		return { ...DEFAULT_TEXT_SHADOW, enabled: raw };
+	}
+	const data = (raw ?? {}) as Partial<TextShadowSettings>;
+	return {
+		enabled: bool(data.enabled, DEFAULT_TEXT_SHADOW.enabled),
+		color: hexColor(data.color, DEFAULT_TEXT_SHADOW.color),
+		opacity: clamp(
+			data.opacity,
+			RANGES.textShadowOpacity.min,
+			RANGES.textShadowOpacity.max,
+			DEFAULT_TEXT_SHADOW.opacity,
+		),
+		blur: clamp(
+			data.blur,
+			RANGES.textShadowBlur.min,
+			RANGES.textShadowBlur.max,
+			DEFAULT_TEXT_SHADOW.blur,
+		),
+		offsetX: clamp(
+			data.offsetX,
+			RANGES.textShadowOffset.min,
+			RANGES.textShadowOffset.max,
+			DEFAULT_TEXT_SHADOW.offsetX,
+		),
+		offsetY: clamp(
+			data.offsetY,
+			RANGES.textShadowOffset.min,
+			RANGES.textShadowOffset.max,
+			DEFAULT_TEXT_SHADOW.offsetY,
+		),
+	};
+}
+
+/**
+ * Build the CSS `text-shadow` value written into `--glide-text-shadow`.
+ * Returns "none" when disabled so the variable is always well-formed.
+ */
+export function textShadowCss(shadow: TextShadowSettings): string {
+	if (!shadow.enabled) return "none";
+	const hex = shadow.color.length === 4
+		? `#${shadow.color[1]}${shadow.color[1]}${shadow.color[2]}${shadow.color[2]}${shadow.color[3]}${shadow.color[3]}`
+		: shadow.color;
+	const r = parseInt(hex.slice(1, 3), 16);
+	const g = parseInt(hex.slice(3, 5), 16);
+	const b = parseInt(hex.slice(5, 7), 16);
+	const alpha = Math.round((shadow.opacity / 100) * 1000) / 1000;
+	return `${shadow.offsetX}px ${shadow.offsetY}px ${shadow.blur}px rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 function normalizeCard(raw: unknown): LabelAppearanceSettings {
@@ -127,7 +250,7 @@ function normalizeCard(raw: unknown): LabelAppearanceSettings {
 			RANGES.cardPaddingY.max,
 			DEFAULT_CARD.paddingY,
 		),
-		textShadow: bool(data.textShadow, DEFAULT_CARD.textShadow),
+		textShadow: normalizeTextShadow(data.textShadow),
 	};
 }
 
@@ -145,6 +268,32 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 			RANGES.verticalOffset.min,
 			RANGES.verticalOffset.max,
 			DEFAULT_SETTINGS.verticalOffset,
+		),
+		horizontalOffset: clamp(
+			data.horizontalOffset,
+			RANGES.horizontalOffset.min,
+			RANGES.horizontalOffset.max,
+			DEFAULT_SETTINGS.horizontalOffset,
+		),
+		levelIndent: clamp(
+			data.levelIndent,
+			RANGES.levelIndent.min,
+			RANGES.levelIndent.max,
+			DEFAULT_SETTINGS.levelIndent,
+		),
+		edgeFadeEnabled: bool(
+			data.edgeFadeEnabled,
+			DEFAULT_SETTINGS.edgeFadeEnabled,
+		),
+		edgeFadeSize: clamp(
+			data.edgeFadeSize,
+			RANGES.edgeFadeSize.min,
+			RANGES.edgeFadeSize.max,
+			DEFAULT_SETTINGS.edgeFadeSize,
+		),
+		pointerAutoScroll: bool(
+			data.pointerAutoScroll,
+			DEFAULT_SETTINGS.pointerAutoScroll,
 		),
 		markerStyle: data.markerStyle === "dot" || data.markerStyle === "line"
 			? data.markerStyle
@@ -183,8 +332,9 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 
 /**
  * Restore appearance-related values to their defaults.
- * Deliberately preserved: enabled, position, vertical offset, shown levels
- * and Markdown rendering — those encode workflow, not appearance.
+ * Deliberately preserved: enabled, position, vertical/horizontal offset,
+ * pointer auto-scroll, shown levels and Markdown rendering — those encode
+ * workflow and placement, not appearance.
  */
 export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 	return {
@@ -195,8 +345,11 @@ export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 		baseFontSize: DEFAULT_SETTINGS.baseFontSize,
 		maxLabelWidth: DEFAULT_SETTINGS.maxLabelWidth,
 		cardGap: DEFAULT_SETTINGS.cardGap,
+		levelIndent: DEFAULT_SETTINGS.levelIndent,
+		edgeFadeEnabled: DEFAULT_SETTINGS.edgeFadeEnabled,
+		edgeFadeSize: DEFAULT_SETTINGS.edgeFadeSize,
 		animationEnabled: DEFAULT_SETTINGS.animationEnabled,
-		card: { ...DEFAULT_CARD },
+		card: { ...DEFAULT_CARD, textShadow: { ...DEFAULT_TEXT_SHADOW } },
 	};
 }
 
@@ -232,6 +385,20 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						s.position = value === "left" ? "left" : "right";
 						await this.plugin.applySettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Horizontal offset")
+			.setDesc("Move the outline inward from the editor edge. Increase it on the right to leave space beside the editor scrollbar.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(RANGES.horizontalOffset.min, RANGES.horizontalOffset.max, 1)
+					.setValue(s.horizontalOffset)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.horizontalOffset = value;
+						this.plugin.previewSettings();
 					}),
 			);
 
@@ -427,11 +594,145 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName("Level indentation")
+			.setDesc("Pixels each deeper heading level steps toward the text body, forming a hierarchy staircase.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(RANGES.levelIndent.min, RANGES.levelIndent.max, 1)
+					.setValue(s.levelIndent)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.levelIndent = value;
+						this.plugin.previewSettings();
+					}),
+			);
+
+		// --- Text shadow
+		new Setting(containerEl).setName("Text shadow").setHeading();
+
+		new Setting(containerEl)
 			.setName("Text shadow")
-			.setDesc("Improves readability in pure text mode.")
+			.setDesc("Draw a configurable shadow behind label text for readability on busy backgrounds.")
 			.addToggle((toggle) =>
-				toggle.setValue(s.card.textShadow).onChange(async (value) => {
-					s.card.textShadow = value;
+				toggle.setValue(s.card.textShadow.enabled).onChange(async (value) => {
+					s.card.textShadow.enabled = value;
+					await this.plugin.applySettings();
+					this.display();
+				}),
+			);
+
+		if (s.card.textShadow.enabled) {
+			new Setting(containerEl)
+				.setName("Shadow color")
+				.addColorPicker((picker) =>
+					picker.setValue(s.card.textShadow.color).onChange((value) => {
+						s.card.textShadow.color = value;
+						this.plugin.previewSettings();
+					}),
+				);
+
+			new Setting(containerEl)
+				.setName("Shadow opacity")
+				.addSlider((slider) =>
+					slider
+						.setLimits(
+							RANGES.textShadowOpacity.min,
+							RANGES.textShadowOpacity.max,
+							5,
+						)
+						.setValue(s.card.textShadow.opacity)
+						.setDynamicTooltip()
+						.onChange((value) => {
+							s.card.textShadow.opacity = value;
+							this.plugin.previewSettings();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("Shadow blur")
+				.addSlider((slider) =>
+					slider
+						.setLimits(
+							RANGES.textShadowBlur.min,
+							RANGES.textShadowBlur.max,
+							1,
+						)
+						.setValue(s.card.textShadow.blur)
+						.setDynamicTooltip()
+						.onChange((value) => {
+							s.card.textShadow.blur = value;
+							this.plugin.previewSettings();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("Shadow horizontal offset")
+				.addSlider((slider) =>
+					slider
+						.setLimits(
+							RANGES.textShadowOffset.min,
+							RANGES.textShadowOffset.max,
+							1,
+						)
+						.setValue(s.card.textShadow.offsetX)
+						.setDynamicTooltip()
+						.onChange((value) => {
+							s.card.textShadow.offsetX = value;
+							this.plugin.previewSettings();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName("Shadow vertical offset")
+				.addSlider((slider) =>
+					slider
+						.setLimits(
+							RANGES.textShadowOffset.min,
+							RANGES.textShadowOffset.max,
+							1,
+						)
+						.setValue(s.card.textShadow.offsetY)
+						.setDynamicTooltip()
+						.onChange((value) => {
+							s.card.textShadow.offsetY = value;
+							this.plugin.previewSettings();
+						}),
+				);
+		}
+
+		// --- Overflow
+		new Setting(containerEl).setName("Overflow").setHeading();
+
+		new Setting(containerEl)
+			.setName("Edge fade")
+			.setDesc("Softly fade the top and bottom of the list when more headings are hidden beyond the edge.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.edgeFadeEnabled).onChange(async (value) => {
+					s.edgeFadeEnabled = value;
+					await this.plugin.applySettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Edge fade size")
+			.setDesc("Height of the fade zone, in pixels.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(RANGES.edgeFadeSize.min, RANGES.edgeFadeSize.max, 2)
+					.setValue(s.edgeFadeSize)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.edgeFadeSize = value;
+						this.plugin.previewSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Pointer edge auto-scroll")
+			.setDesc("Slowly scroll the list when the pointer dwells near its top or bottom edge, bringing hidden headings into reach.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.pointerAutoScroll).onChange(async (value) => {
+					s.pointerAutoScroll = value;
 					await this.plugin.applySettings();
 				}),
 			);

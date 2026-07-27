@@ -15,6 +15,8 @@ const BASE = {
 	shadowAllowance: 0,
 	safeSlack: 20,
 	compactThreshold: 60,
+	horizontalOffset: 0,
+	maxLevelIndent: 0,
 };
 
 /** Full magnified card budget for a given result (mirrors the CSS model). */
@@ -139,6 +141,80 @@ describe("computeResponsiveWidth", () => {
 		expect(Number.isFinite(result.rootWidth)).toBe(true);
 		expect(result.labelContentWidth).toBe(0);
 		expect(result.compact).toBe(true);
+	});
+
+	it("does not change the root width on a wide host when offset grows", () => {
+		// Plenty of room: the ideal width already fits, the offset only
+		// moves the root inward (CSS right/left), never shrinks it.
+		const zero = computeResponsiveWidth({ ...BASE, hostWidth: 1200 });
+		const offset = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 1200,
+			horizontalOffset: 64,
+		});
+		expect(offset.rootWidth).toBe(zero.rootWidth);
+		expect(offset.labelContentWidth).toBe(240);
+	});
+
+	it("subtracts the horizontal offset from the usable host width", () => {
+		const input = { ...BASE, hostWidth: 300, horizontalOffset: 40 };
+		const result = computeResponsiveWidth(input);
+		expect(result.rootWidth).toBeLessThanOrEqual(300 - 40);
+	});
+
+	it("reverse-solves a smaller text width when the offset eats the pane", () => {
+		const loose = computeResponsiveWidth({ ...BASE, hostWidth: 320 });
+		const tight = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 320,
+			horizontalOffset: 64,
+		});
+		expect(tight.labelContentWidth).toBeLessThan(loose.labelContentWidth);
+	});
+
+	it("budgets the worst-case level indent on a wide host", () => {
+		const flat = computeResponsiveWidth({ ...BASE, hostWidth: 1200 });
+		const indented = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 1200,
+			maxLevelIndent: 15, // H6 at levelIndent 3 → (6-1)×3
+		});
+		expect(indented.rootWidth).toBe(flat.rootWidth + 15);
+		expect(indented.labelContentWidth).toBe(240);
+	});
+
+	it("subtracts the level indent when reverse-solving a narrow pane", () => {
+		const flat = computeResponsiveWidth({ ...BASE, hostWidth: 260 });
+		const indented = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 260,
+			maxLevelIndent: 40, // levelIndent 8 × H6
+		});
+		expect(indented.labelContentWidth).toBeLessThan(flat.labelContentWidth);
+		expect(indented.rootWidth).toBeLessThanOrEqual(260);
+	});
+
+	it("survives extreme offset + indent without NaN or negatives", () => {
+		const result = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 100,
+			horizontalOffset: 64,
+			maxLevelIndent: 40,
+		});
+		expect(Number.isFinite(result.rootWidth)).toBe(true);
+		expect(result.labelContentWidth).toBeGreaterThanOrEqual(0);
+		expect(result.compact).toBe(true);
+	});
+
+	it("treats negative offset and indent as zero", () => {
+		const clean = computeResponsiveWidth({ ...BASE, hostWidth: 1200 });
+		const dirty = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 1200,
+			horizontalOffset: -10,
+			maxLevelIndent: -5,
+		});
+		expect(dirty).toEqual(clean);
 	});
 
 	it("is side-agnostic (left and right use the same budget)", () => {
