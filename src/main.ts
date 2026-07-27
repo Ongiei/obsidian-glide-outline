@@ -1,5 +1,6 @@
 import { Plugin } from "obsidian";
 import type { Editor, MarkdownView, TFile } from "obsidian";
+import { EditorView } from "@codemirror/view";
 import {
 	DEFAULT_SETTINGS,
 	GlideOutlineSettingTab,
@@ -10,6 +11,10 @@ import type { GlideOutlineSettings } from "./settings";
 import { HeadingProvider } from "./core/HeadingProvider";
 import { GlideOutlineController } from "./core/GlideOutlineController";
 import { ViewLifecycleManager } from "./core/ViewLifecycleManager";
+import {
+	EditorUpdateBridge,
+	summarizeViewUpdate,
+} from "./core/EditorUpdateBridge";
 
 /** Debounce for slider-driven settings persistence (Phase 8). */
 const SAVE_DEBOUNCE_MS = 250;
@@ -24,11 +29,21 @@ export default class GlideOutlinePlugin extends Plugin {
 	private lifecycle!: ViewLifecycleManager;
 	private controller: GlideOutlineController | null = null;
 	private saveTimer = 0;
+	/** ONE workspace-wide CM update feed, fanned out per view (P0-2). */
+	private readonly editorUpdates = new EditorUpdateBridge();
 
 	override async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
 		this.provider = new HeadingProvider(this.app);
 		this.addSettingTab(new GlideOutlineSettingTab(this.app, this));
+
+		// P0-2: a single updateListener for every editor in the workspace.
+		// Summaries flow through the bridge; controllers filter by identity.
+		this.registerEditorExtension(
+			EditorView.updateListener.of((update) => {
+				this.editorUpdates.dispatch(summarizeViewUpdate(update));
+			}),
+		);
 
 		this.lifecycle = new ViewLifecycleManager(this, {
 			onAttach: (view) => this.attachTo(view),
@@ -157,6 +172,7 @@ export default class GlideOutlinePlugin extends Plugin {
 			view,
 			this.provider,
 			() => this.settings,
+			this.editorUpdates,
 		);
 	}
 
