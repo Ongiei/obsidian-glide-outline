@@ -1,3 +1,4 @@
+import { Component, MarkdownRenderer } from "obsidian";
 import type { Editor, MarkdownView, TFile } from "obsidian";
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
@@ -23,6 +24,8 @@ export class GlideOutlineController {
 	private readonly outlineView: GlideOutlineView;
 	private readonly tracker: ActiveHeadingTracker;
 	private readonly magnification: MagnificationController;
+	/** Owns the lifecycle of rendered Markdown labels (Phase 7). */
+	private readonly renderComponent = new Component();
 	private items: HeadingItem[] = [];
 	private disposed = false;
 
@@ -31,8 +34,10 @@ export class GlideOutlineController {
 		private readonly provider: HeadingProvider,
 		private readonly getSettings: () => GlideOutlineSettings,
 	) {
+		this.renderComponent.load();
 		this.outlineView = new GlideOutlineView(view.contentEl, getSettings, {
 			onJump: (item) => this.jumpTo(item),
+			renderLabel: (labelEl, item) => this.renderLabel(labelEl, item),
 		});
 		this.magnification = new MagnificationController(
 			this.outlineView,
@@ -95,6 +100,24 @@ export class GlideOutlineController {
 		this.tracker.dispose();
 		this.magnification.dispose();
 		this.outlineView.dispose();
+		this.renderComponent.unload();
+	}
+
+	/**
+	 * Render inline Markdown into a label element (Phase 7).
+	 * Falls back to plain text when rendering fails for any reason.
+	 */
+	private renderLabel(labelEl: HTMLElement, item: HeadingItem): void {
+		const sourcePath = this.view.file?.path ?? "";
+		MarkdownRenderer.render(
+			this.view.app,
+			item.displaySource,
+			labelEl,
+			sourcePath,
+			this.renderComponent,
+		).catch(() => {
+			labelEl.textContent = item.text;
+		});
 	}
 
 	private setItems(items: HeadingItem[]): void {
