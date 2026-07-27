@@ -224,4 +224,80 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 			flushFrame();
 		}).not.toThrow();
 	});
+
+	/** Dispatch a pointer event with a deterministic timeStamp (px/s math). */
+	function pointerAt(type: string, clientY: number, timeStamp: number): void {
+		const ev = new MouseEvent(type, { clientY, bubbles: true });
+		Object.defineProperty(ev, "timeStamp", { value: timeStamp });
+		view.hitZoneEl.dispatchEvent(ev);
+	}
+
+	/** Advance the fake clock and run one RAF frame N times. */
+	function runFrames(count: number): void {
+		for (let i = 0; i < count; i++) {
+			vi.advanceTimersByTime(16);
+			flushFrame();
+		}
+	}
+
+	it("velocity assist: a fast downward flick scrolls from the dead zone", () => {
+		// Static hover at 380 (lower half but outside the pre-scroll zone):
+		// no positional scrolling. The >200 ms gap counts as a new gesture,
+		// so the reposition itself carries no velocity.
+		pointerAt("pointerenter", 300, 0);
+		pointerAt("pointermove", 380, 500);
+		const before = view.viewportEl.scrollTop;
+		runScrollFrames();
+		expect(view.viewportEl.scrollTop).toBe(before);
+
+		// A decisive downward flick ending at the same 380 must pre-scroll:
+		// the headings come to meet the gesture.
+		pointerAt("pointermove", 320, 200);
+		pointerAt("pointermove", 340, 216);
+		pointerAt("pointermove", 360, 232);
+		pointerAt("pointermove", 380, 248);
+		runScrollFrames();
+		expect(view.viewportEl.scrollTop).toBeGreaterThan(before);
+	});
+
+	it("velocity assist decays after the flick stops (no runaway scrolling)", () => {
+		pointerAt("pointerenter", 300, 0);
+		pointerAt("pointermove", 320, 16);
+		pointerAt("pointermove", 340, 32);
+		pointerAt("pointermove", 360, 48);
+		pointerAt("pointermove", 380, 64);
+		runScrollFrames();
+		expect(view.viewportEl.scrollTop).toBeGreaterThan(200);
+
+		// No further pointer movement: the smoothed velocity decays and the
+		// damped applied velocity returns to 0 — the list settles.
+		runFrames(150);
+		const settled = view.viewportEl.scrollTop;
+		runFrames(5);
+		expect(view.viewportEl.scrollTop).toBe(settled);
+	});
+
+	it("ramps continuously under the acceleration cap (no velocity jump)", () => {
+		pointer("pointerenter", 495);
+		pointer("pointermove", 495);
+		const start = view.viewportEl.scrollTop;
+		runScrollFrames(); // first frame with motion
+		const firstDelta = view.viewportEl.scrollTop - start;
+		// Accel cap 1400 px/s² × 16 ms → ≤ 22.4 px/s → ≤ ~0.36 px in the
+		// first frame. Never an instant full-speed jump (320 px/s ≈ 5 px).
+		expect(firstDelta).toBeGreaterThan(0);
+		expect(firstDelta).toBeLessThan(1);
+
+		// Each subsequent frame moves farther while the ramp builds.
+		const deltas: number[] = [];
+		let prev = view.viewportEl.scrollTop;
+		for (let i = 0; i < 5; i++) {
+			runFrames(1);
+			deltas.push(view.viewportEl.scrollTop - prev);
+			prev = view.viewportEl.scrollTop;
+		}
+		for (let i = 1; i < deltas.length; i++) {
+			expect(deltas[i]).toBeGreaterThan(deltas[i - 1]);
+		}
+	});
 });

@@ -1,5 +1,5 @@
 import { computeCollisionFreeMagnification } from "../utils/geometry";
-import { computeAutoScrollVelocity } from "../utils/overflow";
+import { computePointerAutoScrollVelocity } from "../utils/overflow";
 import { DisposableStore } from "../utils/disposable";
 import type { GlideOutlineSettings } from "../settings";
 import type { GlideOutlineView } from "./GlideOutlineView";
@@ -18,13 +18,17 @@ interface CachedItem {
  * the rail and a label card does not flicker the outline shut. */
 const COLLAPSE_GRACE_MS = 120;
 
-/** Pointer edge auto-scroll: reactive zone depth at each list edge, px. */
-export const AUTO_SCROLL_EDGE_ZONE = 48;
-/** Pointer edge auto-scroll: peak speed in px/s at the very edge. */
+/** Pointer auto-scroll: peak speed in px/s at the very edge. */
 export const AUTO_SCROLL_MAX_SPEED = 320;
 /** Dwell before the list starts moving, so brushing an edge does not
  * immediately yank the heading the user was about to click. */
 export const AUTO_SCROLL_DWELL_MS = 140;
+/** Low-pass filter factor for pointer velocity (per pointermove sample).
+ * Higher = snappier response, lower = smoother. */
+export const POINTER_VELOCITY_SMOOTHING = 0.3;
+/** Max change of the APPLIED scroll speed, px/s per second — the
+ * acceleration cap that turns raw target speeds into damped motion. */
+export const AUTO_SCROLL_ACCEL = 1400;
 
 /**
  * Pointer-proximity expand/collapse + dock magnification.
@@ -67,6 +71,13 @@ export class MagnificationController {
 	private pointerInside = false;
 	/** Timestamp of the previous frame for time-based scroll deltas. */
 	private lastFrameTime = Number.NaN;
+	// --- Pointer-follow state (velocity-assisted auto-scroll).
+	/** Smoothed pointer vertical velocity, px/s (+ = down). */
+	private pointerVelocityY = 0;
+	/** Timestamp of the previous pointermove sample. */
+	private lastMoveTime = Number.NaN;
+	/** Currently APPLIED scroll speed after accel-cap damping, px/s. */
+	private appliedVelocity = 0;
 
 	constructor(
 		private readonly view: GlideOutlineView,
@@ -180,6 +191,9 @@ export class MagnificationController {
 		this.pointerInside = true;
 		this.cacheDirty = true;
 		this.lastPointerY = event.clientY;
+		// Fresh gesture: no carried-over velocity from a previous visit.
+		this.pointerVelocityY = 0;
+		this.lastMoveTime = event.timeStamp;
 		this.syncExpanded();
 		this.schedule();
 	};
@@ -192,9 +206,31 @@ export class MagnificationController {
 			this.syncExpanded();
 		}
 		this.pointerInside = true;
+		this.trackPointerVelocity(event);
 		this.lastPointerY = event.clientY;
 		this.schedule();
 	};
+
+	/**
+	 * Low-pass filtered pointer velocity (px/s, + = down). The filter
+	 * absorbs pointermove jitter so the assist reacts to the gesture, not
+	 * to single-event noise; the frame loop decays it between events.
+	 */
+	private trackPointerVelocity(event: PointerEvent): void {
+		const now = event.timeStamp;
+		const dtMs = now - this.lastMoveTime;
+		if (Number.isFinite(dtMs) && dtMs > 0 && dtMs < 200) {
+			const instant = ((event.clientY - this.lastPointerY) / dtMs) * 1000;
+			if (Number.isFinite(instant)) {
+				this.pointerVelocityY +=
+					(instant - this.pointerVelocityY) * POINTER_VELOCITY_SMOOTHING;
+			}
+		} else {
+			// Gap too long (or clock oddity) — treat as a new gesture.
+			this.pointerVelocityY = 0;
+		}
+		this.lastMoveTime = now;
+	}
 
 	private onPointerLeave = (event: PointerEvent): void => {
 		const related = event.relatedTarget;
@@ -289,43 +325,63 @@ export class MagnificationController {
 	};
 
 	/**
-	 * One auto-scroll step inside the coordinated RAF loop.
+	 * One pointer-follow auto-scroll step inside the coordinated RAF loop.
 	 *
-	 * Ordering per the interaction contract:
-	 *   1. mutate viewport.scrollTop (time-based, refresh-rate independent)
-	 *   2. the scroll event marks the geometry cache dirty
-	 *   3. next frame rebuilds item client centers
-	 *   4. magnification continues from the unchanged pointerY
-	 *   5. the view's scroll listener updates the edge fade state
+	 * Pipeline per frame:
+	 *   1. target = computePointerAutoScrollVelocity(position, pointer
+	 *      velocity, zones, scrollability)  — pure math
+	 *   2. appliedVelocity chases target under an ACCELERATION CAP
+	 *      (AUTO_SCROLL_ACCEL px/s²) — no per-pointermove jumps, motion
+	 *      always ramps and damps continuously
+	 *   3. mutate viewport.scrollTop (time-based, refresh-rate independent)
+	 *   4. the scroll event marks the geometry cache dirty
+	 *   5. next frame rebuilds item client centers
+	 *   6. magnification continues from the unchanged pointerY
+	 *   7. the view's scroll listener updates the edge fade state
 	 */
 	private stepAutoScroll(
 		settings: GlideOutlineSettings,
 		reduced: boolean,
 	): void {
 		// Focus-only expansion never auto-scrolls; a held pointer locks the
-		// list so the click target cannot slide away.
+		// list so the click target cannot slide away mid-click.
 		if (!this.pointerExpanded || !this.pointerInside || this.pointerHeld) {
 			this.stopAutoScroll();
 			return;
 		}
+		const now = this.win.performance.now();
+		const dt = Number.isNaN(this.lastFrameTime)
+			? 0
+			: Math.min(0.05, (now - this.lastFrameTime) / 1000);
+		this.lastFrameTime = now;
+
+		// Between pointermove events the smoothed pointer velocity decays,
+		// so a stopped pointer stops assisting within a few frames.
+		if (dt > 0) {
+			this.pointerVelocityY *= Math.max(0, 1 - dt * 6);
+			if (Math.abs(this.pointerVelocityY) < 1) this.pointerVelocityY = 0;
+		}
+
 		const overflow = this.view.getOverflowState();
-		const velocity = computeAutoScrollVelocity({
+		const target = computePointerAutoScrollVelocity({
 			pointerY: this.lastPointerY,
+			pointerVelocityY: this.pointerVelocityY,
 			viewportTop: this.viewportTop,
 			viewportBottom: this.viewportBottom,
-			edgeZone: AUTO_SCROLL_EDGE_ZONE,
 			maxSpeed: AUTO_SCROLL_MAX_SPEED,
 			canScrollUp: overflow.canScrollUp,
 			canScrollDown: overflow.canScrollDown,
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
 			reducedMotion: reduced,
 		});
-		if (velocity === 0) {
+
+		if (target === 0 && this.appliedVelocity === 0) {
 			this.stopAutoScroll();
 			return;
 		}
 		if (!this.dwellPassed) {
-			// Dwell gate: arm once; scrolling starts only after the delay.
+			// Dwell gate: arm once; motion starts only after the delay so
+			// brushing an edge never yanks the intended click target.
 			if (this.dwellTimer === 0) {
 				this.dwellTimer = this.win.setTimeout(() => {
 					this.dwellTimer = 0;
@@ -336,19 +392,25 @@ export class MagnificationController {
 			}
 			return;
 		}
-		const now = this.win.performance.now();
-		const dt = Number.isNaN(this.lastFrameTime)
-			? 0
-			: Math.min(0.05, (now - this.lastFrameTime) / 1000);
-		this.lastFrameTime = now;
+
 		if (dt > 0) {
-			this.view.viewportEl.scrollTop += velocity * dt;
+			// Acceleration-capped chase → continuous ramps and damping.
+			const maxDelta = AUTO_SCROLL_ACCEL * dt;
+			const delta = target - this.appliedVelocity;
+			this.appliedVelocity +=
+				Math.min(maxDelta, Math.max(-maxDelta, delta));
+			if (target === 0 && Math.abs(this.appliedVelocity) < 4) {
+				this.appliedVelocity = 0;
+			}
+			if (this.appliedVelocity !== 0) {
+				this.view.viewportEl.scrollTop += this.appliedVelocity * dt;
+			}
 		}
-		// Keep the loop alive while the pointer stays in an edge zone.
+		// Keep the loop alive while there is motion or a pending target.
 		this.schedule();
 	}
 
-	/** Cancel the dwell gate and time base (velocity implicitly 0). */
+	/** Cancel the dwell gate, damping state and time base (velocity → 0). */
 	private stopAutoScroll(): void {
 		if (this.dwellTimer !== 0) {
 			this.win.clearTimeout(this.dwellTimer);
@@ -356,6 +418,8 @@ export class MagnificationController {
 		}
 		this.dwellPassed = false;
 		this.lastFrameTime = Number.NaN;
+		this.appliedVelocity = 0;
+		this.pointerVelocityY = 0;
 	}
 
 	private rebuildCache(): void {
