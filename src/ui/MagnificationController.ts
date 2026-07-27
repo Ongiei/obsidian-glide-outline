@@ -1,7 +1,4 @@
-import {
-	computeMagnification,
-	defaultShiftAmplitude,
-} from "../utils/geometry";
+import { computeCollisionFreeMagnification } from "../utils/geometry";
 import { DisposableStore } from "../utils/disposable";
 import type { GlideOutlineSettings } from "../settings";
 import type { GlideOutlineView } from "./GlideOutlineView";
@@ -10,6 +7,8 @@ interface CachedItem {
 	el: HTMLElement;
 	/** Vertical center in viewport client coordinates. */
 	center: number;
+	/** Unscaled card height (measured by the view, cached here). */
+	height: number;
 	lastScale: number;
 	lastShift: number;
 }
@@ -215,15 +214,14 @@ export class MagnificationController {
 		const settings = this.getSettings();
 		const reduced =
 			this.reducedMotionQuery.matches || !settings.animationEnabled;
-		const results = computeMagnification(
+		// Pure math over cached geometry — no DOM reads inside the frame.
+		const results = computeCollisionFreeMagnification(
 			this.lastPointerY,
-			this.cache.map((entry) => entry.center),
+			this.cache,
 			settings.maxScale,
 			settings.radius,
-			{
-				reducedMotion: reduced,
-				shiftAmplitude: defaultShiftAmplitude(settings.maxScale),
-			},
+			settings.cardGap,
+			reduced,
 		);
 
 		for (let i = 0; i < this.cache.length; i++) {
@@ -249,9 +247,14 @@ export class MagnificationController {
 			// Pop-out safe instanceof (P1-1).
 			if (!(el instanceof this.win.HTMLElement)) continue;
 			const rect = el.getBoundingClientRect();
+			const key = el.dataset.key ?? "";
+			// Height comes from the view's measurement pass (offsetHeight,
+			// transform-free); fall back to the row rect for safety.
+			const measured = this.view.getBaseCardHeight(key);
 			next.push({
 				el,
 				center: rect.top + rect.height / 2,
+				height: measured > 0 ? measured : rect.height,
 				lastScale: Number.NaN,
 				lastShift: Number.NaN,
 			});

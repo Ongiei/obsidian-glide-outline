@@ -92,6 +92,109 @@ export function computeMagnification(
 	});
 }
 
+/** One outline row as seen by the collision solver. */
+export interface CollisionLayoutItem {
+	/** Vertical center of the row (any consistent coordinate system). */
+	center: number;
+	/** Unscaled height of the visual card in px. */
+	height: number;
+}
+
+export interface CollisionLayoutResult {
+	scale: number;
+	translateY: number;
+}
+
+/**
+ * Collision-free dock magnification (pure function).
+ *
+ * 1. Every item gets a cosine-falloff scale from its distance to the pointer.
+ * 2. An anchored layout keeps one item at its original center and pushes
+ *    neighbours outward just enough that scaled half-heights plus
+ *    `minimumGap` never overlap (never pulling anything inward).
+ * 3. To stay continuous while the pointer sweeps, the final layout is a
+ *    linear blend of the two anchored layouts surrounding the pointer.
+ *    The separation constraints are linear inequalities (an intersection of
+ *    half-spaces, hence a convex set), so any convex combination of two
+ *    feasible layouts is itself feasible — the invariant survives blending.
+ *
+ * Guarantees for any adjacent pair (i, i+1):
+ *   finalCenter(i+1) - finalCenter(i)
+ *     >= scaledHeight(i)/2 + scaledHeight(i+1)/2 + minimumGap
+ *
+ * Items must be ordered top-to-bottom (ascending center).
+ */
+export function computeCollisionFreeMagnification(
+	pointerY: number,
+	items: readonly CollisionLayoutItem[],
+	maxScale: number,
+	radius: number,
+	minimumGap: number,
+	reducedMotion?: boolean,
+): CollisionLayoutResult[] {
+	const n = items.length;
+	if (n === 0) return [];
+	if (reducedMotion || !Number.isFinite(pointerY)) {
+		return items.map(() => ({ scale: 1, translateY: 0 }));
+	}
+	const gap = Math.max(0, minimumGap);
+
+	// 1. Scales and scaled heights. Scales are rounded *before* the solve so
+	// the published invariant holds exactly for the values consumers see.
+	const scales = new Array<number>(n);
+	const scaledHeights = new Array<number>(n);
+	for (let i = 0; i < n; i++) {
+		const scale = round3(
+			computeScale(items[i].center - pointerY, maxScale, radius),
+		);
+		scales[i] = scale;
+		scaledHeights[i] = Math.max(0, items[i].height) * scale;
+	}
+
+	// 2. Anchored solve: `anchor` keeps its original center; constraints
+	// propagate outward without ever pulling items toward the anchor.
+	const solve = (anchor: number): number[] => {
+		const centers = new Array<number>(n);
+		centers[anchor] = items[anchor].center;
+		for (let i = anchor - 1; i >= 0; i--) {
+			const required = scaledHeights[i] / 2 + scaledHeights[i + 1] / 2 + gap;
+			centers[i] = Math.min(items[i].center, centers[i + 1] - required);
+		}
+		for (let i = anchor + 1; i < n; i++) {
+			const required = scaledHeights[i - 1] / 2 + scaledHeights[i] / 2 + gap;
+			centers[i] = Math.max(items[i].center, centers[i - 1] + required);
+		}
+		return centers;
+	};
+
+	// 3. Continuous anchoring: blend the two anchored layouts that surround
+	// the pointer. A hard "nearest center" switch would teleport items when
+	// the pointer crosses the midpoint between two rows.
+	let centers: number[];
+	if (pointerY <= items[0].center) {
+		centers = solve(0);
+	} else if (pointerY >= items[n - 1].center) {
+		centers = solve(n - 1);
+	} else {
+		let k = 0;
+		while (k + 1 < n && items[k + 1].center <= pointerY) k++;
+		const span = items[k + 1].center - items[k].center;
+		const t = span > 0 ? (pointerY - items[k].center) / span : 0;
+		if (t <= 0) {
+			centers = solve(k);
+		} else {
+			const lower = solve(k);
+			const upper = solve(k + 1);
+			centers = lower.map((c, i) => c + (upper[i] - c) * t);
+		}
+	}
+
+	return items.map((item, i) => ({
+		scale: scales[i],
+		translateY: round2(centers[i] - item.center),
+	}));
+}
+
 /**
  * Select the active heading index for a given activation line.
  * Returns the last heading whose top is at or above the activation line;
