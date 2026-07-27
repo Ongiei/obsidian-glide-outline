@@ -45,12 +45,14 @@
 	--glide-label-gap: 6px;
 }
 
+/* Horizontal offset keeps the rail clear of the editor scrollbar (right)
+   and mirrors the same semantics on the left. Written from settings. */
 .glide-outline-root--right {
-	right: 0;
+	right: var(--glide-horizontal-offset, 12px);
 }
 
 .glide-outline-root--left {
-	left: 0;
+	left: var(--glide-horizontal-offset, 12px);
 }
 
 /* Empty state: no visible headings → no rail, no hit zone. */
@@ -197,7 +199,13 @@
 .glide-outline-motion {
 	display: flex;
 	align-items: center;
-	column-gap: var(--glide-label-gap, 6px);
+	/* Hierarchy staircase: deeper headings sit further from the rail —
+	   i.e. toward the text body on BOTH sides, because the flex direction
+	   flips with the outline position. Static spacing, deliberately kept
+	   out of the reveal/motion transforms so it never fights animation. */
+	column-gap: calc(
+		var(--glide-label-gap, 6px) + var(--glide-level-indent, 0px)
+	);
 	height: 100%;
 	transform: translateY(var(--glide-shift-y, 0px));
 	transition: transform 140ms cubic-bezier(0.33, 0, 0.2, 1);
@@ -232,7 +240,7 @@
 	top: 50%;
 	translate: 0 -50%;
 	height: 2px;
-	width: var(--glide-marker-size, 12px);
+	width: var(--glide-line-size, 12px);
 	border-radius: 2px;
 	background-color: var(--text-faint);
 	transition:
@@ -248,34 +256,50 @@
 	left: 9px;
 }
 
+/* Line length and dot diameter are INDEPENDENT per-level scales — a dot
+   clamped to min(size, 7px) would make H1–H4 indistinguishable. */
 .glide-outline-item[data-level="1"] {
-	--glide-marker-size: 20px;
+	--glide-line-size: 20px;
+	--glide-dot-size: 8px;
 }
 .glide-outline-item[data-level="2"] {
-	--glide-marker-size: 16px;
+	--glide-line-size: 16px;
+	--glide-dot-size: 7px;
 }
 .glide-outline-item[data-level="3"] {
-	--glide-marker-size: 12px;
+	--glide-line-size: 12px;
+	--glide-dot-size: 6px;
 }
 .glide-outline-item[data-level="4"] {
-	--glide-marker-size: 10px;
+	--glide-line-size: 10px;
+	--glide-dot-size: 5px;
 }
 .glide-outline-item[data-level="5"] {
-	--glide-marker-size: 8px;
+	--glide-line-size: 8px;
+	--glide-dot-size: 4px;
 }
 .glide-outline-item[data-level="6"] {
-	--glide-marker-size: 6px;
+	--glide-line-size: 6px;
+	--glide-dot-size: 3px;
 }
 
-/* Dot markers reuse the per-level size variable for both dimensions. */
+/* Dot markers: visual size shrinks with depth, but the HIT AREA is the
+   marker slot itself (full rail width × full row height) — small dots
+   never reduce the clickable target. */
 .glide-outline-root--marker-dot .glide-outline-marker::before {
-	height: min(var(--glide-marker-size, 6px), 7px);
-	width: min(var(--glide-marker-size, 6px), 7px);
+	height: var(--glide-dot-size, 6px);
+	width: var(--glide-dot-size, 6px);
 	border-radius: 50%;
 }
 
 .glide-outline-item.is-active .glide-outline-marker::before {
 	background-color: var(--interactive-accent);
+}
+
+/* Active dot: accent + slight scale. `scale` is a paint-only transform on
+   an absolutely positioned pseudo-element — layout size is unchanged. */
+.glide-outline-root--marker-dot .glide-outline-item.is-active .glide-outline-marker::before {
+	scale: 1.3;
 }
 
 .glide-outline-root.is-expanded .glide-outline-marker::before {
@@ -359,8 +383,20 @@
 	box-shadow: var(--shadow-s);
 }
 
+/* Text shadow: the complete CSS value (offset/blur/rgba color) is built in
+   TypeScript from the structured settings and published as one variable. */
 .glide-outline-root--text-shadow .glide-outline-label {
-	text-shadow: 0 1px 2px var(--background-primary);
+	text-shadow: var(--glide-text-shadow, none);
+}
+
+/* MarkdownRenderer output (code, links, bold…) must keep the shadow even
+   when theme rules would reset it on those elements. */
+.glide-outline-root--text-shadow .glide-outline-label code,
+.glide-outline-root--text-shadow .glide-outline-label a,
+.glide-outline-root--text-shadow .glide-outline-label strong,
+.glide-outline-root--text-shadow .glide-outline-label em,
+.glide-outline-root--text-shadow .glide-outline-label mark {
+	text-shadow: inherit;
 }
 
 /* Pure text mode: opacity 0 + no border + no shadow → the card element
@@ -419,6 +455,44 @@
 .glide-outline-item[data-level="6"] .glide-outline-label {
 	font-size: 0.88em;
 	color: var(--text-faint);
+}
+
+/* --------------------------------------------------------------------------
+   Edge fades: soft hints that more headings are hidden beyond an edge.
+   Implemented as a MASK on the viewport — masks are pure paint, they can
+   never capture the pointer, never add layout size and never clip
+   horizontally (the gradient spans the full width). The stop variables
+   collapse to 0 when an edge cannot scroll, so:
+     no overflow          → no fade at all
+     only scrollable down → bottom fade only
+     only scrollable up   → top fade only
+     both                 → both fades
+   -------------------------------------------------------------------------- */
+.glide-outline-root--edge-fade .glide-outline-viewport {
+	--glide-fade-top-stop: 0px;
+	--glide-fade-bottom-stop: 0px;
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent 0,
+		black var(--glide-fade-top-stop),
+		black calc(100% - var(--glide-fade-bottom-stop)),
+		transparent 100%
+	);
+	mask-image: linear-gradient(
+		to bottom,
+		transparent 0,
+		black var(--glide-fade-top-stop),
+		black calc(100% - var(--glide-fade-bottom-stop)),
+		transparent 100%
+	);
+}
+
+.glide-outline-root--edge-fade.glide-outline-root--fade-top .glide-outline-viewport {
+	--glide-fade-top-stop: var(--glide-edge-fade-size, 28px);
+}
+
+.glide-outline-root--edge-fade.glide-outline-root--fade-bottom .glide-outline-viewport {
+	--glide-fade-bottom-stop: var(--glide-edge-fade-size, 28px);
 }
 
 /* --------------------------------------------------------------------------

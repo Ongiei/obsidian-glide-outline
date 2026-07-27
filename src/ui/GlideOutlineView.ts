@@ -1,9 +1,12 @@
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
+import { textShadowCss } from "../settings";
 import {
 	computeResponsiveWidth,
 	computeVerticalSafeSpace,
 } from "../utils/layout";
+import { computeOverflowState } from "../utils/overflow";
+import type { OverflowState } from "../utils/overflow";
 
 export interface GlideOutlineViewHandlers {
 	onJump(item: HeadingItem): void;
@@ -76,6 +79,14 @@ export class GlideOutlineView {
 	private followEnabled = true;
 	private metricsScheduled = false;
 	private disposed = false;
+	private overflowState: OverflowState = {
+		hasOverflow: false,
+		canScrollUp: false,
+		canScrollDown: false,
+	};
+	private readonly onViewportScroll = (): void => {
+		this.updateOverflowState();
+	};
 
 	constructor(
 		private readonly hostEl: HTMLElement,
@@ -102,6 +113,12 @@ export class GlideOutlineView {
 		this.rootEl.appendChild(this.hitZoneEl);
 		this.rootEl.appendChild(this.viewportEl);
 		hostEl.appendChild(this.rootEl);
+
+		// Edge fades track the scroll position (passive — no work per frame
+		// beyond three cheap reads and two class toggles).
+		this.viewportEl.addEventListener("scroll", this.onViewportScroll, {
+			passive: true,
+		});
 
 		const win = this.doc.defaultView;
 		if (win && typeof win.ResizeObserver === "function") {
@@ -236,6 +253,12 @@ export class GlideOutlineView {
 		root.style.setProperty("--glide-label-gap", `${LABEL_GAP}px`);
 		root.style.setProperty("--glide-font-size", `${s.baseFontSize}px`);
 		root.style.setProperty("--glide-vertical-offset", `${s.verticalOffset}px`);
+		root.style.setProperty(
+			"--glide-horizontal-offset",
+			`${s.horizontalOffset}px`,
+		);
+		root.style.setProperty("--glide-edge-fade-size", `${s.edgeFadeSize}px`);
+		root.classList.toggle("glide-outline-root--edge-fade", s.edgeFadeEnabled);
 
 		// Label card appearance.
 		const card = s.card;
@@ -245,11 +268,26 @@ export class GlideOutlineView {
 		root.style.setProperty("--glide-card-padding-y", `${card.paddingY}px`);
 		root.classList.toggle("glide-outline-root--card-border", card.border);
 		root.classList.toggle("glide-outline-root--card-shadow", card.shadow);
-		root.classList.toggle("glide-outline-root--text-shadow", card.textShadow);
+		// Text shadow: the full CSS value is built in TS so color, opacity,
+		// blur and offsets are all configurable from one variable.
+		root.classList.toggle(
+			"glide-outline-root--text-shadow",
+			card.textShadow.enabled,
+		);
+		root.style.setProperty("--glide-text-shadow", textShadowCss(card.textShadow));
 		root.classList.toggle(
 			"glide-outline-root--pure-text",
 			card.opacity === 0 && !card.border && !card.shadow,
 		);
+
+		// Hierarchy staircase: per-item indent is (level - 1) × this step.
+		for (const record of this.itemRecords.values()) {
+			const level = Number(record.rowEl.dataset.level ?? "1");
+			record.buttonEl.style.setProperty(
+				"--glide-level-indent",
+				`${(Math.max(1, level) - 1) * s.levelIndent}px`,
+			);
+		}
 
 		this.applyResponsiveWidth();
 		// Font size / padding / border / markdown changes alter card boxes.
@@ -259,11 +297,40 @@ export class GlideOutlineView {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.viewportEl.removeEventListener("scroll", this.onViewportScroll);
 		this.hostResizeObserver?.disconnect();
 		this.cardResizeObserver?.disconnect();
 		this.itemRecords.clear();
 		this.rootEl.remove();
 		this.hostEl.classList.remove(HOST_CLASS);
+	}
+
+	/** Current overflow / scrollability of the outline viewport. */
+	getOverflowState(): OverflowState {
+		return this.overflowState;
+	}
+
+	/**
+	 * Re-evaluate overflow and toggle the edge fade classes. Runs on scroll,
+	 * after measurement passes and after responsive width changes.
+	 */
+	updateOverflowState(): void {
+		if (this.disposed) return;
+		const viewport = this.viewportEl;
+		const state = computeOverflowState({
+			scrollTop: viewport.scrollTop,
+			clientHeight: viewport.clientHeight,
+			scrollHeight: viewport.scrollHeight,
+		});
+		this.overflowState = state;
+		this.rootEl.classList.toggle(
+			"glide-outline-root--fade-top",
+			state.canScrollUp,
+		);
+		this.rootEl.classList.toggle(
+			"glide-outline-root--fade-bottom",
+			state.canScrollDown,
+		);
 	}
 
 	/** Horizontal room reserved for the shadow in the current settings. */
@@ -278,6 +345,11 @@ export class GlideOutlineView {
 	private applyResponsiveWidth(): void {
 		if (this.disposed) return;
 		const s = this.getSettings();
+		// Deepest VISIBLE heading level drives the worst-case indent.
+		let deepestLevel = 1;
+		for (const item of this.items) {
+			if (item.level > deepestLevel) deepestLevel = item.level;
+		}
 		const { rootWidth, labelContentWidth, compact } = computeResponsiveWidth({
 			hostWidth: this.hostEl.clientWidth || 0,
 			maxLabelWidth: s.maxLabelWidth,
@@ -289,6 +361,8 @@ export class GlideOutlineView {
 			shadowAllowance: this.shadowAllowance(),
 			safeSlack: SAFE_SLACK,
 			compactThreshold: COMPACT_THRESHOLD,
+			horizontalOffset: s.horizontalOffset,
+			maxLevelIndent: (deepestLevel - 1) * s.levelIndent,
 		});
 		this.rootEl.style.setProperty("--glide-root-width", `${rootWidth}px`);
 		this.rootEl.style.setProperty(
@@ -354,6 +428,9 @@ export class GlideOutlineView {
 			shadowAllowance: this.shadowAllowance(),
 		});
 		this.rootEl.style.setProperty("--glide-viewport-pad", `${pad}px`);
+
+		// Row heights define scrollHeight — fades depend on the fresh value.
+		this.updateOverflowState();
 
 		if (changed) this.handlers.onMetricsChanged?.();
 	}
@@ -422,6 +499,12 @@ export class GlideOutlineView {
 		record.rowEl.dataset.level = String(item.level);
 		record.rowEl.dataset.key = item.key;
 		buttonEl.setAttribute("aria-label", `H${item.level}: ${item.text}`);
+		// Hierarchy staircase indent — static per level, so it lives on the
+		// button (not inside the reveal transform, which animates).
+		buttonEl.style.setProperty(
+			"--glide-level-indent",
+			`${(item.level - 1) * this.getSettings().levelIndent}px`,
+		);
 
 		const settings = this.getSettings();
 		const rich = settings.renderMarkdown && !!this.handlers.renderLabel;
