@@ -1,6 +1,6 @@
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
-import { textShadowCss } from "../settings";
+import { textEffectHaloCss, textEffectStrokeCss } from "../settings";
 import {
 	computeResponsiveWidth,
 	computeVerticalSafeSpace,
@@ -30,11 +30,14 @@ export const MARKER_MIN_HIT_HEIGHT = 18;
 export const SHADOW_ALLOWANCE = 12;
 /** Card border width per side when the border is enabled. */
 export const CARD_BORDER_WIDTH = 1;
+/** Width the H1–H6 badge (incl. its gap) adds to the card, px. */
+export const LEVEL_BADGE_ALLOWANCE = 26;
 
 interface ItemRecord {
 	rowEl: HTMLElement;
 	buttonEl: HTMLButtonElement;
 	cardEl: HTMLElement;
+	badgeEl: HTMLElement;
 	labelEl: HTMLElement;
 	/** Unscaled card height from the last measurement pass. */
 	baseCardHeight: number;
@@ -268,16 +271,28 @@ export class GlideOutlineView {
 		root.style.setProperty("--glide-card-padding-y", `${card.paddingY}px`);
 		root.classList.toggle("glide-outline-root--card-border", card.border);
 		root.classList.toggle("glide-outline-root--card-shadow", card.shadow);
-		// Text shadow: the full CSS value is built in TS so color, opacity,
-		// blur and offsets are all configurable from one variable.
+		// Text effect: the CSS values are built in TS. Halo is a symmetric
+		// multi-layer glow (never a directional drop shadow); stroke is a
+		// hairline -webkit-text-stroke. Exactly one mode class is active.
+		const effect = card.textEffect;
 		root.classList.toggle(
-			"glide-outline-root--text-shadow",
-			card.textShadow.enabled,
+			"glide-outline-root--text-halo",
+			effect.mode === "halo",
 		);
-		root.style.setProperty("--glide-text-shadow", textShadowCss(card.textShadow));
+		root.classList.toggle(
+			"glide-outline-root--text-stroke",
+			effect.mode === "stroke",
+		);
+		root.style.setProperty("--glide-text-halo", textEffectHaloCss(effect));
+		root.style.setProperty("--glide-text-stroke", textEffectStrokeCss(effect));
 		root.classList.toggle(
 			"glide-outline-root--pure-text",
 			card.opacity === 0 && !card.border && !card.shadow,
+		);
+		// Hierarchy badge (primary level cue).
+		root.classList.toggle(
+			"glide-outline-root--level-badge",
+			s.levelIndicatorStyle === "badge",
 		);
 
 		// Hierarchy staircase: per-item indent is (level - 1) × this step.
@@ -363,6 +378,8 @@ export class GlideOutlineView {
 			compactThreshold: COMPACT_THRESHOLD,
 			horizontalOffset: s.horizontalOffset,
 			maxLevelIndent: (deepestLevel - 1) * s.levelIndent,
+			badgeAllowance:
+				s.levelIndicatorStyle === "badge" ? LEVEL_BADGE_ALLOWANCE : 0,
 		});
 		this.rootEl.style.setProperty("--glide-root-width", `${rootWidth}px`);
 		this.rootEl.style.setProperty(
@@ -462,9 +479,17 @@ export class GlideOutlineView {
 		const card = this.doc.createElement("span");
 		card.className = "glide-outline-card";
 
+		// Edge level badge (H1…H6). DOM order is badge → label; CSS flips
+		// the card's flex direction so the badge always sits on the
+		// rail-facing side (right edge on the right outline, left on left).
+		const badge = this.doc.createElement("span");
+		badge.className = "glide-outline-level-badge";
+		badge.setAttribute("aria-hidden", "true");
+
 		const label = this.doc.createElement("span");
 		label.className = "glide-outline-label";
 
+		card.appendChild(badge);
 		card.appendChild(label);
 		reveal.appendChild(card);
 		motion.appendChild(marker);
@@ -485,6 +510,7 @@ export class GlideOutlineView {
 			rowEl: row,
 			buttonEl: button,
 			cardEl: card,
+			badgeEl: badge,
 			labelEl: label,
 			baseCardHeight: 0,
 			renderedContent: "",
@@ -494,6 +520,9 @@ export class GlideOutlineView {
 
 	private updateItemRecord(record: ItemRecord, item: HeadingItem): void {
 		const { buttonEl, labelEl } = record;
+		if (record.badgeEl.textContent !== `H${item.level}`) {
+			record.badgeEl.textContent = `H${item.level}`;
+		}
 		buttonEl.dataset.level = String(item.level);
 		buttonEl.dataset.key = item.key;
 		record.rowEl.dataset.level = String(item.level);

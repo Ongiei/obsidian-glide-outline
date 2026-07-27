@@ -17,6 +17,7 @@ const BASE = {
 	compactThreshold: 60,
 	horizontalOffset: 0,
 	maxLevelIndent: 0,
+	badgeAllowance: 0,
 };
 
 /** Full magnified card budget for a given result (mirrors the CSS model). */
@@ -215,6 +216,33 @@ describe("computeResponsiveWidth", () => {
 			maxLevelIndent: -5,
 		});
 		expect(dirty).toEqual(clean);
+	});
+
+	it("budgets the level badge inside the card on a wide host", () => {
+		const off = computeResponsiveWidth({ ...BASE, hostWidth: 1200 });
+		const on = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 1200,
+			badgeAllowance: 26,
+		});
+		// Badge widens the card; the text budget itself is untouched.
+		expect(on.labelContentWidth).toBe(off.labelContentWidth);
+		expect(on.rootWidth).toBe(
+			off.rootWidth + Math.ceil((240 + 14 + 26) * 1.25) - Math.ceil((240 + 14) * 1.25),
+		);
+	});
+
+	it("shrinks the text budget, not the badge, on a narrow pane", () => {
+		const off = computeResponsiveWidth({ ...BASE, hostWidth: 260 });
+		const on = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 260,
+			badgeAllowance: 26,
+		});
+		// Same clamped root; the badge takes its room out of the text.
+		expect(on.rootWidth).toBe(off.rootWidth);
+		expect(on.labelContentWidth).toBeLessThan(off.labelContentWidth);
+		expect(on.labelContentWidth).toBeGreaterThanOrEqual(0);
 	});
 
 	it("is side-agnostic (left and right use the same budget)", () => {

@@ -27,6 +27,12 @@ export interface ResponsiveWidthInput {
 	 * the text body, so the widest layout must budget for it.
 	 */
 	maxLevelIndent: number;
+	/**
+	 * Width the H1–H6 edge badge (incl. its gap) adds INSIDE the card,
+	 * px. 0 when the badge is disabled. Budgeted so a badge never eats
+	 * into the text ellipsis width.
+	 */
+	badgeAllowance: number;
 }
 
 export interface ResponsiveWidthResult {
@@ -64,7 +70,9 @@ export function computeResponsiveWidth(
 	const scale = Math.max(1, input.maxScale);
 	const offset = Math.max(0, input.horizontalOffset);
 	const maxLevelIndent = Math.max(0, input.maxLevelIndent);
-	const chromeX = 2 * input.cardPaddingX + 2 * input.cardBorderWidth;
+	const badgeAllowance = Math.max(0, input.badgeAllowance);
+	const chromeX =
+		2 * input.cardPaddingX + 2 * input.cardBorderWidth + badgeAllowance;
 	const cardBaseWidth = input.maxLabelWidth + chromeX;
 	const idealWidth =
 		input.railWidth +

@@ -341,7 +341,9 @@
    box-sizing: border-box → the width solver budgets padding and border.
    -------------------------------------------------------------------------- */
 .glide-outline-card {
-	display: block;
+	display: flex;
+	align-items: baseline;
+	column-gap: 6px;
 	box-sizing: border-box;
 	width: max-content;
 	max-width: 100%;
@@ -364,14 +366,47 @@
 	pointer-events: auto;
 }
 
+/* DOM order is badge → label. The flex direction flips with the outline
+   side so the badge ALWAYS sits on the rail-facing (editor-edge) side:
+   right outline → badge visually right of the label, left outline →
+   badge visually left. It never floats outside the card. */
 .glide-outline-root--right .glide-outline-card {
+	flex-direction: row-reverse;
 	transform-origin: right center;
 	text-align: right;
 }
 
 .glide-outline-root--left .glide-outline-card {
+	flex-direction: row;
 	transform-origin: left center;
 	text-align: left;
+}
+
+/* --------------------------------------------------------------------------
+   Edge level badge: compact H1…H6 tag, the PRIMARY hierarchy cue.
+   Small, faint and separated from the label so it never competes with
+   the heading text. Rendered only when the setting enables it.
+   -------------------------------------------------------------------------- */
+.glide-outline-level-badge {
+	display: none;
+	flex: none;
+	font-size: 0.68em;
+	font-weight: 600;
+	line-height: 1.4;
+	letter-spacing: 0.02em;
+	font-variant-numeric: tabular-nums;
+	color: var(--text-faint);
+	opacity: 0.9;
+	pointer-events: none;
+}
+
+.glide-outline-root--level-badge .glide-outline-level-badge {
+	display: inline-block;
+}
+
+.glide-outline-item.is-active .glide-outline-level-badge {
+	color: var(--interactive-accent);
+	opacity: 0.75;
 }
 
 /* Card appearance modifiers (settings-driven). */
@@ -432,6 +467,48 @@
 	display: none;
 }
 
+/* --------------------------------------------------------------------------
+   Level typography: ONE systematic H1→H6 ramp (weight ↓, size ↓, color
+   fades muted → faint with depth) instead of ad-hoc endpoints. Together
+   with the edge badge this is the primary hierarchy expression; the
+   staircase indent is a legacy option that now defaults to 0.
+   Ordering matters: the active/hover color rules FOLLOW this block, so an
+   active H6 keeps its size/weight but wins the accent color — hierarchy
+   is never fully lost on the active item.
+   -------------------------------------------------------------------------- */
+.glide-outline-item[data-level="1"] .glide-outline-label {
+	font-weight: 700;
+	font-size: 1em;
+	color: var(--text-normal);
+}
+.glide-outline-item[data-level="2"] .glide-outline-label {
+	font-weight: 600;
+	font-size: 0.98em;
+	color: var(--text-muted);
+}
+.glide-outline-item[data-level="3"] .glide-outline-label {
+	font-weight: 500;
+	font-size: 0.96em;
+	color: var(--text-muted);
+}
+.glide-outline-item[data-level="4"] .glide-outline-label {
+	font-weight: 500;
+	font-size: 0.94em;
+	color: var(--text-muted);
+}
+.glide-outline-item[data-level="5"] .glide-outline-label {
+	font-weight: 400;
+	font-size: 0.92em;
+	color: var(--text-muted);
+}
+.glide-outline-item[data-level="6"] .glide-outline-label {
+	font-weight: 400;
+	font-size: 0.9em;
+	color: var(--text-faint);
+}
+
+/* Active / hover colors override the ramp color (same specificity, later
+   in the file) but never its size or weight. */
 .glide-outline-item.is-active .glide-outline-label {
 	color: var(--interactive-accent);
 }
@@ -442,19 +519,6 @@
 
 .glide-outline-item.is-active:hover .glide-outline-label {
 	color: var(--interactive-accent);
-}
-
-/* Level typography: weight fades with depth. */
-.glide-outline-item[data-level="1"] .glide-outline-label {
-	font-weight: 700;
-}
-.glide-outline-item[data-level="2"] .glide-outline-label {
-	font-weight: 600;
-}
-.glide-outline-item[data-level="5"] .glide-outline-label,
-.glide-outline-item[data-level="6"] .glide-outline-label {
-	font-size: 0.88em;
-	color: var(--text-faint);
 }
 
 /* --------------------------------------------------------------------------
