@@ -4,24 +4,36 @@ import type GlideOutlinePlugin from "./main";
 
 export type OutlinePosition = "left" | "right";
 export type MarkerStyle = "line" | "dot";
+/**
+ * How heading depth is displayed next to the label.
+ * Structured as an enum (not a boolean) so future styles — numbers,
+ * ticks, roman numerals — can be added without another migration.
+ */
+export type LevelIndicatorStyle = "none" | "badge";
+/**
+ * Label text enhancement for readability over busy backgrounds.
+ * - "none":   plain text (default — no dirty edges, ever)
+ * - "halo":   soft omnidirectional glow (multi-layer, no offset)
+ * - "stroke": hairline outline via -webkit-text-stroke
+ * A directional drop shadow is deliberately NOT offered any more: it read
+ * as smudged edges, especially with bold CJK glyphs.
+ */
+export type TextEffectMode = "none" | "halo" | "stroke";
 
 /**
- * Structured text shadow. Replaces the old `textShadow: boolean`; legacy
- * boolean values are migrated in `normalizeSettings` (enabled = oldBoolean,
- * every other field falls back to the defaults below).
+ * Structured text effect. Replaces both the legacy `textShadow: boolean`
+ * and the interim `TextShadowSettings` object; `normalizeTextEffect`
+ * migrates each older shape (boolean → none/halo, structured shadow →
+ * carries color/opacity/blur over).
  */
-export interface TextShadowSettings {
-	enabled: boolean;
-	/** Hex color, `#rgb` or `#rrggbb`. Invalid values fall back to default. */
+export interface TextEffectSettings {
+	mode: TextEffectMode;
+	/** Halo / stroke color; hex `#rgb` or `#rrggbb`. */
 	color: string;
-	/** Shadow alpha in percent, 0–100. */
+	/** Effect alpha in percent, 0–100. */
 	opacity: number;
-	/** Blur radius in px. */
+	/** Halo radius in px — drives all three glow layers. */
 	blur: number;
-	/** Horizontal offset in px (negative = left). */
-	offsetX: number;
-	/** Vertical offset in px (negative = up). */
-	offsetY: number;
 }
 
 /** Visual style of the label card behind each heading. */
@@ -38,8 +50,8 @@ export interface LabelAppearanceSettings {
 	paddingX: number;
 	/** Vertical padding in px. */
 	paddingY: number;
-	/** Text shadow behind label text (readability on busy backgrounds). */
-	textShadow: TextShadowSettings;
+	/** Label text enhancement (halo / stroke) for busy backgrounds. */
+	textEffect: TextEffectSettings;
 }
 
 export interface GlideOutlineSettings {
@@ -56,8 +68,13 @@ export interface GlideOutlineSettings {
 	/**
 	 * px added toward the text body per heading depth step:
 	 * H1 = 0, H2 = 1×, … H6 = 5× levelIndent.
+	 * LEGACY / advanced: superseded by the edge level badge as the primary
+	 * hierarchy cue — the default is now 0 (off). Kept functional so
+	 * existing vaults that liked the staircase keep it.
 	 */
 	levelIndent: number;
+	/** Primary hierarchy cue: H1…H6 badge on the rail-facing card edge. */
+	levelIndicatorStyle: LevelIndicatorStyle;
 	/** Soft fade at the top/bottom edges when the list overflows. */
 	edgeFadeEnabled: boolean;
 	/** Fade size in px. */
@@ -86,13 +103,11 @@ export interface GlideOutlineSettings {
 	card: LabelAppearanceSettings;
 }
 
-export const DEFAULT_TEXT_SHADOW: TextShadowSettings = {
-	enabled: false,
+export const DEFAULT_TEXT_EFFECT: TextEffectSettings = {
+	mode: "none",
 	color: "#000000",
-	opacity: 55,
-	blur: 4,
-	offsetX: 0,
-	offsetY: 1,
+	opacity: 45,
+	blur: 3,
 };
 
 export const DEFAULT_CARD: LabelAppearanceSettings = {
@@ -102,7 +117,7 @@ export const DEFAULT_CARD: LabelAppearanceSettings = {
 	shadow: false,
 	paddingX: 7,
 	paddingY: 1,
-	textShadow: { ...DEFAULT_TEXT_SHADOW },
+	textEffect: { ...DEFAULT_TEXT_EFFECT },
 };
 
 export const DEFAULT_SETTINGS: GlideOutlineSettings = {
@@ -110,7 +125,9 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	position: "right",
 	verticalOffset: 0,
 	horizontalOffset: 12,
-	levelIndent: 3,
+	// The badge replaced the staircase as the default hierarchy cue.
+	levelIndent: 0,
+	levelIndicatorStyle: "badge",
 	edgeFadeEnabled: true,
 	edgeFadeSize: 28,
 	pointerAutoScroll: true,
@@ -125,7 +142,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	renderMarkdown: false,
 	card: {
 		...DEFAULT_CARD,
-		textShadow: { ...DEFAULT_TEXT_SHADOW },
+		textEffect: { ...DEFAULT_TEXT_EFFECT },
 	},
 };
 
@@ -143,9 +160,8 @@ export const RANGES = {
 	cardRadius: { min: 0, max: 16 },
 	cardPaddingX: { min: 0, max: 18 },
 	cardPaddingY: { min: 0, max: 10 },
-	textShadowOpacity: { min: 0, max: 100 },
-	textShadowBlur: { min: 0, max: 12 },
-	textShadowOffset: { min: -6, max: 6 },
+	textEffectOpacity: { min: 0, max: 100 },
+	textEffectBlur: { min: 1, max: 8 },
 } as const;
 
 function clamp(value: unknown, min: number, max: number, fallback: number): number {
@@ -165,64 +181,99 @@ function hexColor(value: unknown, fallback: string): string {
 		: fallback;
 }
 
-/**
- * Migrate + normalize the text shadow.
- * Legacy `data.json` stored `card.textShadow` as a boolean — that maps to
- * `enabled` and every other field takes the default.
- */
-export function normalizeTextShadow(raw: unknown): TextShadowSettings {
-	if (typeof raw === "boolean") {
-		return { ...DEFAULT_TEXT_SHADOW, enabled: raw };
-	}
-	const data = (raw ?? {}) as Partial<TextShadowSettings>;
+function hexToRgb(color: string): { r: number; g: number; b: number } {
+	const hex = color.length === 4
+		? `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}`
+		: color;
 	return {
-		enabled: bool(data.enabled, DEFAULT_TEXT_SHADOW.enabled),
-		color: hexColor(data.color, DEFAULT_TEXT_SHADOW.color),
+		r: parseInt(hex.slice(1, 3), 16),
+		g: parseInt(hex.slice(3, 5), 16),
+		b: parseInt(hex.slice(5, 7), 16),
+	};
+}
+
+function rgba(color: string, alpha: number): string {
+	const { r, g, b } = hexToRgb(color);
+	const a = Math.round(Math.max(0, Math.min(1, alpha)) * 1000) / 1000;
+	return `rgba(${r}, ${g}, ${b}, ${a})`;
+}
+
+/**
+ * Migrate + normalize the text effect. Three persisted generations:
+ *   1. boolean `textShadow`         → mode "halo"/"none"
+ *   2. structured `textShadow` obj  → mode from `enabled`, carries
+ *      color/opacity/blur (offsets are dropped — directional shadows are
+ *      exactly what the redesign removes)
+ *   3. current `textEffect` object  → validated field by field
+ */
+export function normalizeTextEffect(raw: unknown): TextEffectSettings {
+	if (typeof raw === "boolean") {
+		return { ...DEFAULT_TEXT_EFFECT, mode: raw ? "halo" : "none" };
+	}
+	const data = (raw ?? {}) as Record<string, unknown>;
+	const mode: TextEffectMode =
+		data.mode === "halo" || data.mode === "stroke" || data.mode === "none"
+			? data.mode
+			: typeof data.enabled === "boolean"
+				? data.enabled
+					? "halo"
+					: "none"
+				: DEFAULT_TEXT_EFFECT.mode;
+	return {
+		mode,
+		color: hexColor(data.color, DEFAULT_TEXT_EFFECT.color),
 		opacity: clamp(
 			data.opacity,
-			RANGES.textShadowOpacity.min,
-			RANGES.textShadowOpacity.max,
-			DEFAULT_TEXT_SHADOW.opacity,
+			RANGES.textEffectOpacity.min,
+			RANGES.textEffectOpacity.max,
+			DEFAULT_TEXT_EFFECT.opacity,
 		),
 		blur: clamp(
 			data.blur,
-			RANGES.textShadowBlur.min,
-			RANGES.textShadowBlur.max,
-			DEFAULT_TEXT_SHADOW.blur,
-		),
-		offsetX: clamp(
-			data.offsetX,
-			RANGES.textShadowOffset.min,
-			RANGES.textShadowOffset.max,
-			DEFAULT_TEXT_SHADOW.offsetX,
-		),
-		offsetY: clamp(
-			data.offsetY,
-			RANGES.textShadowOffset.min,
-			RANGES.textShadowOffset.max,
-			DEFAULT_TEXT_SHADOW.offsetY,
+			RANGES.textEffectBlur.min,
+			RANGES.textEffectBlur.max,
+			DEFAULT_TEXT_EFFECT.blur,
 		),
 	};
 }
 
 /**
- * Build the CSS `text-shadow` value written into `--glide-text-shadow`.
- * Returns "none" when disabled so the variable is always well-formed.
+ * Halo `text-shadow` value for `--glide-text-halo`.
+ *
+ * NOT a directional drop shadow: three concentric zero-offset layers make
+ * a soft underlay that stays symmetric around every glyph — the old
+ * `0 1px 2px` look smudged bold CJK strokes downward. Layer alphas taper
+ * (1 / 0.8 / 0.5) so the outer ring never reads as a dark border.
+ * Returns "none" for every non-halo mode so the variable stays valid.
  */
-export function textShadowCss(shadow: TextShadowSettings): string {
-	if (!shadow.enabled) return "none";
-	const hex = shadow.color.length === 4
-		? `#${shadow.color[1]}${shadow.color[1]}${shadow.color[2]}${shadow.color[2]}${shadow.color[3]}${shadow.color[3]}`
-		: shadow.color;
-	const r = parseInt(hex.slice(1, 3), 16);
-	const g = parseInt(hex.slice(3, 5), 16);
-	const b = parseInt(hex.slice(5, 7), 16);
-	const alpha = Math.round((shadow.opacity / 100) * 1000) / 1000;
-	return `${shadow.offsetX}px ${shadow.offsetY}px ${shadow.blur}px rgba(${r}, ${g}, ${b}, ${alpha})`;
+export function textEffectHaloCss(effect: TextEffectSettings): string {
+	if (effect.mode !== "halo") return "none";
+	const alpha = effect.opacity / 100;
+	const core = rgba(effect.color, alpha);
+	const mid = rgba(effect.color, alpha * 0.8);
+	const outer = rgba(effect.color, alpha * 0.5);
+	return [
+		`0 0 1px ${core}`,
+		`0 0 ${effect.blur}px ${mid}`,
+		`0 0 ${effect.blur * 2}px ${outer}`,
+	].join(", ");
+}
+
+/**
+ * Hairline stroke value for `--glide-text-stroke`
+ * (`-webkit-text-stroke`). Fixed at 0.5px — anything thicker eats thin
+ * Latin glyphs. "0" (not "none": invalid there) for non-stroke modes.
+ */
+export function textEffectStrokeCss(effect: TextEffectSettings): string {
+	if (effect.mode !== "stroke") return "0";
+	return `0.5px ${rgba(effect.color, effect.opacity / 100)}`;
 }
 
 function normalizeCard(raw: unknown): LabelAppearanceSettings {
-	const data = (raw ?? {}) as Partial<LabelAppearanceSettings>;
+	const data = (raw ?? {}) as Partial<LabelAppearanceSettings> & {
+		/** Legacy persisted field (boolean or structured shadow object). */
+		textShadow?: unknown;
+	};
 	return {
 		opacity: clamp(
 			data.opacity,
@@ -250,7 +301,9 @@ function normalizeCard(raw: unknown): LabelAppearanceSettings {
 			RANGES.cardPaddingY.max,
 			DEFAULT_CARD.paddingY,
 		),
-		textShadow: normalizeTextShadow(data.textShadow),
+		// Current field wins; otherwise migrate whatever `textShadow`
+		// generation is on disk (boolean or structured object).
+		textEffect: normalizeTextEffect(data.textEffect ?? data.textShadow),
 	};
 }
 
@@ -281,6 +334,11 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 			RANGES.levelIndent.max,
 			DEFAULT_SETTINGS.levelIndent,
 		),
+		levelIndicatorStyle:
+			data.levelIndicatorStyle === "none" ||
+			data.levelIndicatorStyle === "badge"
+				? data.levelIndicatorStyle
+				: DEFAULT_SETTINGS.levelIndicatorStyle,
 		edgeFadeEnabled: bool(
 			data.edgeFadeEnabled,
 			DEFAULT_SETTINGS.edgeFadeEnabled,
@@ -331,6 +389,35 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 }
 
 /**
+ * Normalize WITHOUT replacing the settings object (identity-preserving).
+ *
+ * Root cause of the "change a setting twice before it sticks" bug: the
+ * plugin used to do `this.settings = normalizeSettings(this.settings)` on
+ * every apply, which swapped the object identity. The settings tab's
+ * `display()` closures kept writing into the OLD object — the first
+ * change landed (same object), every later change went into a dead copy
+ * until the tab was re-rendered. Mutating in place keeps every closure,
+ * the plugin and the outline views pointed at one live object.
+ */
+export function normalizeSettingsInPlace(
+	target: GlideOutlineSettings,
+): GlideOutlineSettings {
+	const clean = normalizeSettings(target);
+	Object.assign(target, clean, {
+		// Nested objects must also keep their identity (`s.card` and
+		// `s.card.textEffect` are captured by settings-tab closures too).
+		card: Object.assign(target.card ?? {}, clean.card, {
+			textEffect: Object.assign(
+				target.card?.textEffect ?? {},
+				clean.card.textEffect,
+			),
+		}),
+		showLevels: clean.showLevels,
+	});
+	return target;
+}
+
+/**
  * Restore appearance-related values to their defaults.
  * Deliberately preserved: enabled, position, vertical/horizontal offset,
  * pointer auto-scroll, shown levels and Markdown rendering — those encode
@@ -346,10 +433,11 @@ export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 		maxLabelWidth: DEFAULT_SETTINGS.maxLabelWidth,
 		cardGap: DEFAULT_SETTINGS.cardGap,
 		levelIndent: DEFAULT_SETTINGS.levelIndent,
+		levelIndicatorStyle: DEFAULT_SETTINGS.levelIndicatorStyle,
 		edgeFadeEnabled: DEFAULT_SETTINGS.edgeFadeEnabled,
 		edgeFadeSize: DEFAULT_SETTINGS.edgeFadeSize,
 		animationEnabled: DEFAULT_SETTINGS.animationEnabled,
-		card: { ...DEFAULT_CARD, textShadow: { ...DEFAULT_TEXT_SHADOW } },
+		card: { ...DEFAULT_CARD, textEffect: { ...DEFAULT_TEXT_EFFECT } },
 	};
 }
 
@@ -593,9 +681,24 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		// --- Hierarchy
+		new Setting(containerEl).setName("Hierarchy").setHeading();
+
 		new Setting(containerEl)
-			.setName("Level indentation")
-			.setDesc("Pixels each deeper heading level steps toward the text body, forming a hierarchy staircase.")
+			.setName("Level badge")
+			.setDesc("Show a small H1–H6 tag on the edge-facing side of each label. The primary hierarchy cue, together with per-level typography.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(s.levelIndicatorStyle === "badge")
+					.onChange((value) => {
+						s.levelIndicatorStyle = value ? "badge" : "none";
+						this.plugin.previewSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Level indentation (legacy)")
+			.setDesc("Pixels each deeper level steps toward the text body. Superseded by the level badge; kept for vaults that prefer the staircase. 0 = off.")
 			.addSlider((slider) =>
 				slider
 					.setLimits(RANGES.levelIndent.min, RANGES.levelIndent.max, 1)
@@ -607,97 +710,72 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		// --- Text shadow
-		new Setting(containerEl).setName("Text shadow").setHeading();
+		// --- Text effect
+		new Setting(containerEl).setName("Text effect").setHeading();
 
 		new Setting(containerEl)
-			.setName("Text shadow")
-			.setDesc("Draw a configurable shadow behind label text for readability on busy backgrounds.")
-			.addToggle((toggle) =>
-				toggle.setValue(s.card.textShadow.enabled).onChange(async (value) => {
-					s.card.textShadow.enabled = value;
-					await this.plugin.applySettings();
-					this.display();
-				}),
+			.setName("Text effect")
+			.setDesc("Halo adds a soft glow around label text for readability over busy backgrounds — most useful in pure text mode. Stroke draws a hairline outline.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("none", "None")
+					.addOption("halo", "Halo")
+					.addOption("stroke", "Stroke")
+					.setValue(s.card.textEffect.mode)
+					.onChange((value) => {
+						s.card.textEffect.mode =
+							value === "halo" || value === "stroke" ? value : "none";
+						this.plugin.previewSettings();
+						this.display();
+					}),
 			);
 
-		if (s.card.textShadow.enabled) {
+		if (s.card.textEffect.mode !== "none") {
 			new Setting(containerEl)
-				.setName("Shadow color")
+				.setName("Effect color")
 				.addColorPicker((picker) =>
-					picker.setValue(s.card.textShadow.color).onChange((value) => {
-						s.card.textShadow.color = value;
+					picker.setValue(s.card.textEffect.color).onChange((value) => {
+						s.card.textEffect.color = value;
 						this.plugin.previewSettings();
 					}),
 				);
 
 			new Setting(containerEl)
-				.setName("Shadow opacity")
+				.setName("Effect opacity")
 				.addSlider((slider) =>
 					slider
 						.setLimits(
-							RANGES.textShadowOpacity.min,
-							RANGES.textShadowOpacity.max,
+							RANGES.textEffectOpacity.min,
+							RANGES.textEffectOpacity.max,
 							5,
 						)
-						.setValue(s.card.textShadow.opacity)
+						.setValue(s.card.textEffect.opacity)
 						.setDynamicTooltip()
 						.onChange((value) => {
-							s.card.textShadow.opacity = value;
+							s.card.textEffect.opacity = value;
 							this.plugin.previewSettings();
 						}),
 				);
 
-			new Setting(containerEl)
-				.setName("Shadow blur")
-				.addSlider((slider) =>
-					slider
-						.setLimits(
-							RANGES.textShadowBlur.min,
-							RANGES.textShadowBlur.max,
-							1,
-						)
-						.setValue(s.card.textShadow.blur)
-						.setDynamicTooltip()
-						.onChange((value) => {
-							s.card.textShadow.blur = value;
-							this.plugin.previewSettings();
-						}),
-				);
-
-			new Setting(containerEl)
-				.setName("Shadow horizontal offset")
-				.addSlider((slider) =>
-					slider
-						.setLimits(
-							RANGES.textShadowOffset.min,
-							RANGES.textShadowOffset.max,
-							1,
-						)
-						.setValue(s.card.textShadow.offsetX)
-						.setDynamicTooltip()
-						.onChange((value) => {
-							s.card.textShadow.offsetX = value;
-							this.plugin.previewSettings();
-						}),
-				);
-
-			new Setting(containerEl)
-				.setName("Shadow vertical offset")
-				.addSlider((slider) =>
-					slider
-						.setLimits(
-							RANGES.textShadowOffset.min,
-							RANGES.textShadowOffset.max,
-							1,
-						)
-						.setValue(s.card.textShadow.offsetY)
-						.setDynamicTooltip()
-						.onChange((value) => {
-							s.card.textShadow.offsetY = value;
-							this.plugin.previewSettings();
-						}),
-				);
+			if (s.card.textEffect.mode === "halo") {
+				new Setting(containerEl)
+					.setName("Halo size")
+					.setDesc("Radius of the glow, in pixels.")
+					.addSlider((slider) =>
+						slider
+							.setLimits(
+								RANGES.textEffectBlur.min,
+								RANGES.textEffectBlur.max,
+								1,
+							)
+							.setValue(s.card.textEffect.blur)
+							.setDynamicTooltip()
+							.onChange((value) => {
+								s.card.textEffect.blur = value;
+								this.plugin.previewSettings();
+							}),
+					);
+			}
 		}
 
 		// --- Overflow

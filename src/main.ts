@@ -4,6 +4,7 @@ import {
 	DEFAULT_SETTINGS,
 	GlideOutlineSettingTab,
 	normalizeSettings,
+	normalizeSettingsInPlace,
 } from "./settings";
 import type { GlideOutlineSettings } from "./settings";
 import { HeadingProvider } from "./core/HeadingProvider";
@@ -88,30 +89,53 @@ export default class GlideOutlinePlugin extends Plugin {
 		this.lifecycle.detach();
 	}
 
-	/** Persist settings immediately and refresh the mounted outline. */
+	/**
+	 * UNIFIED settings pipeline. Every mutation — toggle, dropdown, slider,
+	 * command — flows through exactly one sequence:
+	 *
+	 *   1. normalize IN PLACE (identity-preserving: settings-tab closures,
+	 *      the controller's getter and the views all keep the same object)
+	 *   2. apply to the mounted outline immediately (visual preview)
+	 *   3. persist (immediately for applySettings, debounced for
+	 *      previewSettings so slider drags do not hammer saveData)
+	 *
+	 * The old code did `this.settings = normalizeSettings(this.settings)`,
+	 * which SWAPPED the object identity on the first change — every later
+	 * onChange closure wrote into a dead copy, producing the classic
+	 * "change it twice before it sticks" bug.
+	 */
 	async applySettings(): Promise<void> {
-		if (this.saveTimer !== 0) {
-			window.clearTimeout(this.saveTimer);
-			this.saveTimer = 0;
-		}
-		this.settings = normalizeSettings(this.settings);
-		await this.saveData(this.settings);
+		this.applySettingsImmediately();
+		await this.flushPendingSettingsSave();
+	}
+
+	/** Slider-friendly variant: immediate visuals, debounced persistence. */
+	previewSettings(): void {
+		this.applySettingsImmediately();
+		this.schedulePersistSettings();
+	}
+
+	/** Steps 1 + 2: normalize in place and refresh the mounted outline. */
+	private applySettingsImmediately(): void {
+		normalizeSettingsInPlace(this.settings);
 		this.refreshUi();
 	}
 
-	/**
-	 * Slider-friendly variant (Phase 8): the UI updates on every tick while
-	 * disk writes are debounced, so dragging a slider does not hammer
-	 * `saveData` dozens of times per second.
-	 */
-	previewSettings(): void {
-		this.settings = normalizeSettings(this.settings);
-		this.refreshUi();
+	private schedulePersistSettings(): void {
 		if (this.saveTimer !== 0) window.clearTimeout(this.saveTimer);
 		this.saveTimer = window.setTimeout(() => {
 			this.saveTimer = 0;
 			void this.saveData(this.settings);
 		}, SAVE_DEBOUNCE_MS);
+	}
+
+	/** Cancel any debounce and write the current settings to disk now. */
+	private async flushPendingSettingsSave(): Promise<void> {
+		if (this.saveTimer !== 0) {
+			window.clearTimeout(this.saveTimer);
+			this.saveTimer = 0;
+		}
+		await this.saveData(this.settings);
 	}
 
 	private refreshUi(): void {

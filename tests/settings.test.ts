@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_CARD,
 	DEFAULT_SETTINGS,
-	DEFAULT_TEXT_SHADOW,
+	DEFAULT_TEXT_EFFECT,
 	normalizeSettings,
-	normalizeTextShadow,
+	normalizeSettingsInPlace,
+	normalizeTextEffect,
 	resetAppearance,
-	textShadowCss,
+	textEffectHaloCss,
+	textEffectStrokeCss,
 } from "../src/settings";
 
 describe("normalizeSettings", () => {
@@ -78,13 +80,31 @@ describe("normalizeSettings", () => {
 		expect(s.showLevels).toEqual([false, true, true, true, true, true]);
 	});
 
-	it("defaults the new placement and overflow fields", () => {
+	it("defaults the placement and overflow fields", () => {
 		const s = normalizeSettings({});
 		expect(s.horizontalOffset).toBe(12);
-		expect(s.levelIndent).toBe(3);
 		expect(s.edgeFadeEnabled).toBe(true);
 		expect(s.edgeFadeSize).toBe(28);
 		expect(s.pointerAutoScroll).toBe(true);
+	});
+
+	it("defaults the hierarchy cue to the badge, not the staircase", () => {
+		const s = normalizeSettings({});
+		expect(s.levelIndicatorStyle).toBe("badge");
+		// The indent staircase is legacy — off by default.
+		expect(s.levelIndent).toBe(0);
+	});
+
+	it("validates levelIndicatorStyle and keeps persisted choices", () => {
+		expect(
+			normalizeSettings({ levelIndicatorStyle: "none" }).levelIndicatorStyle,
+		).toBe("none");
+		expect(
+			normalizeSettings({ levelIndicatorStyle: "badge" }).levelIndicatorStyle,
+		).toBe("badge");
+		expect(
+			normalizeSettings({ levelIndicatorStyle: "rainbow" }).levelIndicatorStyle,
+		).toBe(DEFAULT_SETTINGS.levelIndicatorStyle);
 	});
 
 	it("clamps horizontalOffset into 0–64", () => {
@@ -97,7 +117,7 @@ describe("normalizeSettings", () => {
 		);
 	});
 
-	it("clamps levelIndent into 0–8", () => {
+	it("clamps the legacy levelIndent into 0–8", () => {
 		expect(normalizeSettings({ levelIndent: -1 }).levelIndent).toBe(0);
 		expect(normalizeSettings({ levelIndent: 99 }).levelIndent).toBe(8);
 		expect(normalizeSettings({ levelIndent: 5 }).levelIndent).toBe(5);
@@ -111,95 +131,186 @@ describe("normalizeSettings", () => {
 	});
 });
 
-describe("normalizeTextShadow", () => {
-	it("migrates the legacy boolean true to enabled + defaults", () => {
-		expect(normalizeTextShadow(true)).toEqual({
-			...DEFAULT_TEXT_SHADOW,
+describe("normalizeTextEffect", () => {
+	it("migrates the legacy boolean true to a halo", () => {
+		expect(normalizeTextEffect(true)).toEqual({
+			...DEFAULT_TEXT_EFFECT,
+			mode: "halo",
+		});
+	});
+
+	it("migrates the legacy boolean false to none", () => {
+		expect(normalizeTextEffect(false)).toEqual({
+			...DEFAULT_TEXT_EFFECT,
+			mode: "none",
+		});
+	});
+
+	it("returns the disabled default for missing/invalid input", () => {
+		expect(normalizeTextEffect(undefined)).toEqual(DEFAULT_TEXT_EFFECT);
+		expect(normalizeTextEffect(null)).toEqual(DEFAULT_TEXT_EFFECT);
+		expect(normalizeTextEffect({})).toEqual(DEFAULT_TEXT_EFFECT);
+		expect(DEFAULT_TEXT_EFFECT.mode).toBe("none");
+	});
+
+	it("migrates a structured legacy text-shadow object via `enabled`", () => {
+		expect(normalizeTextEffect({ enabled: true, blur: 5 })).toEqual({
+			...DEFAULT_TEXT_EFFECT,
+			mode: "halo",
+			blur: 5,
+		});
+		expect(normalizeTextEffect({ enabled: false }).mode).toBe("none");
+	});
+
+	it("drops the legacy directional offsets entirely", () => {
+		const effect = normalizeTextEffect({
 			enabled: true,
+			offsetX: 2,
+			offsetY: 4,
 		});
+		expect(effect).not.toHaveProperty("offsetX");
+		expect(effect).not.toHaveProperty("offsetY");
 	});
 
-	it("migrates the legacy boolean false to the disabled default", () => {
-		expect(normalizeTextShadow(false)).toEqual({
-			...DEFAULT_TEXT_SHADOW,
-			enabled: false,
-		});
+	it("accepts every explicit mode and rejects unknown ones", () => {
+		expect(normalizeTextEffect({ mode: "halo" }).mode).toBe("halo");
+		expect(normalizeTextEffect({ mode: "stroke" }).mode).toBe("stroke");
+		expect(normalizeTextEffect({ mode: "none" }).mode).toBe("none");
+		expect(normalizeTextEffect({ mode: "glow" }).mode).toBe(
+			DEFAULT_TEXT_EFFECT.mode,
+		);
 	});
 
-	it("returns defaults for missing/invalid input", () => {
-		expect(normalizeTextShadow(undefined)).toEqual(DEFAULT_TEXT_SHADOW);
-		expect(normalizeTextShadow(null)).toEqual(DEFAULT_TEXT_SHADOW);
-		expect(normalizeTextShadow({})).toEqual(DEFAULT_TEXT_SHADOW);
-	});
-
-	it("clamps opacity, blur and offsets", () => {
-		const s = normalizeTextShadow({
-			enabled: true,
-			opacity: 500,
-			blur: -2,
-			offsetX: 99,
-			offsetY: -99,
-		});
+	it("clamps opacity into 0–100 and blur into 1–8", () => {
+		const s = normalizeTextEffect({ mode: "halo", opacity: 500, blur: -2 });
 		expect(s.opacity).toBe(100);
-		expect(s.blur).toBe(0);
-		expect(s.offsetX).toBe(6);
-		expect(s.offsetY).toBe(-6);
+		expect(s.blur).toBe(1);
+		expect(normalizeTextEffect({ blur: 99 }).blur).toBe(8);
 	});
 
 	it("rejects invalid colors and keeps valid 3/6-digit hex", () => {
-		expect(normalizeTextShadow({ color: "red" }).color).toBe(
-			DEFAULT_TEXT_SHADOW.color,
+		expect(normalizeTextEffect({ color: "red" }).color).toBe(
+			DEFAULT_TEXT_EFFECT.color,
 		);
-		expect(normalizeTextShadow({ color: "#12" }).color).toBe(
-			DEFAULT_TEXT_SHADOW.color,
+		expect(normalizeTextEffect({ color: "#12" }).color).toBe(
+			DEFAULT_TEXT_EFFECT.color,
 		);
-		expect(normalizeTextShadow({ color: "#abc" }).color).toBe("#abc");
-		expect(normalizeTextShadow({ color: "#A1B2C3" }).color).toBe("#A1B2C3");
+		expect(normalizeTextEffect({ color: "#abc" }).color).toBe("#abc");
+		expect(normalizeTextEffect({ color: "#A1B2C3" }).color).toBe("#A1B2C3");
 	});
 
 	it("migrates via normalizeSettings from a legacy card.textShadow boolean", () => {
-		const s = normalizeSettings({ card: { textShadow: true } });
-		expect(s.card.textShadow.enabled).toBe(true);
-		expect(s.card.textShadow.blur).toBe(DEFAULT_TEXT_SHADOW.blur);
+		const on = normalizeSettings({ card: { textShadow: true } });
+		expect(on.card.textEffect.mode).toBe("halo");
+		const off = normalizeSettings({ card: { textShadow: false } });
+		expect(off.card.textEffect.mode).toBe("none");
+	});
+
+	it("prefers the current textEffect over a stale legacy textShadow", () => {
+		const s = normalizeSettings({
+			card: { textShadow: true, textEffect: { mode: "stroke" } },
+		});
+		expect(s.card.textEffect.mode).toBe("stroke");
 	});
 });
 
-describe("textShadowCss", () => {
-	it("returns none when disabled", () => {
-		expect(textShadowCss({ ...DEFAULT_TEXT_SHADOW, enabled: false })).toBe(
+describe("textEffectHaloCss", () => {
+	it("returns none for the none and stroke modes", () => {
+		expect(textEffectHaloCss({ ...DEFAULT_TEXT_EFFECT, mode: "none" })).toBe(
+			"none",
+		);
+		expect(textEffectHaloCss({ ...DEFAULT_TEXT_EFFECT, mode: "stroke" })).toBe(
 			"none",
 		);
 	});
 
-	it("builds a full rgba shadow from the default values", () => {
-		expect(textShadowCss({ ...DEFAULT_TEXT_SHADOW, enabled: true })).toBe(
-			"0px 1px 4px rgba(0, 0, 0, 0.55)",
+	it("builds three concentric zero-offset layers (no direction)", () => {
+		const css = textEffectHaloCss({
+			mode: "halo",
+			color: "#000000",
+			opacity: 40,
+			blur: 3,
+		});
+		expect(css).toBe(
+			"0 0 1px rgba(0, 0, 0, 0.4), 0 0 3px rgba(0, 0, 0, 0.32), 0 0 6px rgba(0, 0, 0, 0.2)",
 		);
+		// Every layer starts with a 0 0 offset — never a directional smear.
+		for (const layer of css.split(", 0 0")) {
+			expect(layer).not.toMatch(/^\s*\d+px \d+px/);
+		}
 	});
 
 	it("expands 3-digit hex colors", () => {
-		expect(
-			textShadowCss({
-				enabled: true,
-				color: "#f00",
-				opacity: 100,
-				blur: 2,
-				offsetX: 1,
-				offsetY: -1,
-			}),
-		).toBe("1px -1px 2px rgba(255, 0, 0, 1)");
+		const css = textEffectHaloCss({
+			mode: "halo",
+			color: "#f00",
+			opacity: 100,
+			blur: 2,
+		});
+		expect(css).toContain("0 0 1px rgba(255, 0, 0, 1)");
+		expect(css).toContain("0 0 2px rgba(255, 0, 0, 0.8)");
+		expect(css).toContain("0 0 4px rgba(255, 0, 0, 0.5)");
+	});
+});
+
+describe("textEffectStrokeCss", () => {
+	it("returns the '0' keyword for non-stroke modes", () => {
+		expect(textEffectStrokeCss({ ...DEFAULT_TEXT_EFFECT, mode: "none" })).toBe(
+			"0",
+		);
+		expect(textEffectStrokeCss({ ...DEFAULT_TEXT_EFFECT, mode: "halo" })).toBe(
+			"0",
+		);
 	});
 
-	it("maps opacity percent to a 0–1 alpha", () => {
-		const css = textShadowCss({
-			enabled: true,
-			color: "#000000",
-			opacity: 30,
-			blur: 0,
-			offsetX: 0,
-			offsetY: 0,
-		});
-		expect(css).toContain("rgba(0, 0, 0, 0.3)");
+	it("builds a hairline 0.5px stroke", () => {
+		expect(
+			textEffectStrokeCss({
+				mode: "stroke",
+				color: "#000000",
+				opacity: 45,
+				blur: 3,
+			}),
+		).toBe("0.5px rgba(0, 0, 0, 0.45)");
+	});
+});
+
+describe("normalizeSettingsInPlace", () => {
+	it("preserves the identity of the settings object and nested card", () => {
+		const settings = normalizeSettings({});
+		const card = settings.card;
+		const textEffect = settings.card.textEffect;
+		settings.maxScale = 99 as never;
+		const result = normalizeSettingsInPlace(settings);
+		expect(result).toBe(settings);
+		expect(settings.card).toBe(card);
+		expect(settings.card.textEffect).toBe(textEffect);
+	});
+
+	it("clamps out-of-range values in place", () => {
+		const settings = normalizeSettings({});
+		settings.maxScale = 99;
+		settings.card.opacity = 500;
+		settings.card.textEffect.blur = -3;
+		normalizeSettingsInPlace(settings);
+		expect(settings.maxScale).toBe(1.75);
+		expect(settings.card.opacity).toBe(100);
+		expect(settings.card.textEffect.blur).toBe(1);
+	});
+
+	it("keeps closure writes visible after repeated normalization", () => {
+		// Regression for the "set once, then dead" settings-tab bug: a
+		// closure captured before normalization must still write into the
+		// live object after several normalization passes.
+		const settings = normalizeSettings({});
+		const write = (v: number) => {
+			settings.horizontalOffset = v;
+		};
+		normalizeSettingsInPlace(settings);
+		normalizeSettingsInPlace(settings);
+		write(40);
+		normalizeSettingsInPlace(settings);
+		expect(settings.horizontalOffset).toBe(40);
 	});
 });
 
@@ -239,9 +350,10 @@ describe("resetAppearance", () => {
 			horizontalOffset: 40,
 			pointerAutoScroll: false,
 			levelIndent: 8,
+			levelIndicatorStyle: "none",
 			edgeFadeEnabled: false,
 			edgeFadeSize: 64,
-			card: { textShadow: { enabled: true, blur: 9 } },
+			card: { textEffect: { mode: "halo", blur: 8 } },
 		});
 		const reset = resetAppearance(custom);
 
@@ -251,8 +363,11 @@ describe("resetAppearance", () => {
 
 		// Appearance: reset.
 		expect(reset.levelIndent).toBe(DEFAULT_SETTINGS.levelIndent);
+		expect(reset.levelIndicatorStyle).toBe(
+			DEFAULT_SETTINGS.levelIndicatorStyle,
+		);
 		expect(reset.edgeFadeEnabled).toBe(DEFAULT_SETTINGS.edgeFadeEnabled);
 		expect(reset.edgeFadeSize).toBe(DEFAULT_SETTINGS.edgeFadeSize);
-		expect(reset.card.textShadow).toEqual(DEFAULT_TEXT_SHADOW);
+		expect(reset.card.textEffect).toEqual(DEFAULT_TEXT_EFFECT);
 	});
 });
