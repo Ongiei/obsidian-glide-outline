@@ -1,19 +1,31 @@
 /* ==========================================================================
    Glide Outline — editor-margin heading rail with dock magnification
 
-   Pointer policy (P0-1): every drawing layer is pointer-transparent. The
-   ONLY interactive surfaces are:
-     1. .glide-outline-hit-zone   – thin transparent strip over the rail
-     2. .glide-outline-marker     – the markers themselves
+   SINGLE VISUAL CARD INVARIANT:
+   .glide-outline-card is the ONLY element allowed to paint background,
+   border, border-radius or box-shadow. Row, item (button), motion and
+   reveal are permanently chrome-free. The button is hard-reset with high
+   specificity (`.glide-outline-root button.glide-outline-item`) so
+   Obsidian core / theme button rules (background, border, shadow, padding,
+   min-height) cannot leak in and form a second, row-wide card.
+
+   Pointer policy: every drawing layer is pointer-transparent. The ONLY
+   interactive surfaces are:
+     1. .glide-outline-hit-zone  – thin transparent strip over the rail
+     2. .glide-outline-marker    – rail-width hit slots (line drawn via ::before)
      3. .glide-outline-card      – visible label cards, expanded state only
    The editor underneath stays fully clickable everywhere else.
 
-   Transform responsibilities are strictly separated:
-     .glide-outline-item    stable layout + a11y target (no transforms)
-     .glide-outline-marker  collapsed marker (position via `translate` prop)
-     .glide-outline-motion  vertical displacement  → --glide-shift-y
+   Transform responsibilities:
+     .glide-outline-motion  vertical displacement → --glide-shift-y
+                            (marker AND card move together, never desync)
      .glide-outline-reveal  horizontal slide + opacity (expand/collapse)
-     .glide-outline-card    visual chrome + dock scale → --glide-scale
+     .glide-outline-card    dock scale → --glide-scale
+
+   Geometry driven from TS (measured, not assumed):
+     --glide-row-height           per row: max(18, cardHeight) + cardGap
+     --glide-viewport-pad         vertical painting space for edge cards
+     --glide-label-content-width  text budget from the width solver
    ========================================================================== */
 
 .glide-outline-host {
@@ -30,7 +42,7 @@
 	z-index: 24;
 	font-size: var(--glide-font-size, 12px);
 	--glide-rail-width: 28px;
-	--glide-item-height: 22px;
+	--glide-label-gap: 6px;
 }
 
 .glide-outline-root--right {
@@ -41,7 +53,7 @@
 	left: 0;
 }
 
-/* Empty state (P1-3): no visible headings → no rail, no hit zone. */
+/* Empty state: no visible headings → no rail, no hit zone. */
 .glide-outline-root.is-empty {
 	display: none;
 }
@@ -63,7 +75,8 @@
 	left: 0;
 }
 
-/* Drawing layers: never intercept the pointer (P0-1). */
+/* Drawing layers: never intercept the pointer. --glide-viewport-pad keeps
+   vertical painting space so edge cards can magnify without clipping. */
 .glide-outline-viewport {
 	position: absolute;
 	inset: 0;
@@ -71,7 +84,7 @@
 	overflow-x: hidden;
 	display: flex;
 	flex-direction: column;
-	padding: 14px 0;
+	padding-block: var(--glide-viewport-pad, 14px);
 	pointer-events: none;
 	scrollbar-width: none;
 	overscroll-behavior: contain;
@@ -81,48 +94,140 @@
 	display: none;
 }
 
-.glide-outline-list,
-.glide-outline-row {
-	pointer-events: none;
-}
-
 .glide-outline-list {
 	display: flex;
 	flex-direction: column;
 	margin-block: auto; /* safe vertical centering that keeps overflow scrollable */
-}
-
-/* --------------------------------------------------------------------------
-   Item: a plain button, fixed height, no visual chrome of its own.
-   The button itself is pointer-transparent; its marker and card opt back in.
-   -------------------------------------------------------------------------- */
-.glide-outline-item {
-	position: relative;
-	display: block;
-	width: 100%;
-	height: var(--glide-item-height);
-	padding: 0;
-	margin: 0;
-	background: none;
-	border: none;
-	box-shadow: none;
-	appearance: none;
-	cursor: pointer;
-	color: inherit;
-	font: inherit;
 	pointer-events: none;
 }
 
-.glide-outline-item:focus-visible {
-	outline: 2px solid var(--interactive-accent);
-	outline-offset: -2px;
-	border-radius: 4px;
+/* --------------------------------------------------------------------------
+   Row: measured layout height, zero visual chrome, pointer-transparent.
+   Height is written by GlideOutlineView.measureRows().
+   -------------------------------------------------------------------------- */
+.glide-outline-row {
+	position: relative;
+	height: var(--glide-row-height, 22px);
+	background: none;
+	border: none;
+	box-shadow: none;
+	pointer-events: none;
 }
 
 /* --------------------------------------------------------------------------
-   Marker: length encodes heading level. Always clickable.
+   Item button: HARD RESET. Obsidian core and many themes style bare
+   `button` elements (background, border, box-shadow, padding, min-height,
+   input shadows). `all: unset` wipes everything at high specificity, then
+   the properties we actually need are restated explicitly. The button is
+   anchored to the editor edge and only wraps its own marker + card —
+   NEVER the whole root — so leaked chrome cannot form a row-wide bar.
+   -------------------------------------------------------------------------- */
+.glide-outline-root button.glide-outline-item {
+	all: unset;
+	display: block;
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	box-sizing: border-box;
+	width: max-content;
+	min-height: 0;
+	padding: 0;
+	margin: 0;
+	background: none;
+	background-image: none;
+	border: none;
+	border-radius: 0;
+	box-shadow: none;
+	filter: none;
+	appearance: none;
+	-webkit-appearance: none;
+	font: inherit;
+	font-size: inherit;
+	color: inherit;
+	cursor: pointer;
+	pointer-events: none;
+}
+
+.glide-outline-root--right button.glide-outline-item {
+	right: 0;
+}
+
+.glide-outline-root--left button.glide-outline-item {
+	left: 0;
+}
+
+/* Every interactive state stays chrome-free — themes often restyle these. */
+.glide-outline-root button.glide-outline-item:hover,
+.glide-outline-root button.glide-outline-item:active,
+.glide-outline-root button.glide-outline-item:focus,
+.glide-outline-root button.glide-outline-item:focus-visible {
+	background: none;
+	background-image: none;
+	border: none;
+	border-radius: 0;
+	box-shadow: none;
+	filter: none;
+	outline: none;
+}
+
+/* Focus is shown on the card and marker — never as a row-wide outline. */
+.glide-outline-root button.glide-outline-item:focus-visible .glide-outline-card {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 1px;
+}
+
+.glide-outline-root button.glide-outline-item:focus-visible .glide-outline-marker::before {
+	background-color: var(--interactive-accent);
+}
+
+/* Pure text mode: no card box to outline → underline the text instead. */
+.glide-outline-root--pure-text button.glide-outline-item:focus-visible .glide-outline-card {
+	outline: none;
+}
+
+.glide-outline-root--pure-text button.glide-outline-item:focus-visible .glide-outline-label {
+	text-decoration: underline;
+	color: var(--interactive-accent);
+}
+
+/* --------------------------------------------------------------------------
+   Motion: marker + card live together and share the vertical displacement,
+   so they can never end up on different rows during give-way.
+   -------------------------------------------------------------------------- */
+.glide-outline-motion {
+	display: flex;
+	align-items: center;
+	column-gap: var(--glide-label-gap, 6px);
+	height: 100%;
+	transform: translateY(var(--glide-shift-y, 0px));
+	transition: transform 140ms cubic-bezier(0.33, 0, 0.2, 1);
+	pointer-events: none;
+}
+
+/* DOM order is marker → reveal; on the right edge the marker must sit at
+   the outermost position, so the row is reversed visually. */
+.glide-outline-root--right .glide-outline-motion {
+	flex-direction: row-reverse;
+}
+
+.glide-outline-root--left .glide-outline-motion {
+	flex-direction: row;
+}
+
+/* --------------------------------------------------------------------------
+   Marker: a rail-width hit slot; the visible line/dot is drawn by ::before.
+   Always clickable, spans the full row height for a comfortable target.
    -------------------------------------------------------------------------- */
 .glide-outline-marker {
+	position: relative;
+	flex: 0 0 var(--glide-rail-width, 28px);
+	align-self: stretch;
+	min-height: 18px;
+	pointer-events: auto;
+}
+
+.glide-outline-marker::before {
+	content: "";
 	position: absolute;
 	top: 50%;
 	translate: 0 -50%;
@@ -130,17 +235,16 @@
 	width: var(--glide-marker-size, 12px);
 	border-radius: 2px;
 	background-color: var(--text-faint);
-	pointer-events: auto;
 	transition:
 		background-color 160ms ease,
 		opacity 160ms ease;
 }
 
-.glide-outline-root--right .glide-outline-marker {
+.glide-outline-root--right .glide-outline-marker::before {
 	right: 9px;
 }
 
-.glide-outline-root--left .glide-outline-marker {
+.glide-outline-root--left .glide-outline-marker::before {
 	left: 9px;
 }
 
@@ -164,39 +268,18 @@
 }
 
 /* Dot markers reuse the per-level size variable for both dimensions. */
-.glide-outline-root--marker-dot .glide-outline-marker {
+.glide-outline-root--marker-dot .glide-outline-marker::before {
 	height: min(var(--glide-marker-size, 6px), 7px);
 	width: min(var(--glide-marker-size, 6px), 7px);
 	border-radius: 50%;
 }
 
-.glide-outline-item.is-active .glide-outline-marker {
+.glide-outline-item.is-active .glide-outline-marker::before {
 	background-color: var(--interactive-accent);
 }
 
-.glide-outline-root.is-expanded .glide-outline-marker {
+.glide-outline-root.is-expanded .glide-outline-marker::before {
 	opacity: 0.35;
-}
-
-/* --------------------------------------------------------------------------
-   Motion: vertical give-way only. Centering uses the same transform so the
-   displacement variable composes instead of overriding.
-   -------------------------------------------------------------------------- */
-.glide-outline-motion {
-	position: absolute;
-	top: 50%;
-	display: block;
-	transform: translateY(calc(-50% + var(--glide-shift-y, 0px)));
-	transition: transform 140ms cubic-bezier(0.33, 0, 0.2, 1);
-	pointer-events: none;
-}
-
-.glide-outline-root--right .glide-outline-motion {
-	right: calc(var(--glide-rail-width, 28px) + 6px);
-}
-
-.glide-outline-root--left .glide-outline-motion {
-	left: calc(var(--glide-rail-width, 28px) + 6px);
 }
 
 /* --------------------------------------------------------------------------
@@ -205,6 +288,9 @@
 .glide-outline-reveal {
 	display: block;
 	opacity: 0;
+	background: none;
+	border: none;
+	box-shadow: none;
 	pointer-events: none;
 	transition:
 		transform 180ms cubic-bezier(0.25, 0.1, 0.25, 1),
@@ -226,12 +312,15 @@
 }
 
 /* --------------------------------------------------------------------------
-   Card: the visual chrome + dock scale. The ONLY expanded interactive
-   surface — and only when actually visible (expanded / keyboard focus).
+   Card: THE single visual layer (background, border, radius, shadow) and
+   the dock-scale container. Interactive only while actually visible.
+   box-sizing: border-box → the width solver budgets padding and border.
    -------------------------------------------------------------------------- */
 .glide-outline-card {
 	display: block;
-	max-width: var(--glide-label-max-width, 240px);
+	box-sizing: border-box;
+	width: max-content;
+	max-width: 100%;
 	padding: var(--glide-card-padding-y, 1px) var(--glide-card-padding-x, 7px);
 	border-radius: var(--glide-card-radius, 4px);
 	background-color: color-mix(
@@ -274,7 +363,8 @@
 	text-shadow: 0 1px 2px var(--background-primary);
 }
 
-/* Pure text mode: opacity 0 + no border + no shadow → no card chrome. */
+/* Pure text mode: opacity 0 + no border + no shadow → the card element
+   stays (it remains the scale container) but paints nothing. */
 .glide-outline-root--pure-text .glide-outline-card {
 	background-color: transparent;
 	border: none;
@@ -282,11 +372,12 @@
 }
 
 /* --------------------------------------------------------------------------
-   Label: single-line ellipsis. Lives inside the card; rendered Markdown
-   children are forced inline so labels always stay a single line.
+   Label: text content area. Its max-width is the TEXT budget from the
+   width solver; padding/border/shadow are budgeted separately on the card.
    -------------------------------------------------------------------------- */
 .glide-outline-label {
 	display: block;
+	max-width: var(--glide-label-content-width, 240px);
 	white-space: nowrap;
 	overflow: hidden;
 	text-overflow: ellipsis;
@@ -331,9 +422,10 @@
 }
 
 /* --------------------------------------------------------------------------
-   Compact mode (P0-2): pane too narrow for labels → markers only.
+   Compact mode: pane too narrow for cards → markers only. The marker stays
+   inside motion, so only the reveal (card side) is hidden.
    -------------------------------------------------------------------------- */
-.glide-outline-root--compact .glide-outline-motion {
+.glide-outline-root--compact .glide-outline-reveal {
 	display: none;
 }
 
@@ -342,7 +434,7 @@
    JS also stops writing --glide-scale / --glide-shift-y in these states,
    so no !important is needed anywhere.
    -------------------------------------------------------------------------- */
-.glide-outline-root--no-anim .glide-outline-marker,
+.glide-outline-root--no-anim .glide-outline-marker::before,
 .glide-outline-root--no-anim .glide-outline-motion,
 .glide-outline-root--no-anim .glide-outline-reveal,
 .glide-outline-root--no-anim .glide-outline-card {
@@ -350,7 +442,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.glide-outline-marker,
+	.glide-outline-marker::before,
 	.glide-outline-motion,
 	.glide-outline-reveal,
 	.glide-outline-card {
