@@ -26,6 +26,7 @@ export function buildHeadingItems(raw: readonly RawHeading[]): HeadingItem[] {
 			key: `${base}::${occurrence}`,
 			level,
 			text,
+			displaySource: heading.text.trim(),
 			line: heading.line,
 		});
 	}

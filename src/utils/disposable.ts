@@ -13,11 +13,15 @@ export class DisposableStore {
 		this.cleanups.push(cleanup);
 	}
 
-	/** Convenience: addEventListener + auto-removal on dispose. */
-	listen<K extends keyof HTMLElementEventMap>(
-		target: HTMLElement,
+	/**
+	 * Convenience: addEventListener + auto-removal on dispose.
+	 * Accepts any EventTarget (element, document, window) so listeners can be
+	 * attached in pop-out windows via the owner document.
+	 */
+	listen<K extends keyof GlobalEventHandlersEventMap>(
+		target: EventTarget,
 		type: K,
-		handler: (event: HTMLElementEventMap[K]) => void,
+		handler: (event: GlobalEventHandlersEventMap[K]) => void,
 		options?: AddEventListenerOptions,
 	): void {
 		target.addEventListener(type, handler as EventListener, options);
