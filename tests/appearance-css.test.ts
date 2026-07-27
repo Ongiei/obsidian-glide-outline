@@ -158,10 +158,9 @@ describe("text effect variables", () => {
 		expect(css).not.toContain("--glide-text-shadow:");
 	});
 
-	it("applies the hairline stroke under its feature class", () => {
-		expect(css).toMatch(
-			/\.glide-outline-root--text-stroke[^{]*\{[^}]*-webkit-text-stroke:\s*var\(--glide-text-stroke/,
-		);
+	it("has no stroke rules left (P1-2 removed the stroke mode)", () => {
+		expect(css).not.toContain("glide-outline-root--text-stroke");
+		expect(css).not.toContain("-webkit-text-stroke");
 	});
 });
 

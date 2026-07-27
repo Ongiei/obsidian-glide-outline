@@ -7,8 +7,8 @@ import {
 	normalizeSettingsInPlace,
 	normalizeTextEffect,
 	resetAppearance,
+	resetAppearanceInPlace,
 	textEffectHaloCss,
-	textEffectStrokeCss,
 } from "../src/settings";
 
 describe("normalizeSettings", () => {
@@ -26,7 +26,7 @@ describe("normalizeSettings", () => {
 			maxLabelWidth: 1,
 			verticalOffset: -9999,
 		});
-		expect(s.maxScale).toBe(1.75);
+		expect(s.maxScale).toBe(2.25);
 		expect(s.radius).toBe(40);
 		expect(s.baseFontSize).toBe(18);
 		expect(s.maxLabelWidth).toBe(140);
@@ -174,11 +174,24 @@ describe("normalizeTextEffect", () => {
 
 	it("accepts every explicit mode and rejects unknown ones", () => {
 		expect(normalizeTextEffect({ mode: "halo" }).mode).toBe("halo");
-		expect(normalizeTextEffect({ mode: "stroke" }).mode).toBe("stroke");
 		expect(normalizeTextEffect({ mode: "none" }).mode).toBe("none");
 		expect(normalizeTextEffect({ mode: "glow" }).mode).toBe(
 			DEFAULT_TEXT_EFFECT.mode,
 		);
+	});
+
+	it("folds the retired stroke mode into none (P1-2)", () => {
+		expect(normalizeTextEffect({ mode: "stroke" }).mode).toBe("none");
+		// Color/opacity/blur survive so switching to Halo keeps the tuning.
+		const s = normalizeTextEffect({
+			mode: "stroke",
+			color: "#abc",
+			opacity: 80,
+			blur: 5,
+		});
+		expect(s.color).toBe("#abc");
+		expect(s.opacity).toBe(80);
+		expect(s.blur).toBe(5);
 	});
 
 	it("clamps opacity into 0–100 and blur into 1–8", () => {
@@ -208,18 +221,15 @@ describe("normalizeTextEffect", () => {
 
 	it("prefers the current textEffect over a stale legacy textShadow", () => {
 		const s = normalizeSettings({
-			card: { textShadow: true, textEffect: { mode: "stroke" } },
+			card: { textShadow: false, textEffect: { mode: "halo" } },
 		});
-		expect(s.card.textEffect.mode).toBe("stroke");
+		expect(s.card.textEffect.mode).toBe("halo");
 	});
 });
 
 describe("textEffectHaloCss", () => {
-	it("returns none for the none and stroke modes", () => {
+	it("returns none for the none mode", () => {
 		expect(textEffectHaloCss({ ...DEFAULT_TEXT_EFFECT, mode: "none" })).toBe(
-			"none",
-		);
-		expect(textEffectHaloCss({ ...DEFAULT_TEXT_EFFECT, mode: "stroke" })).toBe(
 			"none",
 		);
 	});
@@ -253,28 +263,6 @@ describe("textEffectHaloCss", () => {
 	});
 });
 
-describe("textEffectStrokeCss", () => {
-	it("returns the '0' keyword for non-stroke modes", () => {
-		expect(textEffectStrokeCss({ ...DEFAULT_TEXT_EFFECT, mode: "none" })).toBe(
-			"0",
-		);
-		expect(textEffectStrokeCss({ ...DEFAULT_TEXT_EFFECT, mode: "halo" })).toBe(
-			"0",
-		);
-	});
-
-	it("builds a hairline 0.5px stroke", () => {
-		expect(
-			textEffectStrokeCss({
-				mode: "stroke",
-				color: "#000000",
-				opacity: 45,
-				blur: 3,
-			}),
-		).toBe("0.5px rgba(0, 0, 0, 0.45)");
-	});
-});
-
 describe("normalizeSettingsInPlace", () => {
 	it("preserves the identity of the settings object and nested card", () => {
 		const settings = normalizeSettings({});
@@ -293,7 +281,7 @@ describe("normalizeSettingsInPlace", () => {
 		settings.card.opacity = 500;
 		settings.card.textEffect.blur = -3;
 		normalizeSettingsInPlace(settings);
-		expect(settings.maxScale).toBe(1.75);
+		expect(settings.maxScale).toBe(2.25);
 		expect(settings.card.opacity).toBe(100);
 		expect(settings.card.textEffect.blur).toBe(1);
 	});
@@ -369,5 +357,54 @@ describe("resetAppearance", () => {
 		expect(reset.edgeFadeEnabled).toBe(DEFAULT_SETTINGS.edgeFadeEnabled);
 		expect(reset.edgeFadeSize).toBe(DEFAULT_SETTINGS.edgeFadeSize);
 		expect(reset.card.textEffect).toEqual(DEFAULT_TEXT_EFFECT);
+	});
+});
+
+describe("pointerAutoScrollStrength (P1-3)", () => {
+	it("defaults to 1 and clamps into 0.25–2", () => {
+		expect(normalizeSettings({}).pointerAutoScrollStrength).toBe(1);
+		expect(
+			normalizeSettings({ pointerAutoScrollStrength: 0 })
+				.pointerAutoScrollStrength,
+		).toBe(0.25);
+		expect(
+			normalizeSettings({ pointerAutoScrollStrength: 99 })
+				.pointerAutoScrollStrength,
+		).toBe(2);
+		expect(
+			normalizeSettings({ pointerAutoScrollStrength: 1.5 })
+				.pointerAutoScrollStrength,
+		).toBe(1.5);
+		expect(
+			normalizeSettings({ pointerAutoScrollStrength: "fast" })
+				.pointerAutoScrollStrength,
+		).toBe(1);
+	});
+
+	it("survives resetAppearance (workflow, not appearance)", () => {
+		const custom = normalizeSettings({ pointerAutoScrollStrength: 0.5 });
+		expect(resetAppearance(custom).pointerAutoScrollStrength).toBe(0.5);
+	});
+});
+
+describe("resetAppearanceInPlace (P1-6)", () => {
+	it("preserves object identities while resetting values", () => {
+		const settings = normalizeSettings({
+			markerStyle: "dot",
+			maxScale: 1.6,
+			card: { opacity: 0, textEffect: { mode: "halo", blur: 8 } },
+		});
+		const card = settings.card;
+		const textEffect = settings.card.textEffect;
+		const result = resetAppearanceInPlace(settings);
+		// Identity: the same objects every closure captured stay live.
+		expect(result).toBe(settings);
+		expect(settings.card).toBe(card);
+		expect(settings.card.textEffect).toBe(textEffect);
+		// Values: reset to defaults.
+		expect(settings.markerStyle).toBe(DEFAULT_SETTINGS.markerStyle);
+		expect(settings.maxScale).toBe(DEFAULT_SETTINGS.maxScale);
+		expect(settings.card).toEqual(DEFAULT_CARD);
+		expect(settings.card.textEffect).toEqual(DEFAULT_TEXT_EFFECT);
 	});
 });

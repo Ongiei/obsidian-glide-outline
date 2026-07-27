@@ -92,14 +92,8 @@ describe("GlideOutlineView placement & hierarchy variables", () => {
 		expect(
 			view.rootEl.classList.contains("glide-outline-root--text-halo"),
 		).toBe(false);
-		expect(
-			view.rootEl.classList.contains("glide-outline-root--text-stroke"),
-		).toBe(false);
 		expect(view.rootEl.style.getPropertyValue("--glide-text-halo")).toBe(
 			"none",
-		);
-		expect(view.rootEl.style.getPropertyValue("--glide-text-stroke")).toBe(
-			"0",
 		);
 	});
 
@@ -114,30 +108,8 @@ describe("GlideOutlineView placement & hierarchy variables", () => {
 		expect(
 			view.rootEl.classList.contains("glide-outline-root--text-halo"),
 		).toBe(true);
-		expect(
-			view.rootEl.classList.contains("glide-outline-root--text-stroke"),
-		).toBe(false);
 		expect(view.rootEl.style.getPropertyValue("--glide-text-halo")).toBe(
 			"0 0 1px rgba(0, 0, 0, 0.4), 0 0 3px rgba(0, 0, 0, 0.32), 0 0 6px rgba(0, 0, 0, 0.2)",
-		);
-	});
-
-	it("applies the stroke class and a hairline text stroke", () => {
-		settings.card.textEffect = {
-			mode: "stroke",
-			color: "#000000",
-			opacity: 45,
-			blur: 3,
-		};
-		view.applySettings();
-		expect(
-			view.rootEl.classList.contains("glide-outline-root--text-stroke"),
-		).toBe(true);
-		expect(
-			view.rootEl.classList.contains("glide-outline-root--text-halo"),
-		).toBe(false);
-		expect(view.rootEl.style.getPropertyValue("--glide-text-stroke")).toBe(
-			"0.5px rgba(0, 0, 0, 0.45)",
 		);
 	});
 
