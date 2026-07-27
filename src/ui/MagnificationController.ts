@@ -6,8 +6,16 @@ import type { GlideOutlineView } from "./GlideOutlineView";
 
 interface CachedItem {
 	el: HTMLElement;
-	/** Vertical center in viewport client coordinates. */
-	center: number;
+	/**
+	 * Base vertical center in viewport client coordinates — where the row
+	 * is LAID OUT. Rows themselves never transform (`--glide-shift-y`
+	 * moves the motion element inside), so the row rect is transform-free.
+	 */
+	baseCenter: number;
+	/** translateY currently applied to the row's motion element, px. */
+	currentShift: number;
+	/** baseCenter + currentShift — where the card/marker visually is. */
+	visualCenter: number;
 	/** Unscaled card height (measured by the view, cached here). */
 	height: number;
 	lastScale: number;
@@ -18,7 +26,10 @@ interface CachedItem {
  * the rail and a label card does not flicker the outline shut. */
 const COLLAPSE_GRACE_MS = 120;
 
-/** Pointer auto-scroll: peak speed in px/s at the very edge. */
+/** Pointer auto-scroll: peak speed in px/s at the very edge (strength 1).
+ * `pointerAutoScrollStrength` (P1-3) scales this AND the acceleration cap
+ * linearly, so the motion character (ramp shape, damping feel) is
+ * preserved at every strength — only the tempo changes. */
 export const AUTO_SCROLL_MAX_SPEED = 320;
 /** Dwell before the list starts moving, so brushing an edge does not
  * immediately yank the heading the user was about to click. */
@@ -50,6 +61,16 @@ export class MagnificationController {
 	private readonly disposables = new DisposableStore();
 	private readonly win: Window & typeof globalThis;
 	private cache: CachedItem[] = [];
+	/** Solver input view over `cache` (rebuilt with it, stable per frame). */
+	private layout: { center: number; height: number }[] = [];
+	/** Per-item shifts fed back into the solver (visual → base mapping). */
+	private shifts: number[] = [];
+	/**
+	 * Row element the pointer is physically over (DOM hit-testing via
+	 * `closest(".glide-outline-row")`). Authoritative magnification anchor
+	 * — visual truth beats any base-center distance guess (P0-5).
+	 */
+	private pointerAnchorEl: HTMLElement | null = null;
 	private cacheDirty = true;
 	private pointerExpanded = false;
 	private focusExpanded = false;
@@ -89,7 +110,8 @@ export class MagnificationController {
 		this.win = win;
 		this.reducedMotionQuery = win.matchMedia("(prefers-reduced-motion: reduce)");
 
-		const { hitZoneEl, viewportEl, listEl, rootEl } = view;
+		const { hitZoneEl, interactionSurfaceEl, viewportEl, listEl, rootEl } =
+			view;
 
 		// Rail strip: enter/move/leave.
 		this.disposables.listen(hitZoneEl, "pointerenter", this.onPointerEnter);
@@ -100,18 +122,38 @@ export class MagnificationController {
 		this.disposables.listen(listEl, "pointerenter", this.onPointerEnter);
 		this.disposables.listen(listEl, "pointermove", this.onPointerMove);
 		this.disposables.listen(listEl, "pointerleave", this.onPointerLeave);
-
-		// Wheel on the rail strip scrolls the outline, not the editor (Phase 10).
+		// Continuous interaction surface (P0-1): closes the quadrilateral
+		// hover hole between two magnification-displaced rows. Interactive
+		// only while expanded (CSS), so these listeners cannot expand a
+		// collapsed outline; they only KEEP it expanded and keep feeding
+		// pointerY into magnification + auto-scroll.
 		this.disposables.listen(
-			hitZoneEl,
-			"wheel",
-			(event: WheelEvent) => {
-				if (!this.isExpanded()) return;
-				event.preventDefault();
-				viewportEl.scrollTop += event.deltaY;
-			},
-			{ passive: false },
+			interactionSurfaceEl,
+			"pointerenter",
+			this.onPointerEnter,
 		);
+		this.disposables.listen(
+			interactionSurfaceEl,
+			"pointermove",
+			this.onPointerMove,
+		);
+		this.disposables.listen(
+			interactionSurfaceEl,
+			"pointerleave",
+			this.onPointerLeave,
+		);
+
+		// Wheel on the rail strip or the interaction surface scrolls the
+		// outline, not the editor (Phase 10 / P0-1).
+		const onWheel = (event: WheelEvent): void => {
+			if (!this.isExpanded()) return;
+			event.preventDefault();
+			viewportEl.scrollTop += event.deltaY;
+		};
+		this.disposables.listen(hitZoneEl, "wheel", onWheel, { passive: false });
+		this.disposables.listen(interactionSurfaceEl, "wheel", onWheel, {
+			passive: false,
+		});
 
 		this.disposables.listen(
 			viewportEl,
@@ -191,6 +233,7 @@ export class MagnificationController {
 		this.pointerInside = true;
 		this.cacheDirty = true;
 		this.lastPointerY = event.clientY;
+		this.trackPointerAnchor(event);
 		// Fresh gesture: no carried-over velocity from a previous visit.
 		this.pointerVelocityY = 0;
 		this.lastMoveTime = event.timeStamp;
@@ -208,8 +251,24 @@ export class MagnificationController {
 		this.pointerInside = true;
 		this.trackPointerVelocity(event);
 		this.lastPointerY = event.clientY;
+		this.trackPointerAnchor(event);
 		this.schedule();
 	};
+
+	/**
+	 * DOM hit-testing for the magnification anchor (P0-5): when the event
+	 * target sits inside a row, that row is what the user visually points
+	 * at — even when magnification displaced it away from its base center.
+	 * Blank-area events (hit zone, interaction surface) clear the anchor;
+	 * the solver then falls back to nearest-visual-center interpolation.
+	 * Duck-typed `closest` — safe in pop-out windows.
+	 */
+	private trackPointerAnchor(event: PointerEvent): void {
+		const target = event.target as Partial<Element> | null;
+		this.pointerAnchorEl =
+			(target?.closest?.(".glide-outline-row") as HTMLElement | null) ??
+			null;
+	}
 
 	/**
 	 * Low-pass filtered pointer velocity (px/s, + = down). The filter
@@ -233,11 +292,16 @@ export class MagnificationController {
 	}
 
 	private onPointerLeave = (event: PointerEvent): void => {
+		// The pointer envelope is the UNION of interaction surface, rail
+		// hit zone, markers and cards — leaving one element toward another
+		// element of the envelope (relatedTarget still inside the root)
+		// never even arms the collapse timer.
 		const related = event.relatedTarget;
 		if (this.isNodeInRoot(related)) return;
 		// Auto-scroll must stop IMMEDIATELY on pointerleave — only the
 		// expand/collapse state gets the grace period.
 		this.pointerInside = false;
+		this.pointerAnchorEl = null;
 		this.stopAutoScroll();
 		// Grace period: crossing the transparent gap must not collapse.
 		this.cancelCollapse();
@@ -296,13 +360,20 @@ export class MagnificationController {
 		const reduced =
 			this.reducedMotionQuery.matches || !settings.animationEnabled;
 		// Pure math over cached geometry — no DOM reads inside the frame.
+		// The pointer is in VISUAL space; `shifts` + the DOM-hit anchor let
+		// the solver map it back to base space (P0-5), so the row the user
+		// visually points at is the one that magnifies.
 		const results = computeCollisionFreeMagnification(
 			this.lastPointerY,
-			this.cache,
+			this.layout,
 			settings.maxScale,
 			settings.radius,
 			settings.cardGap,
 			reduced,
+			{
+				currentShifts: this.shifts,
+				preferredAnchorIndex: this.resolveAnchorIndex(),
+			},
 		);
 
 		for (let i = 0; i < this.cache.length; i++) {
@@ -316,6 +387,10 @@ export class MagnificationController {
 				entry.el.style.setProperty("--glide-shift-y", `${translateY}px`);
 				entry.lastShift = translateY;
 			}
+			// Keep the visual model in lockstep with what was just applied.
+			entry.currentShift = translateY;
+			entry.visualCenter = entry.baseCenter + translateY;
+			this.shifts[i] = translateY;
 		}
 
 		// Pointer edge auto-scroll shares this frame: scrolling marks the
@@ -362,13 +437,16 @@ export class MagnificationController {
 			if (Math.abs(this.pointerVelocityY) < 1) this.pointerVelocityY = 0;
 		}
 
+		// P1-3: strength scales speed AND acceleration linearly, so the
+		// ramp/damp character is identical at every strength setting.
+		const strength = settings.pointerAutoScrollStrength;
 		const overflow = this.view.getOverflowState();
 		const target = computePointerAutoScrollVelocity({
 			pointerY: this.lastPointerY,
 			pointerVelocityY: this.pointerVelocityY,
 			viewportTop: this.viewportTop,
 			viewportBottom: this.viewportBottom,
-			maxSpeed: AUTO_SCROLL_MAX_SPEED,
+			maxSpeed: AUTO_SCROLL_MAX_SPEED * strength,
 			canScrollUp: overflow.canScrollUp,
 			canScrollDown: overflow.canScrollDown,
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
@@ -395,7 +473,7 @@ export class MagnificationController {
 
 		if (dt > 0) {
 			// Acceleration-capped chase → continuous ramps and damping.
-			const maxDelta = AUTO_SCROLL_ACCEL * dt;
+			const maxDelta = AUTO_SCROLL_ACCEL * strength * dt;
 			const delta = target - this.appliedVelocity;
 			this.appliedVelocity +=
 				Math.min(maxDelta, Math.max(-maxDelta, delta));
@@ -422,6 +500,16 @@ export class MagnificationController {
 		this.pointerVelocityY = 0;
 	}
 
+	/** Map the DOM-hit anchor element to its cache index (-1 = blank). */
+	private resolveAnchorIndex(): number {
+		const el = this.pointerAnchorEl;
+		if (!el) return -1;
+		for (let i = 0; i < this.cache.length; i++) {
+			if (this.cache[i].el === el) return i;
+		}
+		return -1;
+	}
+
 	private rebuildCache(): void {
 		this.cacheDirty = false;
 		// Viewport bounds are cached here (not per frame) — they only move
@@ -435,17 +523,29 @@ export class MagnificationController {
 			const el = children[i];
 			// Pop-out safe instanceof (P1-1).
 			if (!(el instanceof this.win.HTMLElement)) continue;
+			// Row rects are transform-free (only the inner motion element
+			// carries --glide-shift-y), so this measures the BASE center.
 			const rect = el.getBoundingClientRect();
 			const key = el.dataset.key ?? "";
 			// Height comes from the view's measurement pass (offsetHeight,
 			// transform-free); fall back to the row rect for safety.
 			const measured = this.view.getBaseCardHeight(key);
+			// Carry the applied shift across rebuilds: the style survives on
+			// the element, so the visual model must survive with it.
+			const previous = this.cache.find((entry) => entry.el === el);
+			const carried =
+				previous && Number.isFinite(previous.lastShift)
+					? previous.lastShift
+					: 0;
+			const baseCenter = rect.top + rect.height / 2;
 			next.push({
 				el,
-				center: rect.top + rect.height / 2,
+				baseCenter,
+				currentShift: carried,
+				visualCenter: baseCenter + carried,
 				height: measured > 0 ? measured : rect.height,
-				lastScale: Number.NaN,
-				lastShift: Number.NaN,
+				lastScale: previous?.lastScale ?? Number.NaN,
+				lastShift: previous?.lastShift ?? Number.NaN,
 			});
 		}
 		// Reset styles on elements that dropped out of the cache.
@@ -456,6 +556,18 @@ export class MagnificationController {
 			}
 		}
 		this.cache = next;
+		this.layout = next.map((entry) => ({
+			center: entry.baseCenter,
+			height: entry.height,
+		}));
+		this.shifts = next.map((entry) => entry.currentShift);
+		// The anchor element may have been removed with its heading.
+		if (
+			this.pointerAnchorEl &&
+			!next.some((entry) => entry.el === this.pointerAnchorEl)
+		) {
+			this.pointerAnchorEl = null;
+		}
 	}
 
 	private clearMagnification(): void {
@@ -464,6 +576,10 @@ export class MagnificationController {
 			entry.el.style.removeProperty("--glide-shift-y");
 			entry.lastScale = Number.NaN;
 			entry.lastShift = Number.NaN;
+			entry.currentShift = 0;
+			entry.visualCenter = entry.baseCenter;
 		}
+		this.shifts.fill(0);
+		this.pointerAnchorEl = null;
 	}
 }

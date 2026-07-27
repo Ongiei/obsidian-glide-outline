@@ -14,13 +14,23 @@
      1. .glide-outline-hit-zone  – thin transparent strip over the rail
      2. .glide-outline-marker    – rail-width hit slots (line drawn via ::before)
      3. .glide-outline-card      – visible label cards, expanded state only
-     4. .glide-outline-motion    – EXPANDED ONLY: the interaction corridor.
-        Its box is exactly marker + column-gap + card (width: max-content,
-        full row height), so while browsing, the transparent gap between
-        marker and label and the slack above/below the text stay inside
-        the outline's hover envelope — crossing them no longer collapses
-        the list. Collapsed, it reverts to pointer-transparent, and it
-        never extends past the card into the text body.
+     4. .glide-outline-motion    – EXPANDED ONLY: per-row interaction
+        corridor. Its box is exactly marker + column-gap + card
+        (width: max-content, full row height); collapsed, it reverts to
+        pointer-transparent, and it never extends past the card into the
+        text body.
+     5. .glide-outline-interaction-surface – EXPANDED ONLY: one CONTINUOUS
+        transparent plane under all visual layers. Per-row corridors move
+        with --glide-shift-y during magnification, which opens a
+        quadrilateral hover hole centered between two displaced
+        neighbours; this surface closes it. It spans the root vertically
+        (viewport height including the safe padding areas) and
+        horizontally from the rail to the farthest safe card edge
+        (--glide-interaction-width, written by the width solver), mirrored
+        for left/right outlines. It paints nothing, owns no clicks and no
+        aria semantics — clicks fall through to nothing (blank space never
+        jumps). Collapsed, it is pointer-transparent, so the editor text
+        under it stays fully clickable, selectable and scrollable.
    The editor underneath stays fully clickable everywhere else.
 
    Transform responsibilities:
@@ -82,6 +92,41 @@
 
 .glide-outline-root--left .glide-outline-hit-zone {
 	left: 0;
+}
+
+/* Continuous interaction surface (P0-1): a fully transparent plane that
+   keeps the pointer inside the hover envelope while it crosses the
+   quadrilateral gap between two magnification-displaced rows. It paints
+   NOTHING (no background, border or shadow — the single-card invariant
+   is untouched) and is interactive only while the outline is expanded
+   or holds keyboard focus. Width comes from the width solver via
+   --glide-interaction-width (rail → farthest safe card edge, including
+   indent, padding, border and shadow allowances at max magnification);
+   it never exceeds the root, so the editor text beyond the cards stays
+   clickable even while expanded. */
+.glide-outline-interaction-surface {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: var(--glide-interaction-width, var(--glide-root-width, 340px));
+	max-width: 100%;
+	background: none;
+	border: none;
+	box-shadow: none;
+	pointer-events: none;
+}
+
+.glide-outline-root--right .glide-outline-interaction-surface {
+	right: 0;
+}
+
+.glide-outline-root--left .glide-outline-interaction-surface {
+	left: 0;
+}
+
+.glide-outline-root.is-expanded .glide-outline-interaction-surface,
+.glide-outline-root:focus-within .glide-outline-interaction-surface {
+	pointer-events: auto;
 }
 
 /* Drawing layers: never intercept the pointer. --glide-viewport-pad keeps
@@ -456,12 +501,6 @@
 	text-shadow: inherit;
 }
 
-/* Text effect — stroke: hairline outline (0.5px, color from settings).
-   The variable is "0" in every other mode, which disables the stroke. */
-.glide-outline-root--text-stroke .glide-outline-label {
-	-webkit-text-stroke: var(--glide-text-stroke, 0);
-}
-
 /* Pure text mode: opacity 0 + no border + no shadow → the card element
    stays (it remains the scale container) but paints nothing. */
 .glide-outline-root--pure-text .glide-outline-card {
@@ -614,4 +653,45 @@
 	.glide-outline-card {
 		transition: none;
 	}
+}
+
+/* --------------------------------------------------------------------------
+   Settings tab (P1-5): four-section tabbed page. Pure Obsidian theme
+   variables — follows light/dark themes and accent color automatically.
+   -------------------------------------------------------------------------- */
+.glide-settings-tablist {
+	display: flex;
+	gap: 4px;
+	margin-bottom: 16px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.glide-settings-tab {
+	appearance: none;
+	background: none;
+	border: none;
+	box-shadow: none;
+	padding: 8px 14px;
+	margin-bottom: -1px;
+	font-size: var(--font-ui-medium);
+	color: var(--text-muted);
+	border-bottom: 2px solid transparent;
+	border-radius: var(--radius-s) var(--radius-s) 0 0;
+	cursor: pointer;
+}
+
+.glide-settings-tab:hover {
+	color: var(--text-normal);
+	background-color: var(--background-modifier-hover);
+}
+
+.glide-settings-tab.is-active {
+	color: var(--text-normal);
+	border-bottom-color: var(--interactive-accent);
+	font-weight: var(--font-semibold);
+}
+
+.glide-settings-tab:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: -2px;
 }

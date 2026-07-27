@@ -12,13 +12,15 @@ export type MarkerStyle = "line" | "dot";
 export type LevelIndicatorStyle = "none" | "badge";
 /**
  * Label text enhancement for readability over busy backgrounds.
- * - "none":   plain text (default — no dirty edges, ever)
- * - "halo":   soft omnidirectional glow (multi-layer, no offset)
- * - "stroke": hairline outline via -webkit-text-stroke
+ * - "none": plain text (default — no dirty edges, ever)
+ * - "halo": soft omnidirectional glow (multi-layer, no offset)
  * A directional drop shadow is deliberately NOT offered any more: it read
- * as smudged edges, especially with bold CJK glyphs.
+ * as smudged edges, especially with bold CJK glyphs. The hairline stroke
+ * (`-webkit-text-stroke`) was removed too (P1-2): at 0.5px it visibly
+ * thinned Latin glyphs and pixel-snapped inconsistently across zoom
+ * levels. Persisted `"stroke"` values normalize to `"none"`.
  */
-export type TextEffectMode = "none" | "halo" | "stroke";
+export type TextEffectMode = "none" | "halo";
 
 /**
  * Structured text effect. Replaces both the legacy `textShadow: boolean`
@@ -28,7 +30,7 @@ export type TextEffectMode = "none" | "halo" | "stroke";
  */
 export interface TextEffectSettings {
 	mode: TextEffectMode;
-	/** Halo / stroke color; hex `#rgb` or `#rrggbb`. */
+	/** Halo color; hex `#rgb` or `#rrggbb`. */
 	color: string;
 	/** Effect alpha in percent, 0–100. */
 	opacity: number;
@@ -81,6 +83,11 @@ export interface GlideOutlineSettings {
 	edgeFadeSize: number;
 	/** Slowly scroll the list when the pointer dwells near an edge. */
 	pointerAutoScroll: boolean;
+	/**
+	 * Multiplier on the pointer auto-scroll speed/acceleration (P1-3).
+	 * 1 = the tuned default feel; 0.25 = very gentle; 2 = brisk.
+	 */
+	pointerAutoScrollStrength: number;
 	markerStyle: MarkerStyle;
 	/** Peak scale at pointer distance 0. */
 	maxScale: number;
@@ -131,6 +138,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	edgeFadeEnabled: true,
 	edgeFadeSize: 28,
 	pointerAutoScroll: true,
+	pointerAutoScrollStrength: 1,
 	markerStyle: "line",
 	maxScale: 1.25,
 	radius: 90,
@@ -151,7 +159,10 @@ export const RANGES = {
 	horizontalOffset: { min: 0, max: 64 },
 	levelIndent: { min: 0, max: 8 },
 	edgeFadeSize: { min: 12, max: 64 },
-	maxScale: { min: 1, max: 1.75 },
+	pointerAutoScrollStrength: { min: 0.25, max: 2 },
+	// 2.25 (P1-1): the collision solver keeps neighbours readable even at
+	// high peaks, so the old 1.75 cap was purely conservative.
+	maxScale: { min: 1, max: 2.25 },
 	radius: { min: 40, max: 240 },
 	baseFontSize: { min: 9, max: 18 },
 	maxLabelWidth: { min: 140, max: 400 },
@@ -205,6 +216,9 @@ function rgba(color: string, alpha: number): string {
  *      color/opacity/blur (offsets are dropped — directional shadows are
  *      exactly what the redesign removes)
  *   3. current `textEffect` object  → validated field by field
+ * The retired `"stroke"` mode (P1-2) folds into `"none"` — silently
+ * dropping the effect is safer than surprising users with a halo they
+ * never chose.
  */
 export function normalizeTextEffect(raw: unknown): TextEffectSettings {
 	if (typeof raw === "boolean") {
@@ -212,13 +226,15 @@ export function normalizeTextEffect(raw: unknown): TextEffectSettings {
 	}
 	const data = (raw ?? {}) as Record<string, unknown>;
 	const mode: TextEffectMode =
-		data.mode === "halo" || data.mode === "stroke" || data.mode === "none"
+		data.mode === "halo" || data.mode === "none"
 			? data.mode
-			: typeof data.enabled === "boolean"
-				? data.enabled
-					? "halo"
-					: "none"
-				: DEFAULT_TEXT_EFFECT.mode;
+			: data.mode === "stroke"
+				? "none"
+				: typeof data.enabled === "boolean"
+					? data.enabled
+						? "halo"
+						: "none"
+					: DEFAULT_TEXT_EFFECT.mode;
 	return {
 		mode,
 		color: hexColor(data.color, DEFAULT_TEXT_EFFECT.color),
@@ -257,16 +273,6 @@ export function textEffectHaloCss(effect: TextEffectSettings): string {
 		`0 0 ${effect.blur}px ${mid}`,
 		`0 0 ${effect.blur * 2}px ${outer}`,
 	].join(", ");
-}
-
-/**
- * Hairline stroke value for `--glide-text-stroke`
- * (`-webkit-text-stroke`). Fixed at 0.5px — anything thicker eats thin
- * Latin glyphs. "0" (not "none": invalid there) for non-stroke modes.
- */
-export function textEffectStrokeCss(effect: TextEffectSettings): string {
-	if (effect.mode !== "stroke") return "0";
-	return `0.5px ${rgba(effect.color, effect.opacity / 100)}`;
 }
 
 function normalizeCard(raw: unknown): LabelAppearanceSettings {
@@ -353,6 +359,12 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 			data.pointerAutoScroll,
 			DEFAULT_SETTINGS.pointerAutoScroll,
 		),
+		pointerAutoScrollStrength: clamp(
+			data.pointerAutoScrollStrength,
+			RANGES.pointerAutoScrollStrength.min,
+			RANGES.pointerAutoScrollStrength.max,
+			DEFAULT_SETTINGS.pointerAutoScrollStrength,
+		),
 		markerStyle: data.markerStyle === "dot" || data.markerStyle === "line"
 			? data.markerStyle
 			: DEFAULT_SETTINGS.markerStyle,
@@ -420,8 +432,8 @@ export function normalizeSettingsInPlace(
 /**
  * Restore appearance-related values to their defaults.
  * Deliberately preserved: enabled, position, vertical/horizontal offset,
- * pointer auto-scroll, shown levels and Markdown rendering — those encode
- * workflow and placement, not appearance.
+ * pointer auto-scroll (and its strength), shown levels and Markdown
+ * rendering — those encode workflow and placement, not appearance.
  */
 export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 	return {
@@ -441,7 +453,55 @@ export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 	};
 }
 
+/**
+ * Identity-preserving reset (P1-6). The settings tab MUST use this: the
+ * old `plugin.settings = resetAppearance(plugin.settings)` swapped the
+ * object identity, which is exactly the pattern that caused the historic
+ * "change it twice before it sticks" bug (see normalizeSettingsInPlace).
+ */
+export function resetAppearanceInPlace(
+	target: GlideOutlineSettings,
+): GlideOutlineSettings {
+	const clean = resetAppearance(target);
+	Object.assign(target, clean, {
+		card: Object.assign(target.card ?? {}, clean.card, {
+			textEffect: Object.assign(
+				target.card?.textEffect ?? {},
+				clean.card.textEffect,
+			),
+		}),
+	});
+	return target;
+}
+
+/** Settings-tab sections (P1-5). */
+export type SettingsTabId = "general" | "appearance" | "motion" | "advanced";
+
+const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string }> = [
+	{ id: "general", label: "General" },
+	{ id: "appearance", label: "Appearance" },
+	{ id: "motion", label: "Motion" },
+	{ id: "advanced", label: "Advanced" },
+];
+
+/**
+ * Tabbed settings page (P1-5): General / Appearance / Motion / Advanced.
+ *
+ * a11y contract: `role=tablist/tab/tabpanel`, `aria-selected`,
+ * `aria-controls`/`aria-labelledby` pairing, roving tabindex with
+ * Arrow/Home/End keyboard support. Native Obsidian `Setting` rows only —
+ * no framework. Styling rides on Obsidian theme variables (styles.css).
+ *
+ * P1-4: the text-effect dropdown re-renders ONLY its detail container —
+ * a full `display()` would destroy the dropdown mid-interaction and
+ * reset the scroll position.
+ */
 export class GlideOutlineSettingTab extends PluginSettingTab {
+	private activeTab: SettingsTabId = "general";
+	private panelEl: HTMLElement | null = null;
+	private tabButtons = new Map<SettingsTabId, HTMLElement>();
+	private textEffectDetailsEl: HTMLElement | null = null;
+
 	constructor(app: App, private readonly plugin: GlideOutlinePlugin) {
 		super(app, plugin);
 	}
@@ -449,9 +509,111 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 	override display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		this.tabButtons.clear();
+
+		const tablist = containerEl.createDiv({
+			cls: "glide-settings-tablist",
+		});
+		tablist.setAttribute("role", "tablist");
+		tablist.setAttribute("aria-label", "Glide Outline settings sections");
+
+		for (const tab of SETTINGS_TABS) {
+			const button = tablist.createEl("button", {
+				text: tab.label,
+				cls: "glide-settings-tab",
+			});
+			button.setAttribute("type", "button");
+			button.setAttribute("role", "tab");
+			button.id = `glide-settings-tab-${tab.id}`;
+			button.setAttribute("aria-controls", "glide-settings-panel");
+			button.addEventListener("click", () => this.selectTab(tab.id));
+			button.addEventListener("keydown", (event) =>
+				this.handleTabKeydown(event, tab.id),
+			);
+			this.tabButtons.set(tab.id, button);
+		}
+
+		const panel = containerEl.createDiv({ cls: "glide-settings-tabpanel" });
+		panel.id = "glide-settings-panel";
+		panel.setAttribute("role", "tabpanel");
+		this.panelEl = panel;
+
+		this.syncTabState();
+		this.renderActivePanel();
+	}
+
+	override hide(): void {
+		this.panelEl = null;
+		this.textEffectDetailsEl = null;
+		this.tabButtons.clear();
+	}
+
+	private selectTab(id: SettingsTabId): void {
+		if (this.activeTab === id) return;
+		this.activeTab = id;
+		this.syncTabState();
+		this.renderActivePanel();
+	}
+
+	/** Roving tabindex: ←/→ wrap around, Home/End jump (P1-5 a11y). */
+	private handleTabKeydown(event: KeyboardEvent, current: SettingsTabId): void {
+		const ids = SETTINGS_TABS.map((tab) => tab.id);
+		const index = ids.indexOf(current);
+		let next: SettingsTabId | null = null;
+		if (event.key === "ArrowRight") {
+			next = ids[(index + 1) % ids.length];
+		} else if (event.key === "ArrowLeft") {
+			next = ids[(index + ids.length - 1) % ids.length];
+		} else if (event.key === "Home") {
+			next = ids[0];
+		} else if (event.key === "End") {
+			next = ids[ids.length - 1];
+		}
+		if (!next) return;
+		event.preventDefault();
+		this.selectTab(next);
+		this.tabButtons.get(next)?.focus();
+	}
+
+	private syncTabState(): void {
+		for (const [id, button] of this.tabButtons) {
+			const active = id === this.activeTab;
+			button.classList.toggle("is-active", active);
+			button.setAttribute("aria-selected", active ? "true" : "false");
+			button.setAttribute("tabindex", active ? "0" : "-1");
+		}
+		this.panelEl?.setAttribute(
+			"aria-labelledby",
+			`glide-settings-tab-${this.activeTab}`,
+		);
+	}
+
+	private renderActivePanel(): void {
+		const panel = this.panelEl;
+		if (!panel) return;
+		panel.empty();
+		this.textEffectDetailsEl = null;
+		switch (this.activeTab) {
+			case "general":
+				this.renderGeneral(panel);
+				break;
+			case "appearance":
+				this.renderAppearance(panel);
+				break;
+			case "motion":
+				this.renderMotion(panel);
+				break;
+			case "advanced":
+				this.renderAdvanced(panel);
+				break;
+		}
+	}
+
+	// --- General: on/off, placement -----------------------------------
+
+	private renderGeneral(containerEl: HTMLElement): void {
 		const s = this.plugin.settings;
 
-		// --- General (no heading for the first group, per Obsidian guidelines)
 		new Setting(containerEl)
 			.setName("Enable outline")
 			.setDesc("Show the outline rail in the margin of the active Markdown editor.")
@@ -504,8 +666,21 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		// --- Marker
-		new Setting(containerEl).setName("Marker").setHeading();
+		new Setting(containerEl).setName("Show heading levels").setHeading();
+		for (let level = 1; level <= 6; level++) {
+			new Setting(containerEl).setName(`H${level}`).addToggle((toggle) =>
+				toggle.setValue(s.showLevels[level - 1]).onChange(async (value) => {
+					s.showLevels[level - 1] = value;
+					await this.plugin.applySettings();
+				}),
+			);
+		}
+	}
+
+	// --- Appearance: marker, typography, card, hierarchy, text effect --
+
+	private renderAppearance(containerEl: HTMLElement): void {
+		const s = this.plugin.settings;
 
 		new Setting(containerEl)
 			.setName("Marker style")
@@ -519,47 +694,6 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 						s.markerStyle = value === "dot" ? "dot" : "line";
 						await this.plugin.applySettings();
 					}),
-			);
-
-		// --- Motion
-		new Setting(containerEl).setName("Motion").setHeading();
-
-		new Setting(containerEl)
-			.setName("Maximum magnification")
-			.setDesc("Peak scale of the heading nearest the pointer.")
-			.addSlider((slider) =>
-				slider
-					.setLimits(RANGES.maxScale.min, RANGES.maxScale.max, 0.05)
-					.setValue(s.maxScale)
-					.setDynamicTooltip()
-					.onChange((value) => {
-						s.maxScale = value;
-						this.plugin.previewSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName("Magnification radius")
-			.setDesc("Distance in pixels over which magnification decays to normal size.")
-			.addSlider((slider) =>
-				slider
-					.setLimits(RANGES.radius.min, RANGES.radius.max, 5)
-					.setValue(s.radius)
-					.setDynamicTooltip()
-					.onChange((value) => {
-						s.radius = value;
-						this.plugin.previewSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName("Animation")
-			.setDesc("Disable for instant reveal without motion.")
-			.addToggle((toggle) =>
-				toggle.setValue(s.animationEnabled).onChange(async (value) => {
-					s.animationEnabled = value;
-					await this.plugin.applySettings();
-				}),
 			);
 
 		// --- Typography
@@ -696,87 +830,137 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
-			.setName("Level indentation (legacy)")
-			.setDesc("Pixels each deeper level steps toward the text body. Superseded by the level badge; kept for vaults that prefer the staircase. 0 = off.")
-			.addSlider((slider) =>
-				slider
-					.setLimits(RANGES.levelIndent.min, RANGES.levelIndent.max, 1)
-					.setValue(s.levelIndent)
-					.setDynamicTooltip()
-					.onChange((value) => {
-						s.levelIndent = value;
-						this.plugin.previewSettings();
-					}),
-			);
-
 		// --- Text effect
 		new Setting(containerEl).setName("Text effect").setHeading();
 
 		new Setting(containerEl)
 			.setName("Text effect")
-			.setDesc("Halo adds a soft glow around label text for readability over busy backgrounds — most useful in pure text mode. Stroke draws a hairline outline.")
+			.setDesc("Halo adds a soft glow around label text for readability over busy backgrounds — most useful in pure text mode.")
 			.addDropdown((dropdown) =>
 				dropdown
 					.addOption("none", "None")
 					.addOption("halo", "Halo")
-					.addOption("stroke", "Stroke")
 					.setValue(s.card.textEffect.mode)
 					.onChange((value) => {
-						s.card.textEffect.mode =
-							value === "halo" || value === "stroke" ? value : "none";
+						s.card.textEffect.mode = value === "halo" ? "halo" : "none";
 						this.plugin.previewSettings();
-						this.display();
+						// P1-4: rebuild ONLY the detail rows below — a full
+						// display() would tear the dropdown out from under
+						// the user and reset the page scroll position.
+						this.renderTextEffectDetails();
 					}),
 			);
 
-		if (s.card.textEffect.mode !== "none") {
-			new Setting(containerEl)
-				.setName("Effect color")
-				.addColorPicker((picker) =>
-					picker.setValue(s.card.textEffect.color).onChange((value) => {
-						s.card.textEffect.color = value;
+		this.textEffectDetailsEl = containerEl.createDiv({
+			cls: "glide-settings-texteffect-details",
+		});
+		this.renderTextEffectDetails();
+
+		// --- Rendering
+		new Setting(containerEl).setName("Rendering").setHeading();
+
+		new Setting(containerEl)
+			.setName("Render Markdown in labels")
+			.setDesc("Show inline formatting such as bold, code and links in heading labels.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.renderMarkdown).onChange(async (value) => {
+					s.renderMarkdown = value;
+					await this.plugin.applySettings();
+				}),
+			);
+	}
+
+	/** Partial rebuild of the halo detail rows (P1-4). */
+	private renderTextEffectDetails(): void {
+		const containerEl = this.textEffectDetailsEl;
+		if (!containerEl) return;
+		containerEl.empty();
+		const s = this.plugin.settings;
+		if (s.card.textEffect.mode === "none") return;
+
+		new Setting(containerEl)
+			.setName("Effect color")
+			.addColorPicker((picker) =>
+				picker.setValue(s.card.textEffect.color).onChange((value) => {
+					s.card.textEffect.color = value;
+					this.plugin.previewSettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Effect opacity")
+			.addSlider((slider) =>
+				slider
+					.setLimits(
+						RANGES.textEffectOpacity.min,
+						RANGES.textEffectOpacity.max,
+						5,
+					)
+					.setValue(s.card.textEffect.opacity)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.card.textEffect.opacity = value;
 						this.plugin.previewSettings();
 					}),
-				);
+			);
 
-			new Setting(containerEl)
-				.setName("Effect opacity")
-				.addSlider((slider) =>
-					slider
-						.setLimits(
-							RANGES.textEffectOpacity.min,
-							RANGES.textEffectOpacity.max,
-							5,
-						)
-						.setValue(s.card.textEffect.opacity)
-						.setDynamicTooltip()
-						.onChange((value) => {
-							s.card.textEffect.opacity = value;
-							this.plugin.previewSettings();
-						}),
-				);
+		new Setting(containerEl)
+			.setName("Halo size")
+			.setDesc("Radius of the glow, in pixels.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(RANGES.textEffectBlur.min, RANGES.textEffectBlur.max, 1)
+					.setValue(s.card.textEffect.blur)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.card.textEffect.blur = value;
+						this.plugin.previewSettings();
+					}),
+			);
+	}
 
-			if (s.card.textEffect.mode === "halo") {
-				new Setting(containerEl)
-					.setName("Halo size")
-					.setDesc("Radius of the glow, in pixels.")
-					.addSlider((slider) =>
-						slider
-							.setLimits(
-								RANGES.textEffectBlur.min,
-								RANGES.textEffectBlur.max,
-								1,
-							)
-							.setValue(s.card.textEffect.blur)
-							.setDynamicTooltip()
-							.onChange((value) => {
-								s.card.textEffect.blur = value;
-								this.plugin.previewSettings();
-							}),
-					);
-			}
-		}
+	// --- Motion: magnification, animation, edges, auto-scroll ----------
+
+	private renderMotion(containerEl: HTMLElement): void {
+		const s = this.plugin.settings;
+
+		new Setting(containerEl)
+			.setName("Maximum magnification")
+			.setDesc("Peak scale of the heading nearest the pointer.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(RANGES.maxScale.min, RANGES.maxScale.max, 0.05)
+					.setValue(s.maxScale)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.maxScale = value;
+						this.plugin.previewSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Magnification radius")
+			.setDesc("Distance in pixels over which magnification decays to normal size.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(RANGES.radius.min, RANGES.radius.max, 5)
+					.setValue(s.radius)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.radius = value;
+						this.plugin.previewSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Animation")
+			.setDesc("Disable for instant reveal without motion.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.animationEnabled).onChange(async (value) => {
+					s.animationEnabled = value;
+					await this.plugin.applySettings();
+				}),
+			);
 
 		// --- Overflow
 		new Setting(containerEl).setName("Overflow").setHeading();
@@ -815,36 +999,53 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		// --- Rendering
-		new Setting(containerEl).setName("Rendering").setHeading();
+		new Setting(containerEl)
+			.setName("Auto-scroll strength")
+			.setDesc("Speed multiplier for pointer edge auto-scroll. 1 is the tuned default; lower is gentler, higher is brisker.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(
+						RANGES.pointerAutoScrollStrength.min,
+						RANGES.pointerAutoScrollStrength.max,
+						0.05,
+					)
+					.setValue(s.pointerAutoScrollStrength)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.pointerAutoScrollStrength = value;
+						this.plugin.previewSettings();
+					}),
+			);
+	}
+
+	// --- Advanced: legacy knobs and destructive actions ----------------
+
+	private renderAdvanced(containerEl: HTMLElement): void {
+		const s = this.plugin.settings;
 
 		new Setting(containerEl)
-			.setName("Render Markdown in labels")
-			.setDesc("Show inline formatting such as bold, code and links in heading labels.")
-			.addToggle((toggle) =>
-				toggle.setValue(s.renderMarkdown).onChange(async (value) => {
-					s.renderMarkdown = value;
-					await this.plugin.applySettings();
-				}),
+			.setName("Level indentation (legacy)")
+			.setDesc("Pixels each deeper level steps toward the text body. Superseded by the level badge; kept for vaults that prefer the staircase. 0 = off.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(RANGES.levelIndent.min, RANGES.levelIndent.max, 1)
+					.setValue(s.levelIndent)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.levelIndent = value;
+						this.plugin.previewSettings();
+					}),
 			);
 
-		new Setting(containerEl).setName("Show heading levels").setHeading();
-		for (let level = 1; level <= 6; level++) {
-			new Setting(containerEl).setName(`H${level}`).addToggle((toggle) =>
-				toggle.setValue(s.showLevels[level - 1]).onChange(async (value) => {
-					s.showLevels[level - 1] = value;
-					await this.plugin.applySettings();
-				}),
-			);
-		}
-
-		// --- Reset
 		new Setting(containerEl)
 			.setName("Restore default appearance")
 			.setDesc("Reset marker, motion, typography and label card settings. Position, shown levels and Markdown rendering are kept.")
 			.addButton((button) =>
 				button.setButtonText("Restore defaults").onClick(async () => {
-					this.plugin.settings = resetAppearance(this.plugin.settings);
+					// P1-6: reset IN PLACE — swapping the settings object
+					// identity is exactly what caused the historic
+					// "change it twice" bug.
+					resetAppearanceInPlace(this.plugin.settings);
 					await this.plugin.applySettings();
 					this.display();
 				}),

@@ -1,6 +1,6 @@
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
-import { textEffectHaloCss, textEffectStrokeCss } from "../settings";
+import { textEffectHaloCss } from "../settings";
 import {
 	computeResponsiveWidth,
 	computeVerticalSafeSpace,
@@ -69,6 +69,15 @@ interface ItemRecord {
 export class GlideOutlineView {
 	readonly rootEl: HTMLElement;
 	readonly hitZoneEl: HTMLElement;
+	/**
+	 * Continuous transparent interaction surface (P0-1). Sits UNDER the
+	 * visual layers and spans the whole hover envelope (rail → farthest
+	 * card edge, plus the vertical safe areas), so the quadrilateral dead
+	 * spot between two magnification-displaced neighbours stays inside
+	 * the outline's pointer envelope. Interactive only while expanded /
+	 * focused; it never handles clicks and carries no aria semantics.
+	 */
+	readonly interactionSurfaceEl: HTMLElement;
 	readonly viewportEl: HTMLElement;
 	readonly listEl: HTMLElement;
 
@@ -105,6 +114,13 @@ export class GlideOutlineView {
 		this.hitZoneEl = this.doc.createElement("div");
 		this.hitZoneEl.className = "glide-outline-hit-zone";
 
+		// Below the viewport in DOM order → below every visual layer in
+		// paint order (no z-index games). Purely presentational: it must
+		// stay invisible to the accessibility tree.
+		this.interactionSurfaceEl = this.doc.createElement("div");
+		this.interactionSurfaceEl.className = "glide-outline-interaction-surface";
+		this.interactionSurfaceEl.setAttribute("aria-hidden", "true");
+
 		this.viewportEl = this.doc.createElement("div");
 		this.viewportEl.className = "glide-outline-viewport";
 
@@ -114,6 +130,7 @@ export class GlideOutlineView {
 
 		this.viewportEl.appendChild(this.listEl);
 		this.rootEl.appendChild(this.hitZoneEl);
+		this.rootEl.appendChild(this.interactionSurfaceEl);
 		this.rootEl.appendChild(this.viewportEl);
 		hostEl.appendChild(this.rootEl);
 
@@ -271,20 +288,15 @@ export class GlideOutlineView {
 		root.style.setProperty("--glide-card-padding-y", `${card.paddingY}px`);
 		root.classList.toggle("glide-outline-root--card-border", card.border);
 		root.classList.toggle("glide-outline-root--card-shadow", card.shadow);
-		// Text effect: the CSS values are built in TS. Halo is a symmetric
-		// multi-layer glow (never a directional drop shadow); stroke is a
-		// hairline -webkit-text-stroke. Exactly one mode class is active.
+		// Text effect: the CSS value is built in TS. Halo is a symmetric
+		// multi-layer glow — never a directional drop shadow. The stroke
+		// mode was removed (P1-2); persisted "stroke" normalizes to "none".
 		const effect = card.textEffect;
 		root.classList.toggle(
 			"glide-outline-root--text-halo",
 			effect.mode === "halo",
 		);
-		root.classList.toggle(
-			"glide-outline-root--text-stroke",
-			effect.mode === "stroke",
-		);
 		root.style.setProperty("--glide-text-halo", textEffectHaloCss(effect));
-		root.style.setProperty("--glide-text-stroke", textEffectStrokeCss(effect));
 		root.classList.toggle(
 			"glide-outline-root--pure-text",
 			card.opacity === 0 && !card.border && !card.shadow,
@@ -365,7 +377,8 @@ export class GlideOutlineView {
 		for (const item of this.items) {
 			if (item.level > deepestLevel) deepestLevel = item.level;
 		}
-		const { rootWidth, labelContentWidth, compact } = computeResponsiveWidth({
+		const { rootWidth, labelContentWidth, compact, interactionWidth } =
+			computeResponsiveWidth({
 			hostWidth: this.hostEl.clientWidth || 0,
 			maxLabelWidth: s.maxLabelWidth,
 			maxScale: s.maxScale,
@@ -385,6 +398,10 @@ export class GlideOutlineView {
 		this.rootEl.style.setProperty(
 			"--glide-label-content-width",
 			`${labelContentWidth}px`,
+		);
+		this.rootEl.style.setProperty(
+			"--glide-interaction-width",
+			`${interactionWidth}px`,
 		);
 		this.rootEl.classList.toggle("glide-outline-root--compact", compact);
 	}
