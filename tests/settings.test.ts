@@ -28,6 +28,19 @@ describe("normalizeSettings", () => {
 		expect(s.verticalOffset).toBe(-400);
 	});
 
+	it("clamps cardGap into 0–16 and falls back to the default", () => {
+		expect(normalizeSettings({ cardGap: -3 }).cardGap).toBe(0);
+		expect(normalizeSettings({ cardGap: 99 }).cardGap).toBe(16);
+		expect(normalizeSettings({ cardGap: 8 }).cardGap).toBe(8);
+		// Old data without cardGap migrates to the default.
+		expect(normalizeSettings({ maxScale: 1.5 }).cardGap).toBe(
+			DEFAULT_SETTINGS.cardGap,
+		);
+		expect(normalizeSettings({ cardGap: "wide" }).cardGap).toBe(
+			DEFAULT_SETTINGS.cardGap,
+		);
+	});
+
 	it("rejects invalid enums", () => {
 		const s = normalizeSettings({ position: "top", markerStyle: "star" });
 		expect(s.position).toBe(DEFAULT_SETTINGS.position);
@@ -74,6 +87,7 @@ describe("resetAppearance", () => {
 			baseFontSize: 16,
 			renderMarkdown: true,
 			showLevels: [true, true, false, false, false, false],
+			cardGap: 12,
 			card: { opacity: 0, border: true, shadow: true },
 		});
 		const reset = resetAppearance(custom);
@@ -89,6 +103,7 @@ describe("resetAppearance", () => {
 		expect(reset.markerStyle).toBe(DEFAULT_SETTINGS.markerStyle);
 		expect(reset.maxScale).toBe(DEFAULT_SETTINGS.maxScale);
 		expect(reset.baseFontSize).toBe(DEFAULT_SETTINGS.baseFontSize);
+		expect(reset.cardGap).toBe(DEFAULT_SETTINGS.cardGap);
 		expect(reset.card).toEqual(DEFAULT_CARD);
 	});
 });

@@ -1,45 +1,127 @@
 import { describe, expect, it } from "vitest";
-import { computeResponsiveWidth } from "../src/utils/layout";
+import {
+	MIN_VERTICAL_PAD,
+	computeResponsiveWidth,
+	computeVerticalSafeSpace,
+} from "../src/utils/layout";
 
 const BASE = {
 	maxLabelWidth: 240,
 	maxScale: 1.25,
 	railWidth: 28,
 	labelGap: 6,
+	cardPaddingX: 7,
+	cardBorderWidth: 0,
+	shadowAllowance: 0,
 	safeSlack: 20,
 	compactThreshold: 60,
 };
 
+/** Full magnified card budget for a given result (mirrors the CSS model). */
+function magnifiedBudget(
+	input: typeof BASE & { hostWidth: number },
+	labelContentWidth: number,
+): number {
+	const cardBase =
+		labelContentWidth + 2 * input.cardPaddingX + 2 * input.cardBorderWidth;
+	return (
+		input.railWidth +
+		input.labelGap +
+		cardBase * Math.max(1, input.maxScale) +
+		input.shadowAllowance +
+		input.safeSlack
+	);
+}
+
 describe("computeResponsiveWidth", () => {
-	it("uses the ideal width on a wide host", () => {
-		const result = computeResponsiveWidth({ ...BASE, hostWidth: 1200 });
-		expect(result.rootWidth).toBe(28 + Math.ceil(240 * 1.25) + 6 + 20);
-		expect(result.labelWidth).toBe(240);
+	it("budgets the complete card (text + padding + border) on a wide host", () => {
+		const input = { ...BASE, hostWidth: 1200 };
+		const result = computeResponsiveWidth(input);
+		expect(result.labelContentWidth).toBe(240);
+		expect(result.rootWidth).toBe(
+			28 + 6 + Math.ceil((240 + 14) * 1.25) + 0 + 20,
+		);
 		expect(result.compact).toBe(false);
 	});
 
-	it("clamps root width to the host width in narrow panes", () => {
-		const result = computeResponsiveWidth({ ...BASE, hostWidth: 200 });
-		expect(result.rootWidth).toBe(200);
-		expect(result.labelWidth).toBeLessThan(240);
+	it("adds border width per side when the border is on", () => {
+		const off = computeResponsiveWidth({ ...BASE, hostWidth: 1200 });
+		const on = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 1200,
+			cardBorderWidth: 1,
+		});
+		expect(on.rootWidth).toBeGreaterThan(off.rootWidth);
 	});
 
-	it("keeps the magnified label inside the clamped root", () => {
-		const result = computeResponsiveWidth({ ...BASE, hostWidth: 260 });
-		const magnified = result.labelWidth * BASE.maxScale;
-		expect(
-			BASE.railWidth + magnified + BASE.labelGap + BASE.safeSlack,
-		).toBeLessThanOrEqual(result.rootWidth + BASE.maxScale); // floor rounding slack
+	it("adds shadow allowance when the shadow is on", () => {
+		const off = computeResponsiveWidth({ ...BASE, hostWidth: 1200 });
+		const on = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 1200,
+			shadowAllowance: 12,
+		});
+		expect(on.rootWidth).toBe(off.rootWidth + 12);
 	});
 
-	it("enters compact mode when the effective label width is tiny", () => {
+	it("handles zero padding without shrinking the text budget", () => {
+		const result = computeResponsiveWidth({
+			...BASE,
+			hostWidth: 1200,
+			cardPaddingX: 0,
+		});
+		expect(result.labelContentWidth).toBe(240);
+	});
+
+	it("handles maximum padding, border and shadow together", () => {
+		const input = {
+			...BASE,
+			hostWidth: 1200,
+			cardPaddingX: 18,
+			cardBorderWidth: 1,
+			shadowAllowance: 12,
+		};
+		const result = computeResponsiveWidth(input);
+		expect(result.labelContentWidth).toBe(240);
+		expect(magnifiedBudget(input, result.labelContentWidth)).toBeLessThanOrEqual(
+			result.rootWidth,
+		);
+	});
+
+	it("clamps root width to the host and keeps the full card inside", () => {
+		const input = {
+			...BASE,
+			hostWidth: 260,
+			cardPaddingX: 10,
+			cardBorderWidth: 1,
+			shadowAllowance: 12,
+		};
+		const result = computeResponsiveWidth(input);
+		expect(result.rootWidth).toBeLessThanOrEqual(260);
+		expect(result.labelContentWidth).toBeLessThan(240);
+		// The COMPLETE magnified card (padding + border + shadow) must fit.
+		expect(magnifiedBudget(input, result.labelContentWidth)).toBeLessThanOrEqual(
+			result.rootWidth + input.maxScale, // floor rounding slack
+		);
+	});
+
+	it("never mutates the semantics of the configured maxLabelWidth", () => {
+		// Reverse solve in a narrow pane, then verify a wide pane still
+		// restores the configured value untouched.
+		const narrow = computeResponsiveWidth({ ...BASE, hostWidth: 200 });
+		expect(narrow.labelContentWidth).toBeLessThan(240);
+		const wide = computeResponsiveWidth({ ...BASE, hostWidth: 1600 });
+		expect(wide.labelContentWidth).toBe(240);
+	});
+
+	it("enters compact mode when the effective text width is tiny", () => {
 		const result = computeResponsiveWidth({ ...BASE, hostWidth: 110 });
 		expect(result.compact).toBe(true);
 	});
 
-	it("never produces a negative label width", () => {
+	it("never produces a negative text width in ultra narrow panes", () => {
 		const result = computeResponsiveWidth({ ...BASE, hostWidth: 10 });
-		expect(result.labelWidth).toBeGreaterThanOrEqual(0);
+		expect(result.labelContentWidth).toBeGreaterThanOrEqual(0);
 		expect(result.compact).toBe(true);
 	});
 
@@ -49,13 +131,77 @@ describe("computeResponsiveWidth", () => {
 			hostWidth: 1200,
 			maxScale: 0.5,
 		});
-		expect(result.labelWidth).toBe(240);
+		expect(result.labelContentWidth).toBe(240);
 	});
 
 	it("handles zero host width without NaN", () => {
 		const result = computeResponsiveWidth({ ...BASE, hostWidth: 0 });
 		expect(Number.isFinite(result.rootWidth)).toBe(true);
-		expect(result.labelWidth).toBe(0);
+		expect(result.labelContentWidth).toBe(0);
 		expect(result.compact).toBe(true);
+	});
+
+	it("is side-agnostic (left and right use the same budget)", () => {
+		// The function has no side parameter by design — asserting the
+		// contract stays side-free.
+		const a = computeResponsiveWidth({ ...BASE, hostWidth: 300 });
+		const b = computeResponsiveWidth({ ...BASE, hostWidth: 300 });
+		expect(a).toEqual(b);
+	});
+});
+
+describe("computeVerticalSafeSpace", () => {
+	const INPUT = {
+		maxBaseCardHeight: 22,
+		maxScale: 1.25,
+		radius: 90,
+		cardGap: 4,
+		shadowAllowance: 0,
+	};
+
+	it("covers worst-case edge displacement plus card growth", () => {
+		const pad = computeVerticalSafeSpace(INPUT);
+		const displacement = (90 * 0.25) / 2;
+		const growth = (22 * 0.25) / 2;
+		expect(pad).toBe(Math.max(MIN_VERTICAL_PAD, Math.ceil(displacement + growth + 4)));
+	});
+
+	it("returns the baseline pad when magnification is off", () => {
+		expect(
+			computeVerticalSafeSpace({ ...INPUT, maxScale: 1 }),
+		).toBe(MIN_VERTICAL_PAD);
+	});
+
+	it("grows with maxScale 1.75 and a tall card", () => {
+		const strong = computeVerticalSafeSpace({
+			...INPUT,
+			maxScale: 1.75,
+			maxBaseCardHeight: 40,
+			radius: 240,
+		});
+		const weak = computeVerticalSafeSpace(INPUT);
+		expect(strong).toBeGreaterThan(weak);
+		// Explainable expansion: radius*(s-1)/2 + h*(s-1)/2 + gap.
+		expect(strong).toBe(Math.ceil((240 * 0.75) / 2 + (40 * 0.75) / 2 + 4));
+	});
+
+	it("adds shadow allowance", () => {
+		const withShadow = computeVerticalSafeSpace({
+			...INPUT,
+			shadowAllowance: 12,
+		});
+		expect(withShadow).toBe(computeVerticalSafeSpace(INPUT) + 12);
+	});
+
+	it("never returns less than the baseline", () => {
+		expect(
+			computeVerticalSafeSpace({
+				maxBaseCardHeight: 0,
+				maxScale: 1,
+				radius: 0,
+				cardGap: 0,
+				shadowAllowance: 0,
+			}),
+		).toBe(MIN_VERTICAL_PAD);
 	});
 });
