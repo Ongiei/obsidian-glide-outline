@@ -68,7 +68,7 @@ describe("GlideOutlineView placement & hierarchy variables", () => {
 		).toBe("40px");
 	});
 
-	it("indents each item by (level - 1) × levelIndent", () => {
+	it("indents each item by (level - 1) × levelIndent (legacy staircase)", () => {
 		settings.levelIndent = 3;
 		view.applySettings();
 		const indents = [...view.listEl.querySelectorAll<HTMLElement>(
@@ -88,28 +88,56 @@ describe("GlideOutlineView placement & hierarchy variables", () => {
 		}
 	});
 
-	it("applies the text shadow class and variable only when enabled", () => {
+	it("applies no text-effect class or css in the default (none) mode", () => {
 		expect(
-			view.rootEl.classList.contains("glide-outline-root--text-shadow"),
+			view.rootEl.classList.contains("glide-outline-root--text-halo"),
 		).toBe(false);
-		expect(view.rootEl.style.getPropertyValue("--glide-text-shadow")).toBe(
+		expect(
+			view.rootEl.classList.contains("glide-outline-root--text-stroke"),
+		).toBe(false);
+		expect(view.rootEl.style.getPropertyValue("--glide-text-halo")).toBe(
 			"none",
 		);
+		expect(view.rootEl.style.getPropertyValue("--glide-text-stroke")).toBe(
+			"0",
+		);
+	});
 
-		settings.card.textShadow = {
-			enabled: true,
+	it("applies the halo class and a symmetric multi-layer glow", () => {
+		settings.card.textEffect = {
+			mode: "halo",
 			color: "#000000",
-			opacity: 55,
-			blur: 4,
-			offsetX: 0,
-			offsetY: 1,
+			opacity: 40,
+			blur: 3,
 		};
 		view.applySettings();
 		expect(
-			view.rootEl.classList.contains("glide-outline-root--text-shadow"),
+			view.rootEl.classList.contains("glide-outline-root--text-halo"),
 		).toBe(true);
-		expect(view.rootEl.style.getPropertyValue("--glide-text-shadow")).toBe(
-			"0px 1px 4px rgba(0, 0, 0, 0.55)",
+		expect(
+			view.rootEl.classList.contains("glide-outline-root--text-stroke"),
+		).toBe(false);
+		expect(view.rootEl.style.getPropertyValue("--glide-text-halo")).toBe(
+			"0 0 1px rgba(0, 0, 0, 0.4), 0 0 3px rgba(0, 0, 0, 0.32), 0 0 6px rgba(0, 0, 0, 0.2)",
+		);
+	});
+
+	it("applies the stroke class and a hairline text stroke", () => {
+		settings.card.textEffect = {
+			mode: "stroke",
+			color: "#000000",
+			opacity: 45,
+			blur: 3,
+		};
+		view.applySettings();
+		expect(
+			view.rootEl.classList.contains("glide-outline-root--text-stroke"),
+		).toBe(true);
+		expect(
+			view.rootEl.classList.contains("glide-outline-root--text-halo"),
+		).toBe(false);
+		expect(view.rootEl.style.getPropertyValue("--glide-text-stroke")).toBe(
+			"0.5px rgba(0, 0, 0, 0.45)",
 		);
 	});
 

@@ -148,10 +148,93 @@ describe("overflow edge fades", () => {
 	});
 });
 
-describe("text shadow variable", () => {
-	it("applies the TS-built shadow variable under the feature class", () => {
+describe("text effect variables", () => {
+	it("applies the TS-built halo under its feature class only", () => {
 		expect(css).toMatch(
-			/\.glide-outline-root--text-shadow[^{]*\{[^}]*text-shadow:\s*var\(--glide-text-shadow/,
+			/\.glide-outline-root--text-halo[^{]*\{[^}]*text-shadow:\s*var\(--glide-text-halo/,
+		);
+		// The old directional shadow class is gone for good.
+		expect(css).not.toContain("glide-outline-root--text-shadow");
+		expect(css).not.toContain("--glide-text-shadow:");
+	});
+
+	it("applies the hairline stroke under its feature class", () => {
+		expect(css).toMatch(
+			/\.glide-outline-root--text-stroke[^{]*\{[^}]*-webkit-text-stroke:\s*var\(--glide-text-stroke/,
+		);
+	});
+});
+
+describe("level badge", () => {
+	it("hides the badge unless the feature class is on", () => {
+		const base = exactBlock(".glide-outline-level-badge");
+		expect(base).toMatch(/display:\s*none/);
+		const gated = exactBlock(
+			".glide-outline-root--level-badge .glide-outline-level-badge",
+		);
+		expect(gated).toMatch(/display:\s*inline-block/);
+	});
+
+	it("keeps the badge non-interactive for hit-testing", () => {
+		const base = exactBlock(".glide-outline-level-badge");
+		expect(base).toMatch(/pointer-events:\s*none/);
+	});
+
+	it("recolors the active badge with the accent", () => {
+		const active = declarations(
+			".glide-outline-item.is-active .glide-outline-level-badge",
+		).join(";");
+		expect(active).toMatch(/--interactive-accent|--glide-accent/);
+	});
+});
+
+describe("H1–H6 label typography ramp", () => {
+	function labelRamp(property: string): string[] {
+		const values: string[] = [];
+		for (let level = 1; level <= 6; level++) {
+			const block = exactBlock(
+				`.glide-outline-item[data-level="${level}"] .glide-outline-label`,
+			);
+			const match = block.match(
+				new RegExp(`${property}:\\s*([^;\\n]+)`),
+			);
+			if (match) values.push(match[1].trim());
+		}
+		return values;
+	}
+
+	it("defines six non-increasing font weights, heaviest for H1", () => {
+		const weights = labelRamp("font-weight").map(Number);
+		expect(weights).toHaveLength(6);
+		expect(weights[0]).toBeGreaterThanOrEqual(650);
+		expect(weights[5]).toBeLessThanOrEqual(450);
+		for (let i = 1; i < weights.length; i++) {
+			expect(weights[i]).toBeLessThanOrEqual(weights[i - 1]);
+		}
+	});
+
+	it("defines six non-increasing font sizes", () => {
+		const sizes = labelRamp("font-size").map(parseFloat);
+		expect(sizes).toHaveLength(6);
+		for (let i = 1; i < sizes.length; i++) {
+			expect(sizes[i]).toBeLessThanOrEqual(sizes[i - 1]);
+		}
+		expect(sizes[5]).toBeLessThan(sizes[0]);
+	});
+});
+
+describe("hover interaction corridor", () => {
+	it("keeps the motion wrapper inert while collapsed", () => {
+		const motion = exactBlock(".glide-outline-motion");
+		expect(motion).toMatch(/pointer-events:\s*none/);
+	});
+
+	it("activates the corridor only when expanded or focused", () => {
+		expect(css).toMatch(
+			/\.glide-outline-root\.is-expanded\s+\.glide-outline-motion[^{]*\{[^}]*pointer-events:\s*auto/,
+		);
+		expect(css).toMatch(
+			/\.glide-outline-root:focus-within\s+\.glide-outline-motion[^{]*\{[^}]*pointer-events:\s*auto/,
 		);
 	});
 });

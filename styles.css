@@ -418,20 +418,28 @@
 	box-shadow: var(--shadow-s);
 }
 
-/* Text shadow: the complete CSS value (offset/blur/rgba color) is built in
-   TypeScript from the structured settings and published as one variable. */
-.glide-outline-root--text-shadow .glide-outline-label {
-	text-shadow: var(--glide-text-shadow, none);
+/* Text effect — halo: a symmetric multi-layer glow built in TypeScript
+   (three zero-offset layers, tapering alpha). Deliberately NOT a
+   directional drop shadow: `0 1px …` smudged the bottom edge of bold CJK
+   glyphs. Applies per label; the value is "none" unless mode = halo. */
+.glide-outline-root--text-halo .glide-outline-label {
+	text-shadow: var(--glide-text-halo, none);
 }
 
-/* MarkdownRenderer output (code, links, bold…) must keep the shadow even
+/* MarkdownRenderer output (code, links, bold…) must keep the halo even
    when theme rules would reset it on those elements. */
-.glide-outline-root--text-shadow .glide-outline-label code,
-.glide-outline-root--text-shadow .glide-outline-label a,
-.glide-outline-root--text-shadow .glide-outline-label strong,
-.glide-outline-root--text-shadow .glide-outline-label em,
-.glide-outline-root--text-shadow .glide-outline-label mark {
+.glide-outline-root--text-halo .glide-outline-label code,
+.glide-outline-root--text-halo .glide-outline-label a,
+.glide-outline-root--text-halo .glide-outline-label strong,
+.glide-outline-root--text-halo .glide-outline-label em,
+.glide-outline-root--text-halo .glide-outline-label mark {
 	text-shadow: inherit;
+}
+
+/* Text effect — stroke: hairline outline (0.5px, color from settings).
+   The variable is "0" in every other mode, which disables the stroke. */
+.glide-outline-root--text-stroke .glide-outline-label {
+	-webkit-text-stroke: var(--glide-text-stroke, 0);
 }
 
 /* Pure text mode: opacity 0 + no border + no shadow → the card element
