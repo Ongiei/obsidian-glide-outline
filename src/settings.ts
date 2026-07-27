@@ -35,8 +35,13 @@ export interface GlideOutlineSettings {
 	radius: number;
 	/** Label font size in px (before magnification). */
 	baseFontSize: number;
-	/** Max label width in px; longer headings get an ellipsis. */
+	/** Max label TEXT width in px; longer headings get an ellipsis. */
 	maxLabelWidth: number;
+	/**
+	 * Minimum vertical space kept between neighbouring label cards, px.
+	 * Enforced both at rest and during magnification (collision solver).
+	 */
+	cardGap: number;
 	/** showLevels[level - 1] — whether H(level) is rendered. */
 	showLevels: [boolean, boolean, boolean, boolean, boolean, boolean];
 	animationEnabled: boolean;
@@ -64,6 +69,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	radius: 90,
 	baseFontSize: 12,
 	maxLabelWidth: 240,
+	cardGap: 4,
 	showLevels: [true, true, true, true, true, true],
 	animationEnabled: true,
 	renderMarkdown: false,
@@ -76,6 +82,7 @@ export const RANGES = {
 	radius: { min: 40, max: 240 },
 	baseFontSize: { min: 9, max: 18 },
 	maxLabelWidth: { min: 140, max: 400 },
+	cardGap: { min: 0, max: 16 },
 	cardOpacity: { min: 0, max: 100 },
 	cardRadius: { min: 0, max: 16 },
 	cardPaddingX: { min: 0, max: 18 },
@@ -156,6 +163,12 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 			RANGES.maxLabelWidth.max,
 			DEFAULT_SETTINGS.maxLabelWidth,
 		),
+		cardGap: clamp(
+			data.cardGap,
+			RANGES.cardGap.min,
+			RANGES.cardGap.max,
+			DEFAULT_SETTINGS.cardGap,
+		),
 		showLevels: [0, 1, 2, 3, 4, 5].map((i) =>
 			typeof levels[i] === "boolean" ? (levels[i] as boolean) : true,
 		) as GlideOutlineSettings["showLevels"],
@@ -181,6 +194,7 @@ export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 		radius: DEFAULT_SETTINGS.radius,
 		baseFontSize: DEFAULT_SETTINGS.baseFontSize,
 		maxLabelWidth: DEFAULT_SETTINGS.maxLabelWidth,
+		cardGap: DEFAULT_SETTINGS.cardGap,
 		animationEnabled: DEFAULT_SETTINGS.animationEnabled,
 		card: { ...DEFAULT_CARD },
 	};
@@ -394,6 +408,20 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					.setDynamicTooltip()
 					.onChange((value) => {
 						s.card.paddingY = value;
+						this.plugin.previewSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Minimum card gap")
+			.setDesc("Minimum vertical space maintained between neighbouring label cards, including during magnification.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(RANGES.cardGap.min, RANGES.cardGap.max, 1)
+					.setValue(s.cardGap)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.cardGap = value;
 						this.plugin.previewSettings();
 					}),
 			);

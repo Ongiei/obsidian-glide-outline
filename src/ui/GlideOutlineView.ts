@@ -1,6 +1,9 @@
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
-import { computeResponsiveWidth } from "../utils/layout";
+import {
+	computeResponsiveWidth,
+	computeVerticalSafeSpace,
+} from "../utils/layout";
 
 export interface GlideOutlineViewHandlers {
 	onJump(item: HeadingItem): void;
@@ -9,6 +12,8 @@ export interface GlideOutlineViewHandlers {
 	 * element; when absent, plain text is used.
 	 */
 	renderLabel?(labelEl: HTMLElement, item: HeadingItem): void;
+	/** Fired after row geometry was re-measured (magnification cache is stale). */
+	onMetricsChanged?(): void;
 }
 
 const HOST_CLASS = "glide-outline-host";
@@ -16,11 +21,20 @@ export const RAIL_WIDTH = 28;
 export const LABEL_GAP = 6;
 export const SAFE_SLACK = 20;
 export const COMPACT_THRESHOLD = 60;
+/** Rows never get thinner than this so markers stay easy to hit. */
+export const MARKER_MIN_HIT_HEIGHT = 18;
+/** Painting room reserved for the card shadow when it is enabled. */
+export const SHADOW_ALLOWANCE = 12;
+/** Card border width per side when the border is enabled. */
+export const CARD_BORDER_WIDTH = 1;
 
 interface ItemRecord {
 	rowEl: HTMLElement;
 	buttonEl: HTMLButtonElement;
+	cardEl: HTMLElement;
 	labelEl: HTMLElement;
+	/** Unscaled card height from the last measurement pass. */
+	baseCardHeight: number;
 	/** What the label currently displays (text or rendered source). */
 	renderedContent: string;
 	renderedRich: boolean;
@@ -29,21 +43,22 @@ interface ItemRecord {
 /**
  * Owns the Glide Outline DOM inside a MarkdownView's contentEl.
  *
- * Structure (transform responsibilities are split on purpose):
- *   root      – positioning, CSS variables      → pointer-events: none
+ * Structure (single visual card per heading — see styles.css):
+ *   root      – positioning, CSS variables       → pointer-events: none
  *   hit-zone  – transparent rail strip           → pointer-events: auto
  *   viewport  – vertical scrolling               → pointer-events: none
  *   list      – item layout                      → pointer-events: none
- *   row       – one heading row                  → pointer-events: none
- *   item      – button, a11y target              → pointer-events: none
- *     marker  – collapsed heading marker         → pointer-events: auto
- *     motion  – vertical displacement (--glide-shift-y)
- *     reveal  – horizontal slide-in + opacity
- *     card    – visual chrome + dock scale       → pointer-events: auto (expanded)
- *       label – text / rendered markdown
+ *   row       – measured row height              → pointer-events: none
+ *   item      – fully reset button, a11y target  → pointer-events: none
+ *     motion  – marker + card, moves together (--glide-shift-y)
+ *       marker – rail-width hit slot, line/dot   → pointer-events: auto
+ *       reveal – horizontal slide-in + opacity
+ *         card – THE ONLY visual chrome + scale  → pointer-events: auto (expanded)
+ *           label – text / rendered markdown
  *
- * The editor underneath stays fully interactive everywhere except the thin
- * marker rail and the actually visible label cards.
+ * The button is anchored to the editor edge with `width: max-content`; it
+ * never spans the root, so leaked theme chrome cannot form a full-width bar
+ * and the transparent area over the editor stays clickable.
  */
 export class GlideOutlineView {
 	readonly rootEl: HTMLElement;
@@ -52,11 +67,14 @@ export class GlideOutlineView {
 	readonly listEl: HTMLElement;
 
 	private readonly doc: Document;
-	private readonly resizeObserver: ResizeObserver | null = null;
+	private readonly hostResizeObserver: ResizeObserver | null = null;
+	/** One shared observer for every card (never one per item). */
+	private readonly cardResizeObserver: ResizeObserver | null = null;
 	private itemRecords = new Map<string, ItemRecord>();
 	private items: readonly HeadingItem[] = [];
 	private activeKey: string | null = null;
 	private followEnabled = true;
+	private metricsScheduled = false;
 	private disposed = false;
 
 	constructor(
@@ -85,13 +103,19 @@ export class GlideOutlineView {
 		this.rootEl.appendChild(this.viewportEl);
 		hostEl.appendChild(this.rootEl);
 
-		// Narrow-pane adaptation: recompute widths whenever the host resizes.
 		const win = this.doc.defaultView;
-		if (win) {
-			this.resizeObserver = new win.ResizeObserver(() => {
+		if (win && typeof win.ResizeObserver === "function") {
+			// Narrow-pane adaptation: recompute widths when the host resizes.
+			this.hostResizeObserver = new win.ResizeObserver(() => {
 				this.applyResponsiveWidth();
 			});
-			this.resizeObserver.observe(hostEl);
+			this.hostResizeObserver.observe(hostEl);
+			// Card content boxes drive row heights. Card size changes do NOT
+			// change the observed list/root size (cards are measured, rows are
+			// written), so this cannot loop.
+			this.cardResizeObserver = new win.ResizeObserver(() => {
+				this.scheduleMeasure();
+			});
 		}
 
 		this.applySettings();
@@ -107,6 +131,7 @@ export class GlideOutlineView {
 		const nextKeys = new Set(visible.map((item) => item.key));
 		for (const [key, record] of this.itemRecords) {
 			if (!nextKeys.has(key)) {
+				this.cardResizeObserver?.unobserve(record.cardEl);
 				record.rowEl.remove();
 				this.itemRecords.delete(key);
 			}
@@ -118,6 +143,7 @@ export class GlideOutlineView {
 			if (!record) {
 				record = this.createItemRecord(item);
 				this.itemRecords.set(item.key, record);
+				this.cardResizeObserver?.observe(record.cardEl);
 			}
 			this.updateItemRecord(record, item);
 			// Keep DOM order aligned with model order with minimal moves.
@@ -141,10 +167,16 @@ export class GlideOutlineView {
 
 		// Empty state: hide the rail entirely when nothing is visible.
 		this.rootEl.classList.toggle("is-empty", visible.length === 0);
+		this.scheduleMeasure();
 	}
 
 	getItems(): readonly HeadingItem[] {
 		return this.items;
+	}
+
+	/** Unscaled card height for the collision solver; 0 when unknown. */
+	getBaseCardHeight(key: string): number {
+		return this.itemRecords.get(key)?.baseCardHeight ?? 0;
 	}
 
 	setActiveKey(key: string | null): void {
@@ -201,6 +233,7 @@ export class GlideOutlineView {
 		root.classList.toggle("glide-outline-root--no-anim", !s.animationEnabled);
 
 		root.style.setProperty("--glide-rail-width", `${RAIL_WIDTH}px`);
+		root.style.setProperty("--glide-label-gap", `${LABEL_GAP}px`);
 		root.style.setProperty("--glide-font-size", `${s.baseFontSize}px`);
 		root.style.setProperty("--glide-vertical-offset", `${s.verticalOffset}px`);
 
@@ -219,36 +252,110 @@ export class GlideOutlineView {
 		);
 
 		this.applyResponsiveWidth();
+		// Font size / padding / border / markdown changes alter card boxes.
+		this.scheduleMeasure();
 	}
 
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
-		this.resizeObserver?.disconnect();
+		this.hostResizeObserver?.disconnect();
+		this.cardResizeObserver?.disconnect();
 		this.itemRecords.clear();
 		this.rootEl.remove();
 		this.hostEl.classList.remove(HOST_CLASS);
 	}
 
+	/** Horizontal room reserved for the shadow in the current settings. */
+	private shadowAllowance(): number {
+		return this.getSettings().card.shadow ? SHADOW_ALLOWANCE : 0;
+	}
+
 	/**
-	 * Narrow-pane adaptation (P0-2): the root and label widths follow the
-	 * host width so magnified labels never clip and never overflow the pane.
+	 * Narrow-pane adaptation: the root width budgets the COMPLETE magnified
+	 * card (text + padding + border + shadow), never just the text.
 	 */
 	private applyResponsiveWidth(): void {
 		if (this.disposed) return;
 		const s = this.getSettings();
-		const { rootWidth, labelWidth, compact } = computeResponsiveWidth({
+		const { rootWidth, labelContentWidth, compact } = computeResponsiveWidth({
 			hostWidth: this.hostEl.clientWidth || 0,
 			maxLabelWidth: s.maxLabelWidth,
 			maxScale: s.maxScale,
 			railWidth: RAIL_WIDTH,
 			labelGap: LABEL_GAP,
+			cardPaddingX: s.card.paddingX,
+			cardBorderWidth: s.card.border ? CARD_BORDER_WIDTH : 0,
+			shadowAllowance: this.shadowAllowance(),
 			safeSlack: SAFE_SLACK,
 			compactThreshold: COMPACT_THRESHOLD,
 		});
 		this.rootEl.style.setProperty("--glide-root-width", `${rootWidth}px`);
-		this.rootEl.style.setProperty("--glide-label-max-width", `${labelWidth}px`);
+		this.rootEl.style.setProperty(
+			"--glide-label-content-width",
+			`${labelContentWidth}px`,
+		);
 		this.rootEl.classList.toggle("glide-outline-root--compact", compact);
+	}
+
+	/** Coalesce measurement work into one pass per frame. */
+	private scheduleMeasure(): void {
+		if (this.disposed || this.metricsScheduled) return;
+		this.metricsScheduled = true;
+		const win = this.doc.defaultView;
+		const run = () => {
+			this.metricsScheduled = false;
+			this.measureRows();
+		};
+		if (win && typeof win.requestAnimationFrame === "function") {
+			win.requestAnimationFrame(run);
+		} else {
+			run();
+		}
+	}
+
+	/**
+	 * Adaptive row heights (read phase then write phase, no interleaving):
+	 * `offsetHeight` reads the UNscaled card box — layout size ignores CSS
+	 * transforms, so magnification never pollutes the base measurement.
+	 *
+	 *   rowHeight = max(markerMinimumHitHeight, baseCardHeight) + cardGap
+	 */
+	private measureRows(): void {
+		if (this.disposed) return;
+		const s = this.getSettings();
+		const records = [...this.itemRecords.values()];
+
+		// Read phase.
+		const heights = records.map((record) => record.cardEl.offsetHeight);
+
+		// Write phase.
+		let maxCardHeight = 0;
+		let changed = false;
+		for (let i = 0; i < records.length; i++) {
+			const record = records[i];
+			const cardHeight = heights[i];
+			if (record.baseCardHeight !== cardHeight) {
+				record.baseCardHeight = cardHeight;
+				changed = true;
+			}
+			maxCardHeight = Math.max(maxCardHeight, cardHeight);
+			const rowHeight =
+				Math.max(MARKER_MIN_HIT_HEIGHT, cardHeight) + s.cardGap;
+			record.rowEl.style.setProperty("--glide-row-height", `${rowHeight}px`);
+		}
+
+		// Vertical painting space so edge cards can magnify without clipping.
+		const pad = computeVerticalSafeSpace({
+			maxBaseCardHeight: maxCardHeight,
+			maxScale: s.maxScale,
+			radius: s.radius,
+			cardGap: s.cardGap,
+			shadowAllowance: this.shadowAllowance(),
+		});
+		this.rootEl.style.setProperty("--glide-viewport-pad", `${pad}px`);
+
+		if (changed) this.handlers.onMetricsChanged?.();
 	}
 
 	private scrollRowIntoView(rowEl: HTMLElement): void {
@@ -265,12 +372,12 @@ export class GlideOutlineView {
 		button.type = "button";
 		button.className = "glide-outline-item";
 
+		const motion = this.doc.createElement("span");
+		motion.className = "glide-outline-motion";
+
 		const marker = this.doc.createElement("span");
 		marker.className = "glide-outline-marker";
 		marker.setAttribute("aria-hidden", "true");
-
-		const motion = this.doc.createElement("span");
-		motion.className = "glide-outline-motion";
 
 		const reveal = this.doc.createElement("span");
 		reveal.className = "glide-outline-reveal";
@@ -283,8 +390,8 @@ export class GlideOutlineView {
 
 		card.appendChild(label);
 		reveal.appendChild(card);
+		motion.appendChild(marker);
 		motion.appendChild(reveal);
-		button.appendChild(marker);
 		button.appendChild(motion);
 		row.appendChild(button);
 
@@ -300,7 +407,9 @@ export class GlideOutlineView {
 		return {
 			rowEl: row,
 			buttonEl: button,
+			cardEl: card,
 			labelEl: label,
+			baseCardHeight: 0,
 			renderedContent: "",
 			renderedRich: false,
 		};
@@ -311,6 +420,7 @@ export class GlideOutlineView {
 		buttonEl.dataset.level = String(item.level);
 		buttonEl.dataset.key = item.key;
 		record.rowEl.dataset.level = String(item.level);
+		record.rowEl.dataset.key = item.key;
 		buttonEl.setAttribute("aria-label", `H${item.level}: ${item.text}`);
 
 		const settings = this.getSettings();

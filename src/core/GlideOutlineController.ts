@@ -38,6 +38,9 @@ export class GlideOutlineController {
 		this.outlineView = new GlideOutlineView(view.contentEl, getSettings, {
 			onJump: (item) => this.jumpTo(item),
 			renderLabel: (labelEl, item) => this.renderLabel(labelEl, item),
+			// Row geometry re-measured → magnification cache is stale.
+			// Optional chaining: fires before `magnification` exists too.
+			onMetricsChanged: () => this.magnification?.invalidate(),
 		});
 		this.magnification = new MagnificationController(
 			this.outlineView,
