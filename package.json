@@ -19,10 +19,13 @@
 	"license": "MIT",
 	"packageManager": "pnpm@9.12.3",
 	"devDependencies": {
+		"@codemirror/state": "^6.7.1",
+		"@codemirror/view": "^6.43.6",
 		"@types/node": "^22.10.0",
 		"builtin-modules": "^4.0.0",
 		"esbuild": "^0.25.0",
 		"eslint": "^9.18.0",
+		"jsdom": "^30.0.0",
 		"obsidian": "^1.8.7",
 		"tslib": "^2.8.1",
 		"typescript": "^5.7.2",
