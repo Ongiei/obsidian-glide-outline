@@ -42,6 +42,14 @@ export interface ResponsiveWidthResult {
 	labelContentWidth: number;
 	/** True when the pane is too narrow to show cards at all. */
 	compact: boolean;
+	/**
+	 * Width of the continuous interaction surface, px: from the rail to
+	 * the farthest SAFE card edge (indent + magnified card + shadow), but
+	 * WITHOUT the outer safe slack — the editor text beyond the widest
+	 * possible card must stay clickable even while the outline is
+	 * expanded. Never exceeds rootWidth.
+	 */
+	interactionWidth: number;
 }
 
 /**
@@ -103,10 +111,23 @@ export function computeResponsiveWidth(
 		0,
 		Math.min(input.maxLabelWidth, Math.floor(availableCardWidth - chromeX)),
 	);
+	// Continuous interaction surface: covers rail → farthest safe card
+	// edge at max magnification (effective text width, not the configured
+	// one), excluding the outer safe slack so editor text beyond the
+	// widest card never loses the pointer while expanded.
+	const interactionWidth = Math.min(
+		rootWidth,
+		input.railWidth +
+			input.labelGap +
+			maxLevelIndent +
+			Math.ceil((labelContentWidth + chromeX) * scale) +
+			input.shadowAllowance,
+	);
 	return {
 		rootWidth,
 		labelContentWidth,
 		compact: labelContentWidth < input.compactThreshold,
+		interactionWidth,
 	};
 }
 

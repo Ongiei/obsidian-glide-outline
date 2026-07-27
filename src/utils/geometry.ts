@@ -106,6 +106,85 @@ export interface CollisionLayoutResult {
 }
 
 /**
+ * Options that align the solver with what the user actually SEES (P0-5).
+ *
+ * Rows are laid out at their base centers, but the rendered card/marker
+ * moves by the previous frame's translateY (`--glide-shift-y`). The
+ * pointer lives in VISUAL space; the solver works in BASE space. These
+ * options carry the previous frame's shifts (visualCenter = center +
+ * shift) plus, when the pointer is physically over a row element, that
+ * row's index as the authoritative anchor.
+ */
+export interface CollisionSolveOptions {
+	/**
+	 * Previous frame's translateY per item (same order). When present and
+	 * length-matched, the pointer is mapped from visual space into base
+	 * space before solving. Single implicit iteration per frame — the
+	 * previous shifts are read, never re-derived, so the mapping cannot
+	 * oscillate within a frame; across frames it converges because the
+	 * displacement field is smooth with |gradient| < 1.
+	 */
+	currentShifts?: readonly number[];
+	/**
+	 * Index of the row the pointer is visually over (from DOM hit-testing,
+	 * e.g. `event.target.closest(".glide-outline-row")`). Takes priority
+	 * over the nearest-visual-center estimate. -1 / undefined = blank
+	 * area: fall back to interpolating between visual centers.
+	 */
+	preferredAnchorIndex?: number;
+}
+
+/**
+ * Map a pointer position from VISUAL space to BASE space (pure, P0-5).
+ *
+ * With an anchor: subtract exactly that row's current shift, so a pointer
+ * resting on the visually displaced card of row A yields distance 0 to
+ * A's base center — A gets the maximum scale, matching what the user
+ * points at.
+ *
+ * Without an anchor (blank area): interpolate the shift between the two
+ * visual centers bracketing the pointer. The interpolation is continuous
+ * in pointerY, so sweeping across blank space never teleports the
+ * magnification focus.
+ */
+export function mapVisualPointerToBase(
+	pointerY: number,
+	baseCenters: readonly number[],
+	currentShifts: readonly number[],
+	preferredAnchorIndex?: number,
+): number {
+	const n = baseCenters.length;
+	if (!Number.isFinite(pointerY) || n === 0 || currentShifts.length !== n) {
+		return pointerY;
+	}
+	const shiftAt = (i: number): number =>
+		Number.isFinite(currentShifts[i]) ? currentShifts[i] : 0;
+	if (
+		preferredAnchorIndex !== undefined &&
+		preferredAnchorIndex >= 0 &&
+		preferredAnchorIndex < n
+	) {
+		return pointerY - shiftAt(preferredAnchorIndex);
+	}
+	// Visual centers keep the base order (the solver never reorders rows).
+	const firstVisual = baseCenters[0] + shiftAt(0);
+	if (pointerY <= firstVisual) return pointerY - shiftAt(0);
+	const lastVisual = baseCenters[n - 1] + shiftAt(n - 1);
+	if (pointerY >= lastVisual) return pointerY - shiftAt(n - 1);
+	for (let i = 0; i + 1 < n; i++) {
+		const lower = baseCenters[i] + shiftAt(i);
+		const upper = baseCenters[i + 1] + shiftAt(i + 1);
+		if (pointerY >= lower && pointerY <= upper) {
+			const span = upper - lower;
+			const t = span > 0 ? (pointerY - lower) / span : 0;
+			const shift = shiftAt(i) + (shiftAt(i + 1) - shiftAt(i)) * t;
+			return pointerY - shift;
+		}
+	}
+	return pointerY;
+}
+
+/**
  * Collision-free dock magnification (pure function).
  *
  * 1. Every item gets a cosine-falloff scale from its distance to the pointer.
@@ -131,11 +210,21 @@ export function computeCollisionFreeMagnification(
 	radius: number,
 	minimumGap: number,
 	reducedMotion?: boolean,
+	options?: CollisionSolveOptions,
 ): CollisionLayoutResult[] {
 	const n = items.length;
 	if (n === 0) return [];
 	if (reducedMotion || !Number.isFinite(pointerY)) {
 		return items.map(() => ({ scale: 1, translateY: 0 }));
+	}
+	// P0-5: the pointer arrives in visual space; solve in base space.
+	if (options?.currentShifts) {
+		pointerY = mapVisualPointerToBase(
+			pointerY,
+			items.map((item) => item.center),
+			options.currentShifts,
+			options.preferredAnchorIndex,
+		);
 	}
 	const gap = Math.max(0, minimumGap);
 
