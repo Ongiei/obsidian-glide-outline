@@ -1,6 +1,9 @@
-import { Plugin } from "obsidian";
+import { Notice, Plugin } from "obsidian";
 import type { Editor, MarkdownView, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
+import { Diagnostics } from "./core/Diagnostics";
+import { PerfCapture } from "./core/PerfCapture";
+import { FULL_MOTION_STATE } from "./utils/motion";
 import {
 	DEFAULT_SETTINGS,
 	GlideOutlineSettingTab,
@@ -31,6 +34,10 @@ export default class GlideOutlinePlugin extends Plugin {
 	private saveTimer = 0;
 	/** ONE workspace-wide CM update feed, fanned out per view (P0-2). */
 	private readonly editorUpdates = new EditorUpdateBridge();
+	/** Shared interaction diagnostics (pointer activation + jump landing). */
+	private readonly diagnostics = new Diagnostics();
+	/** On-demand performance capture (section 3) — zero cost while off. */
+	private readonly perf = new PerfCapture();
 
 	override async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
@@ -90,11 +97,59 @@ export default class GlideOutlinePlugin extends Plugin {
 				await this.applySettings();
 			},
 		});
+		// Section 3: one-click Windows/macOS motion triage. Captures the OS
+		// reduced-motion report, the chosen mode, the RESOLVED motion state
+		// and the last pointer/jump interactions — enough to tell "motion
+		// disabled by the OS" from "wrong heading" from "wrong drop point".
+		this.addCommand({
+			id: "copy-diagnostics",
+			name: "Copy Glide Outline diagnostics",
+			callback: async () => {
+				await this.copyDiagnostics();
+			},
+		});
+		// On-demand performance capture (perf spec section 3). Sampling is
+		// NEVER always-on: hot paths check a plain boolean and every buffer
+		// is a fixed-size ring. Start → interact → Stop copies the report.
+		this.addCommand({
+			id: "perf-capture-start",
+			name: "Start Glide Outline performance capture",
+			callback: () => {
+				if (this.perf.active) {
+					new Notice("Glide Outline: capture already running.");
+					return;
+				}
+				this.perf.start(window);
+				new Notice(
+					"Glide Outline: performance capture started. " +
+						"Interact with the outline, then run the stop command.",
+				);
+			},
+		});
+		this.addCommand({
+			id: "perf-capture-stop",
+			name: "Stop and copy Glide Outline performance capture",
+			callback: async () => {
+				const report = this.perf.stop(window);
+				if (!report) {
+					new Notice("Glide Outline: no capture is running.");
+					return;
+				}
+				await navigator.clipboard.writeText(
+					JSON.stringify(report, null, 2),
+				);
+				new Notice(
+					"Glide Outline: performance report copied to clipboard.",
+				);
+			},
+		});
 
 		this.app.workspace.onLayoutReady(() => this.lifecycle.start());
 	}
 
 	override onunload(): void {
+		// Never leave a longtask observer behind (section 3).
+		if (this.perf.active) this.perf.stop(window);
 		if (this.saveTimer !== 0) {
 			window.clearTimeout(this.saveTimer);
 			this.saveTimer = 0;
@@ -173,7 +228,49 @@ export default class GlideOutlinePlugin extends Plugin {
 			this.provider,
 			() => this.settings,
 			this.editorUpdates,
+			this.diagnostics,
+			this.perf,
 		);
+	}
+
+	/**
+	 * Build and copy the diagnostics JSON (section 3). Runs even when no
+	 * outline is mounted — the OS motion report and settings alone already
+	 * answer "why is nothing animating on Windows".
+	 */
+	private async copyDiagnostics(): Promise<void> {
+		const systemReduced = window.matchMedia(
+			"(prefers-reduced-motion: reduce)",
+		).matches;
+		const s = this.settings;
+		const payload = {
+			timestamp: new Date().toISOString(),
+			pluginVersion: this.manifest.version,
+			platform: navigator.platform,
+			userAgent: navigator.userAgent,
+			systemPrefersReducedMotion: systemReduced,
+			resolvedMotion: FULL_MOTION_STATE,
+			settings: {
+				enabled: s.enabled,
+				position: s.position,
+				markerStyle: s.markerStyle,
+				maxScale: s.maxScale,
+				radius: s.radius,
+				cardGap: s.cardGap,
+				pointerAutoScroll: s.pointerAutoScroll,
+				pointerAutoScrollSpeed: s.pointerAutoScrollSpeed,
+				pointerAutoScrollZone: s.pointerAutoScrollZone,
+				edgeFadeEnabled: s.edgeFadeEnabled,
+				edgeFadeSize: s.edgeFadeSize,
+				showLevels: s.showLevels,
+				renderMarkdown: s.renderMarkdown,
+			},
+			outline: this.controller?.getDiagnosticsSnapshot() ?? null,
+			lastPointerActivation: this.diagnostics.lastPointerActivation,
+			lastJump: this.diagnostics.lastJump,
+		};
+		await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+		new Notice("Glide Outline diagnostics copied to clipboard.");
 	}
 
 	private detachController(): void {

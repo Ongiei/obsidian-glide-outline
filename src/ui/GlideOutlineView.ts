@@ -1,12 +1,25 @@
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
-import { textEffectHaloCss } from "../settings";
 import {
 	computeResponsiveWidth,
 	computeVerticalSafeSpace,
 } from "../utils/layout";
 import { computeOverflowState } from "../utils/overflow";
 import type { OverflowState } from "../utils/overflow";
+import { bridgeRectFor } from "../utils/envelope";
+import type { PointerEnvelope, Rect } from "../utils/envelope";
+
+/** Copy the four edges out of a DOMRect-like object into our Rect shape. */
+function rectFrom(r: { left: number; top: number; right: number; bottom: number }): Rect {
+	return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+}
+
+function zeroRect(): Rect {
+	return { left: 0, top: 0, right: 0, bottom: 0 };
+}
+
+/** Monotonic id source for sr-only label elements (unique per window). */
+let a11yLabelSeq = 0;
 
 export interface GlideOutlineViewHandlers {
 	onJump(item: HeadingItem): void;
@@ -33,12 +46,21 @@ export const CARD_BORDER_WIDTH = 1;
 /** Width the H1–H6 badge (incl. its gap) adds to the card, px. */
 export const LEVEL_BADGE_ALLOWANCE = 26;
 
-interface ItemRecord {
+export interface ItemRecord {
 	rowEl: HTMLElement;
 	buttonEl: HTMLButtonElement;
+	/** Cached at creation — envelope rebuilds never querySelector for it. */
+	markerEl: HTMLElement;
 	cardEl: HTMLElement;
 	badgeEl: HTMLElement;
 	labelEl: HTMLElement;
+	/**
+	 * Screen-reader-only accessible name ("H2: Section title"). The
+	 * button points at it via `aria-labelledby` instead of `aria-label`
+	 * — Obsidian renders `aria-label` as a hover tooltip, which fought
+	 * the magnified card visually (§ tooltip removal).
+	 */
+	a11yLabelEl: HTMLElement;
 	/** Unscaled card height from the last measurement pass. */
 	baseCardHeight: number;
 	/** What the label currently displays (text or rendered source). */
@@ -69,15 +91,6 @@ interface ItemRecord {
 export class GlideOutlineView {
 	readonly rootEl: HTMLElement;
 	readonly hitZoneEl: HTMLElement;
-	/**
-	 * Continuous transparent interaction surface (P0-1). Sits UNDER the
-	 * visual layers and spans the whole hover envelope (rail → farthest
-	 * card edge, plus the vertical safe areas), so the quadrilateral dead
-	 * spot between two magnification-displaced neighbours stays inside
-	 * the outline's pointer envelope. Interactive only while expanded /
-	 * focused; it never handles clicks and carries no aria semantics.
-	 */
-	readonly interactionSurfaceEl: HTMLElement;
 	readonly viewportEl: HTMLElement;
 	readonly listEl: HTMLElement;
 
@@ -114,13 +127,6 @@ export class GlideOutlineView {
 		this.hitZoneEl = this.doc.createElement("div");
 		this.hitZoneEl.className = "glide-outline-hit-zone";
 
-		// Below the viewport in DOM order → below every visual layer in
-		// paint order (no z-index games). Purely presentational: it must
-		// stay invisible to the accessibility tree.
-		this.interactionSurfaceEl = this.doc.createElement("div");
-		this.interactionSurfaceEl.className = "glide-outline-interaction-surface";
-		this.interactionSurfaceEl.setAttribute("aria-hidden", "true");
-
 		this.viewportEl = this.doc.createElement("div");
 		this.viewportEl.className = "glide-outline-viewport";
 
@@ -130,7 +136,6 @@ export class GlideOutlineView {
 
 		this.viewportEl.appendChild(this.listEl);
 		this.rootEl.appendChild(this.hitZoneEl);
-		this.rootEl.appendChild(this.interactionSurfaceEl);
 		this.rootEl.appendChild(this.viewportEl);
 		hostEl.appendChild(this.rootEl);
 
@@ -267,7 +272,13 @@ export class GlideOutlineView {
 		root.classList.toggle("glide-outline-root--right", s.position === "right");
 		root.classList.toggle("glide-outline-root--left", s.position === "left");
 		root.classList.toggle("glide-outline-root--marker-dot", s.markerStyle === "dot");
-		root.classList.toggle("glide-outline-root--no-anim", !s.animationEnabled);
+
+		// Motion behaviour: always full. The --motion-full root class keeps
+		// CSS transitions alive even under an OS prefers-reduced-motion
+		// report (the media-query block in styles.css only bites while the
+		// root is NOT --motion-full), and --motion-reduced is never applied.
+		root.classList.add("glide-outline-root--motion-full");
+		root.classList.remove("glide-outline-root--motion-reduced");
 
 		root.style.setProperty("--glide-rail-width", `${RAIL_WIDTH}px`);
 		root.style.setProperty("--glide-label-gap", `${LABEL_GAP}px`);
@@ -288,15 +299,6 @@ export class GlideOutlineView {
 		root.style.setProperty("--glide-card-padding-y", `${card.paddingY}px`);
 		root.classList.toggle("glide-outline-root--card-border", card.border);
 		root.classList.toggle("glide-outline-root--card-shadow", card.shadow);
-		// Text effect: the CSS value is built in TS. Halo is a symmetric
-		// multi-layer glow — never a directional drop shadow. The stroke
-		// mode was removed (P1-2); persisted "stroke" normalizes to "none".
-		const effect = card.textEffect;
-		root.classList.toggle(
-			"glide-outline-root--text-halo",
-			effect.mode === "halo",
-		);
-		root.style.setProperty("--glide-text-halo", textEffectHaloCss(effect));
 		root.classList.toggle(
 			"glide-outline-root--pure-text",
 			card.opacity === 0 && !card.border && !card.shadow,
@@ -335,6 +337,69 @@ export class GlideOutlineView {
 	/** Current overflow / scrollability of the outline viewport. */
 	getOverflowState(): OverflowState {
 		return this.overflowState;
+	}
+
+	/** Viewport scroll metrics, for diagnostics. */
+	getViewportMetrics(): { scrollTop: number; clientHeight: number; scrollHeight: number } {
+		const vp = this.viewportEl;
+		return {
+			scrollTop: vp.scrollTop,
+			clientHeight: vp.clientHeight,
+			scrollHeight: vp.scrollHeight,
+		};
+	}
+
+	/** Root class list (as strings), for diagnostics. */
+	getRootClassList(): string[] {
+		return Array.from(this.rootEl.classList);
+	}
+
+	/** Stable ItemRecord access for geometry consumers (section 6). */
+	getItemRecord(key: string): ItemRecord | undefined {
+		return this.itemRecords.get(key);
+	}
+
+	/**
+	 * Build the geometric Pointer Envelope from the actual (post-transform)
+	 * marker and card rectangles of the ACTIVE RANGE of visible headings,
+	 * plus the rail hit zone. The bridge of each heading spans ONLY its own
+	 * marker and card, so a long title can never widen a short neighbour's
+	 * hover range.
+	 *
+	 * Intended to be called from a single RAF read phase (never per
+	 * pointermove): it reads `getBoundingClientRect` only for the rows in
+	 * [startIndex, endIndex] (inclusive; defaults to all visible items).
+	 * Marker/card elements come from the ItemRecord cache — no
+	 * querySelector per rebuild.
+	 */
+	collectEnvelope(
+		hTolerance = 9,
+		vTolerance = 5,
+		startIndex = 0,
+		endIndex = this.items.length - 1,
+	): PointerEnvelope {
+		const railRect = rectFrom(this.hitZoneEl.getBoundingClientRect());
+		const items: PointerEnvelope["items"] = [];
+		const first = Math.max(0, startIndex);
+		const last = Math.min(this.items.length - 1, endIndex);
+		for (let i = first; i <= last; i++) {
+			const item = this.items[i];
+			const record = this.itemRecords.get(item.key);
+			const markerRect = rectFrom(
+				record?.markerEl.getBoundingClientRect() ?? zeroRect(),
+			);
+			const cardRect = rectFrom(
+				record?.cardEl.getBoundingClientRect() ?? zeroRect(),
+			);
+			const bridgeRect = bridgeRectFor(
+				markerRect,
+				cardRect,
+				hTolerance,
+				vTolerance,
+			);
+			items.push({ key: item.key, markerRect, cardRect, bridgeRect });
+		}
+		return { railRect, items };
 	}
 
 	/**
@@ -377,7 +442,11 @@ export class GlideOutlineView {
 		for (const item of this.items) {
 			if (item.level > deepestLevel) deepestLevel = item.level;
 		}
-		const { rootWidth, labelContentWidth, compact, interactionWidth } =
+		// NOTE: the solver still reports `interactionWidth`, but nothing
+		// consumes it as a CSS var anymore — the transparent interaction
+		// surface is gone; hover is maintained by the geometric Pointer
+		// Envelope (collectEnvelope + MagnificationController).
+		const { rootWidth, labelContentWidth, compact } =
 			computeResponsiveWidth({
 			hostWidth: this.hostEl.clientWidth || 0,
 			maxLabelWidth: s.maxLabelWidth,
@@ -398,10 +467,6 @@ export class GlideOutlineView {
 		this.rootEl.style.setProperty(
 			"--glide-label-content-width",
 			`${labelContentWidth}px`,
-		);
-		this.rootEl.style.setProperty(
-			"--glide-interaction-width",
-			`${interactionWidth}px`,
 		);
 		this.rootEl.classList.toggle("glide-outline-root--compact", compact);
 	}
@@ -506,15 +571,32 @@ export class GlideOutlineView {
 		const label = this.doc.createElement("span");
 		label.className = "glide-outline-label";
 
+		// Visually hidden accessible name. Keeping it OUTSIDE the visual
+		// card (direct child of the button) means clip/transform on the
+		// card never affects it, and `aria-labelledby` gives keyboard and
+		// screen-reader users the same "H2: Title" announcement the old
+		// `aria-label` did — without Obsidian's hover tooltip.
+		const a11yLabel = this.doc.createElement("span");
+		a11yLabel.className = "glide-outline-a11y-label";
+		a11yLabel.id = `glide-outline-a11y-${a11yLabelSeq++}`;
+		button.setAttribute("aria-labelledby", a11yLabel.id);
+
 		card.appendChild(badge);
 		card.appendChild(label);
 		reveal.appendChild(card);
 		motion.appendChild(marker);
 		motion.appendChild(reveal);
 		button.appendChild(motion);
+		button.appendChild(a11yLabel);
 		row.appendChild(button);
 
 		button.addEventListener("click", (event) => {
+			// Mouse/touch activation is handled by the pointerup lock in the
+			// magnification controller, which also suppresses this synthetic
+			// click (a real pointer click has event.detail > 0). Only a
+			// keyboard activation — Enter / Space — arrives here with
+			// event.detail === 0, so the two paths can never double-fire.
+			if (event.detail !== 0) return;
 			// Links rendered inside labels handle their own navigation.
 			// Duck-typed instead of instanceof — safe in pop-out windows.
 			const target = event.target as Partial<Element> | null;
@@ -526,9 +608,11 @@ export class GlideOutlineView {
 		return {
 			rowEl: row,
 			buttonEl: button,
+			markerEl: marker,
 			cardEl: card,
 			badgeEl: badge,
 			labelEl: label,
+			a11yLabelEl: a11yLabel,
 			baseCardHeight: 0,
 			renderedContent: "",
 			renderedRich: false,
@@ -544,7 +628,13 @@ export class GlideOutlineView {
 		buttonEl.dataset.key = item.key;
 		record.rowEl.dataset.level = String(item.level);
 		record.rowEl.dataset.key = item.key;
-		buttonEl.setAttribute("aria-label", `H${item.level}: ${item.text}`);
+		// Accessible name lives in a sr-only span (aria-labelledby), NOT
+		// in `aria-label`: Obsidian shows aria-label as a hover tooltip,
+		// which duplicated the already-magnified card text.
+		const a11yText = `H${item.level}: ${item.text}`;
+		if (record.a11yLabelEl.textContent !== a11yText) {
+			record.a11yLabelEl.textContent = a11yText;
+		}
 		// Hierarchy staircase indent — static per level, so it lives on the
 		// button (not inside the reveal transform, which animates).
 		buttonEl.style.setProperty(

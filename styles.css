@@ -14,24 +14,14 @@
      1. .glide-outline-hit-zone  – thin transparent strip over the rail
      2. .glide-outline-marker    – rail-width hit slots (line drawn via ::before)
      3. .glide-outline-card      – visible label cards, expanded state only
-     4. .glide-outline-motion    – EXPANDED ONLY: per-row interaction
-        corridor. Its box is exactly marker + column-gap + card
-        (width: max-content, full row height); collapsed, it reverts to
-        pointer-transparent, and it never extends past the card into the
-        text body.
-     5. .glide-outline-interaction-surface – EXPANDED ONLY: one CONTINUOUS
-        transparent plane under all visual layers. Per-row corridors move
-        with --glide-shift-y during magnification, which opens a
-        quadrilateral hover hole centered between two displaced
-        neighbours; this surface closes it. It spans the root vertically
-        (viewport height including the safe padding areas) and
-        horizontally from the rail to the farthest safe card edge
-        (--glide-interaction-width, written by the width solver), mirrored
-        for left/right outlines. It paints nothing, owns no clicks and no
-        aria semantics — clicks fall through to nothing (blank space never
-        jumps). Collapsed, it is pointer-transparent, so the editor text
-        under it stays fully clickable, selectable and scrollable.
-   The editor underneath stays fully clickable everywhere else.
+   The motion and reveal wrappers are PERMANENTLY pointer-events: none —
+   they are drawing layers, never click targets, so a click can only land
+   on the element the user visually sees. Hover across the transparent
+   gaps between magnification-displaced rows is maintained in JS by the
+   geometric Pointer Envelope (union of each heading's actual marker /
+   card / bridge rects — see MagnificationController), NOT by any large
+   transparent DOM plane. The editor underneath stays fully clickable
+   everywhere outside the rail strip and the visible cards.
 
    Transform responsibilities:
      .glide-outline-motion  vertical displacement → --glide-shift-y
@@ -92,41 +82,6 @@
 
 .glide-outline-root--left .glide-outline-hit-zone {
 	left: 0;
-}
-
-/* Continuous interaction surface (P0-1): a fully transparent plane that
-   keeps the pointer inside the hover envelope while it crosses the
-   quadrilateral gap between two magnification-displaced rows. It paints
-   NOTHING (no background, border or shadow — the single-card invariant
-   is untouched) and is interactive only while the outline is expanded
-   or holds keyboard focus. Width comes from the width solver via
-   --glide-interaction-width (rail → farthest safe card edge, including
-   indent, padding, border and shadow allowances at max magnification);
-   it never exceeds the root, so the editor text beyond the cards stays
-   clickable even while expanded. */
-.glide-outline-interaction-surface {
-	position: absolute;
-	top: 0;
-	bottom: 0;
-	width: var(--glide-interaction-width, var(--glide-root-width, 340px));
-	max-width: 100%;
-	background: none;
-	border: none;
-	box-shadow: none;
-	pointer-events: none;
-}
-
-.glide-outline-root--right .glide-outline-interaction-surface {
-	right: 0;
-}
-
-.glide-outline-root--left .glide-outline-interaction-surface {
-	left: 0;
-}
-
-.glide-outline-root.is-expanded .glide-outline-interaction-surface,
-.glide-outline-root:focus-within .glide-outline-interaction-surface {
-	pointer-events: auto;
 }
 
 /* Drawing layers: never intercept the pointer. --glide-viewport-pad keeps
@@ -259,23 +214,26 @@
 		var(--glide-label-gap, 6px) + var(--glide-level-indent, 0px)
 	);
 	height: 100%;
-	transform: translateY(var(--glide-shift-y, 0px));
-	transition: transform 140ms cubic-bezier(0.33, 0, 0.2, 1);
+	/* Continuous displacement is RAF-interpolated in TS (section 11) —
+	   NO CSS transition here, or the two systems would fight over the
+	   same transform. translate3d keeps the row on a compositable path. */
+	transform: translate3d(0, var(--glide-shift-y, 0px), 0);
 	pointer-events: none;
 }
 
-/* Interaction corridor: while the outline is expanded (or focused), the
-   whole motion box — marker, the gap between marker and card, the card
-   and the row slack around the text — accepts the pointer. This is what
-   keeps hover alive when the pointer crosses the transparent gap or sits
-   in the blank space beside a short label. The box is width: max-content
-   inside an edge-anchored button, so it can never grow into a full-width
-   editor-blocking bar. Clicks in the corridor bubble to the item button,
-   which enlarges the effective click target for edge cases too. */
-.glide-outline-root.is-expanded .glide-outline-motion,
-.glide-outline-root:focus-within .glide-outline-motion {
-	pointer-events: auto;
+/* GPU layer hints ONLY for rows inside the active motion range
+   (section 15). The controller adds/removes this class; a converged or
+   out-of-range row never holds a standing layer. */
+.glide-outline-row--motion-active .glide-outline-motion,
+.glide-outline-row--motion-active .glide-outline-card {
+	will-change: transform;
 }
+
+/* The motion corridor is NEVER interactive (section 6/7): a click in the
+   marker↔card gap or the row slack must not jump anywhere, and hover
+   continuity across those transparent gaps is the Pointer Envelope's job
+   (geometry in TS), not a DOM plane's. Only .glide-outline-marker and
+   .glide-outline-card accept the pointer. */
 
 /* DOM order is marker → reveal; on the right edge the marker must sit at
    the outermost position, so the row is reversed visually. */
@@ -307,10 +265,16 @@
 	height: 2px;
 	width: var(--glide-line-size, 12px);
 	border-radius: 2px;
+	/* Marker color stability (§7): inactive markers are a FIXED quiet
+	   color at FULL opacity, expanded or collapsed. They previously used
+	   the per-level color ramp plus an `is-expanded` opacity drop to
+	   0.35, which made every line/dot visibly jump the moment the rail
+	   expanded. Depth stays encoded in line length / dot size; the label
+	   and badge carry the color ramp. Exactly two marker states remain:
+	   inactive = --text-faint, active/focus = --interactive-accent. */
 	background-color: var(--text-faint);
-	transition:
-		background-color 160ms ease,
-		opacity 160ms ease;
+	opacity: 1;
+	transition: background-color 160ms ease;
 }
 
 .glide-outline-root--right .glide-outline-marker::before {
@@ -322,30 +286,43 @@
 }
 
 /* Line length and dot diameter are INDEPENDENT per-level scales — a dot
-   clamped to min(size, 7px) would make H1–H4 indistinguishable. */
+   clamped to min(size, 7px) would make H1–H4 indistinguishable.
+
+   --glide-level-color: ONE six-step light/dark ramp shared by the label,
+   the level badge and the marker, so every depth cue agrees. Built purely
+   from Obsidian theme variables (--text-normal / --text-muted /
+   --text-faint) blended with color-mix — no hex values, no hue carousel —
+   so it adapts to any theme, light or dark. The active accent overrides
+   below win because they come later at equal-or-higher specificity. */
 .glide-outline-item[data-level="1"] {
 	--glide-line-size: 20px;
 	--glide-dot-size: 8px;
+	--glide-level-color: var(--text-normal);
 }
 .glide-outline-item[data-level="2"] {
 	--glide-line-size: 16px;
 	--glide-dot-size: 7px;
+	--glide-level-color: color-mix(in srgb, var(--text-normal) 78%, var(--text-muted));
 }
 .glide-outline-item[data-level="3"] {
 	--glide-line-size: 12px;
 	--glide-dot-size: 6px;
+	--glide-level-color: color-mix(in srgb, var(--text-normal) 42%, var(--text-muted));
 }
 .glide-outline-item[data-level="4"] {
 	--glide-line-size: 10px;
 	--glide-dot-size: 5px;
+	--glide-level-color: var(--text-muted);
 }
 .glide-outline-item[data-level="5"] {
 	--glide-line-size: 8px;
 	--glide-dot-size: 4px;
+	--glide-level-color: color-mix(in srgb, var(--text-muted) 60%, var(--text-faint));
 }
 .glide-outline-item[data-level="6"] {
 	--glide-line-size: 6px;
 	--glide-dot-size: 3px;
+	--glide-level-color: var(--text-faint);
 }
 
 /* Dot markers: visual size shrinks with depth, but the HIT AREA is the
@@ -365,10 +342,6 @@
    an absolutely positioned pseudo-element — layout size is unchanged. */
 .glide-outline-root--marker-dot .glide-outline-item.is-active .glide-outline-marker::before {
 	scale: 1.3;
-}
-
-.glide-outline-root.is-expanded .glide-outline-marker::before {
-	opacity: 0.35;
 }
 
 /* --------------------------------------------------------------------------
@@ -420,9 +393,9 @@
 		transparent
 	);
 	transform: scale(var(--glide-scale, 1));
-	transition:
-		transform 90ms ease-out,
-		background-color 160ms ease;
+	/* Continuous scale is RAF-interpolated in TS (section 11): transform
+	   deliberately has NO transition. Discrete color changes keep theirs. */
+	transition: background-color 160ms ease;
 	pointer-events: none;
 }
 
@@ -460,7 +433,7 @@
 	line-height: 1.4;
 	letter-spacing: 0.02em;
 	font-variant-numeric: tabular-nums;
-	color: var(--text-faint);
+	color: var(--glide-level-color, var(--text-faint));
 	opacity: 0.9;
 	pointer-events: none;
 }
@@ -481,24 +454,6 @@
 
 .glide-outline-root--card-shadow .glide-outline-card {
 	box-shadow: var(--shadow-s);
-}
-
-/* Text effect — halo: a symmetric multi-layer glow built in TypeScript
-   (three zero-offset layers, tapering alpha). Deliberately NOT a
-   directional drop shadow: `0 1px …` smudged the bottom edge of bold CJK
-   glyphs. Applies per label; the value is "none" unless mode = halo. */
-.glide-outline-root--text-halo .glide-outline-label {
-	text-shadow: var(--glide-text-halo, none);
-}
-
-/* MarkdownRenderer output (code, links, bold…) must keep the halo even
-   when theme rules would reset it on those elements. */
-.glide-outline-root--text-halo .glide-outline-label code,
-.glide-outline-root--text-halo .glide-outline-label a,
-.glide-outline-root--text-halo .glide-outline-label strong,
-.glide-outline-root--text-halo .glide-outline-label em,
-.glide-outline-root--text-halo .glide-outline-label mark {
-	text-shadow: inherit;
 }
 
 /* Pure text mode: opacity 0 + no border + no shadow → the card element
@@ -535,10 +490,31 @@
 }
 
 /* --------------------------------------------------------------------------
-   Level typography: ONE systematic H1→H6 ramp (weight ↓, size ↓, color
-   fades muted → faint with depth) instead of ad-hoc endpoints. Together
-   with the edge badge this is the primary hierarchy expression; the
-   staircase indent is a legacy option that now defaults to 0.
+   Screen-reader-only accessible name (§ tooltip removal). Each item
+   button points at one of these via `aria-labelledby` instead of
+   `aria-label`, because Obsidian surfaces `aria-label` as a hover
+   tooltip. Standard sr-only recipe: 1×1 px, clipped, out of flow,
+   pointer-transparent — announced by AT, never painted, never a target.
+   -------------------------------------------------------------------------- */
+.glide-outline-a11y-label {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+	pointer-events: none;
+}
+
+/* --------------------------------------------------------------------------
+   Level typography: ONE systematic H1→H6 ramp (weight ↓, size ↓) plus the
+   shared --glide-level-color six-step light/dark ramp defined next to the
+   marker sizes. Together with the edge badge this is the primary
+   hierarchy expression; the staircase indent is a legacy option that now
+   defaults to 0.
    Ordering matters: the active/hover color rules FOLLOW this block, so an
    active H6 keeps its size/weight but wins the accent color — hierarchy
    is never fully lost on the active item.
@@ -546,32 +522,32 @@
 .glide-outline-item[data-level="1"] .glide-outline-label {
 	font-weight: 700;
 	font-size: 1em;
-	color: var(--text-normal);
+	color: var(--glide-level-color, var(--text-normal));
 }
 .glide-outline-item[data-level="2"] .glide-outline-label {
 	font-weight: 600;
 	font-size: 0.98em;
-	color: var(--text-muted);
+	color: var(--glide-level-color, var(--text-muted));
 }
 .glide-outline-item[data-level="3"] .glide-outline-label {
 	font-weight: 500;
 	font-size: 0.96em;
-	color: var(--text-muted);
+	color: var(--glide-level-color, var(--text-muted));
 }
 .glide-outline-item[data-level="4"] .glide-outline-label {
 	font-weight: 500;
 	font-size: 0.94em;
-	color: var(--text-muted);
+	color: var(--glide-level-color, var(--text-muted));
 }
 .glide-outline-item[data-level="5"] .glide-outline-label {
 	font-weight: 400;
 	font-size: 0.92em;
-	color: var(--text-muted);
+	color: var(--glide-level-color, var(--text-muted));
 }
 .glide-outline-item[data-level="6"] .glide-outline-label {
 	font-weight: 400;
 	font-size: 0.9em;
-	color: var(--text-faint);
+	color: var(--glide-level-color, var(--text-faint));
 }
 
 /* Active / hover colors override the ramp color (same specificity, later
@@ -635,25 +611,14 @@
 }
 
 /* --------------------------------------------------------------------------
-   Animation opt-out: settings toggle and prefers-reduced-motion.
-   JS also stops writing --glide-scale / --glide-shift-y in these states,
-   so no !important is needed anywhere.
+   Motion behaviour. The plugin always runs with full motion:
+   GlideOutlineView.applySettings unconditionally applies
+   `glide-outline-root--motion-full`, and there is deliberately NO
+   prefers-reduced-motion media query here — the OS "Animation effects"
+   toggle (Windows) maps to that media query and must never switch the
+   plugin's animations off. The class itself is kept as the semantic
+   anchor so themes/snippets can still target it.
    -------------------------------------------------------------------------- */
-.glide-outline-root--no-anim .glide-outline-marker::before,
-.glide-outline-root--no-anim .glide-outline-motion,
-.glide-outline-root--no-anim .glide-outline-reveal,
-.glide-outline-root--no-anim .glide-outline-card {
-	transition: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-	.glide-outline-marker::before,
-	.glide-outline-motion,
-	.glide-outline-reveal,
-	.glide-outline-card {
-		transition: none;
-	}
-}
 
 /* --------------------------------------------------------------------------
    Settings tab (P1-5): four-section tabbed page. Pure Obsidian theme

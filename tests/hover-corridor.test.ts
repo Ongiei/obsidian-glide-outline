@@ -113,7 +113,7 @@ describe("hover corridor (controller half)", () => {
 		// Still expanded immediately — the grace period absorbs accidental
 		// exits across transparent areas.
 		expect(view.isExpanded()).toBe(true);
-		vi.advanceTimersByTime(60); // < COLLAPSE_GRACE_MS (120)
+		vi.advanceTimersByTime(60); // < COLLAPSE_GRACE_MS (100)
 		expect(view.isExpanded()).toBe(true);
 	});
 

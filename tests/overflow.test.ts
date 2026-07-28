@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+	computeAutoScrollZones,
 	computeOverflowState,
+	computePointerAutoScroll,
 	computePointerAutoScrollVelocity,
 } from "../src/utils/overflow";
 
@@ -69,7 +71,9 @@ describe("computeOverflowState", () => {
 });
 
 describe("computePointerAutoScrollVelocity", () => {
-	// Viewport 100–500 (height 400) → pre-scroll zone 80 px, edge zone 40 px.
+	// Viewport 100–500 (height 400), default triggerZone 120 px →
+	// pre-scroll zone min(200, 120) = 120 px, strong zone min(120, 54) = 54 px.
+	// Dead zone is therefore [220, 380] (the center 160 px).
 	const BASE = {
 		pointerVelocityY: 0,
 		viewportTop: 100,
@@ -82,9 +86,10 @@ describe("computePointerAutoScrollVelocity", () => {
 	};
 
 	it("returns 0 across the whole dead zone", () => {
+		// Dead zone is [220, 380] for the default 120 px trigger area.
 		expect(computePointerAutoScrollVelocity({ ...BASE, pointerY: 300 })).toBe(0);
-		expect(computePointerAutoScrollVelocity({ ...BASE, pointerY: 200 })).toBe(0);
-		expect(computePointerAutoScrollVelocity({ ...BASE, pointerY: 400 })).toBe(0);
+		expect(computePointerAutoScrollVelocity({ ...BASE, pointerY: 250 })).toBe(0);
+		expect(computePointerAutoScrollVelocity({ ...BASE, pointerY: 350 })).toBe(0);
 	});
 
 	it("scrolls up (negative) inside the top pre-scroll zone", () => {
@@ -98,7 +103,7 @@ describe("computePointerAutoScrollVelocity", () => {
 	});
 
 	it("ramps speed continuously with penetration depth", () => {
-		const pre = computePointerAutoScrollVelocity({ ...BASE, pointerY: 450 });
+		const pre = computePointerAutoScrollVelocity({ ...BASE, pointerY: 430 });
 		const edge = computePointerAutoScrollVelocity({ ...BASE, pointerY: 480 });
 		const deep = computePointerAutoScrollVelocity({ ...BASE, pointerY: 495 });
 		expect(edge).toBeGreaterThan(pre);
@@ -106,17 +111,37 @@ describe("computePointerAutoScrollVelocity", () => {
 		// Quadratic curve: the pre-scroll entrance is gentle.
 		const entrance = computePointerAutoScrollVelocity({
 			...BASE,
-			pointerY: 500 - 79.9,
+			pointerY: 500 - 99.9,
 		});
 		expect(entrance).toBeLessThan(320 * 0.01);
 	});
 
 	it("keeps the pre-scroll zone below its speed share", () => {
-		// Just outside the edge zone (distance 41 px) only the pre-scroll
+		// Just outside the edge zone (distance 51 px) only the pre-scroll
 		// ramp contributes → strictly below 35% of maxSpeed.
-		const v = computePointerAutoScrollVelocity({ ...BASE, pointerY: 459 });
+		const v = computePointerAutoScrollVelocity({ ...BASE, pointerY: 449 });
 		expect(v).toBeGreaterThan(0);
 		expect(v).toBeLessThan(320 * 0.35);
+	});
+
+	it("uses the configured trigger zone as the pre-scroll depth", () => {
+		// Height 400, default triggerZone 120: pre-scroll = min(200, 120) = 120 px.
+		// 405 (distance 95) is INSIDE the pre-scroll zone → must scroll down.
+		expect(
+			computePointerAutoScrollVelocity({ ...BASE, pointerY: 405 }),
+		).toBeGreaterThan(0);
+		// Symmetric at the top.
+		expect(
+			computePointerAutoScrollVelocity({ ...BASE, pointerY: 195 }),
+		).toBeLessThan(0);
+		// 445 (distance 55) is in the gentle part of the pre-scroll ramp,
+		// below the 35% strong-zone share.
+		const between = computePointerAutoScrollVelocity({
+			...BASE,
+			pointerY: 445,
+		});
+		expect(between).toBeGreaterThan(0);
+		expect(between).toBeLessThan(320 * 0.35);
 	});
 
 	it("hits max speed exactly at the physical edges", () => {
@@ -224,8 +249,9 @@ describe("computePointerAutoScrollVelocity", () => {
 	});
 
 	it("keeps a calm center in a short viewport (no zone tug-of-war)", () => {
-		// Height 60 → pre-scroll clamps to 24 px, edge to 12 px; the exact
-		// middle stays 0.
+		// Height 60 → pre-scroll clamped to half-height 30 px (strong zone
+		// collapses to the same 30 px since the floor 54 > 30); the exact
+		// middle stays 0, the edges scroll.
 		const short = { ...BASE, viewportTop: 100, viewportBottom: 160 };
 		expect(computePointerAutoScrollVelocity({ ...short, pointerY: 130 })).toBe(0);
 		expect(
@@ -249,5 +275,116 @@ describe("computePointerAutoScrollVelocity", () => {
 			const v = computePointerAutoScrollVelocity(input);
 			expect(Number.isFinite(v)).toBe(true);
 		}
+	});
+});
+
+describe("computeAutoScrollZones (§十)", () => {
+	it("falls back to the default 120 px trigger area", () => {
+		// No zone supplied → DEFAULT_TRIGGER_ZONE_PX = 120.
+		// Height 400 → preZone = min(200, 120) = 120, strongZone = min(120, 54) = 54.
+		expect(computeAutoScrollZones(400)).toEqual({ preZone: 120, strongZone: 54 });
+	});
+
+	it("clamps the pre-scroll zone to half the viewport height", () => {
+		// Tall viewport: zone 120 is smaller than half-height → unchanged.
+		expect(computeAutoScrollZones(1000).preZone).toBe(120);
+		// Short viewport: half-height (30) caps the pre-scroll zone.
+		const short = computeAutoScrollZones(60);
+		expect(short.preZone).toBe(30);
+		// Strong zone collapses to the same 30 px (floor 54 > 30).
+		expect(short.strongZone).toBe(30);
+	});
+
+	it("honours a small custom zone down to its px floor", () => {
+		// zone 40 → preZone 40, strongZone = min(40, max(20, 18)) = 20.
+		expect(computeAutoScrollZones(400, 40)).toEqual({
+			preZone: 40,
+			strongZone: 20,
+		});
+	});
+
+	it("honours a large custom zone and scales the strong band", () => {
+		// zone 220 → preZone = min(200, 220) = 200, strongZone = min(200, 99) = 99.
+		expect(computeAutoScrollZones(400, 220)).toEqual({
+			preZone: 200,
+			strongZone: 99,
+		});
+	});
+
+	it("recovers from a zero / invalid zone", () => {
+		expect(computeAutoScrollZones(400, 0)).toEqual({ preZone: 120, strongZone: 54 });
+		expect(computeAutoScrollZones(400, Number.NaN)).toEqual({
+			preZone: 120,
+			strongZone: 54,
+		});
+	});
+});
+
+describe("computePointerAutoScroll stop reasons (§十/§十一)", () => {
+	const INPUT = {
+		pointerY: 300,
+		pointerVelocityY: 0,
+		viewportTop: 100,
+		viewportBottom: 500,
+		maxSpeed: 320,
+		canScrollUp: true,
+		canScrollDown: true,
+		enabled: true,
+		reducedMotion: false,
+	};
+
+	it("reports 'disabled' when the feature is off", () => {
+		const r = computePointerAutoScroll({ ...INPUT, enabled: false });
+		expect(r.velocity).toBe(0);
+		expect(r.stopReason).toBe("disabled");
+	});
+
+	it("reports 'reduced-motion' under prefers-reduced-motion", () => {
+		const r = computePointerAutoScroll({ ...INPUT, reducedMotion: true });
+		expect(r.velocity).toBe(0);
+		expect(r.stopReason).toBe("reduced-motion");
+	});
+
+	it("reports 'outside-band' when the pointer leaves the viewport", () => {
+		const r = computePointerAutoScroll({ ...INPUT, pointerY: 50 });
+		expect(r.velocity).toBe(0);
+		expect(r.stopReason).toBe("outside-band");
+	});
+
+	it("reports 'dead-zone' at the calm center", () => {
+		const r = computePointerAutoScroll({ ...INPUT, pointerY: 300 });
+		expect(r.velocity).toBe(0);
+		expect(r.stopReason).toBe("dead-zone");
+	});
+
+	it("reports 'dead-end' at a blocked edge", () => {
+		expect(
+			computePointerAutoScroll({
+				...INPUT,
+				pointerY: 110,
+				canScrollUp: false,
+			}).stopReason,
+		).toBe("dead-end");
+		expect(
+			computePointerAutoScroll({
+				...INPUT,
+				pointerY: 490,
+				canScrollDown: false,
+			}).stopReason,
+		).toBe("dead-end");
+	});
+
+	it("returns null (actively scrolling) inside a band", () => {
+		const r = computePointerAutoScroll({ ...INPUT, pointerY: 470 });
+		expect(r.velocity).toBeGreaterThan(0);
+		expect(r.stopReason).toBeNull();
+	});
+
+	it("applies the configured trigger zone (default = 120 px)", () => {
+		// With the default zone the dead zone spans [220, 380]. pointerY 200
+		// is inside the pre-scroll band → scrolling (stopReason null).
+		const r = computePointerAutoScroll({ ...INPUT, pointerY: 200 });
+		expect(r.velocity).toBeLessThan(0);
+		expect(r.stopReason).toBeNull();
 	});
 });

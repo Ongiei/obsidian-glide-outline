@@ -165,12 +165,25 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 	it("pauses while the pointer is held down and resumes on release", () => {
 		pointer("pointerenter", 495);
 		pointer("pointermove", 495);
-		view.rootEl.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+		// pointerdown must land on a REAL marker/card to arm the activation
+		// lock (blank space / drawing layers never lock or jump).
+		const marker = view.rootEl.querySelector(
+			".glide-outline-marker",
+		) as HTMLElement;
+		expect(marker).toBeTruthy();
+		const down = new MouseEvent("pointerdown", { bubbles: true });
+		Object.defineProperty(down, "pointerId", { value: 1 });
+		marker.dispatchEvent(down);
 		const before = view.viewportEl.scrollTop;
 		runScrollFrames();
 		expect(view.viewportEl.scrollTop).toBe(before); // locked
 
-		view.rootEl.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+		const up = new MouseEvent("pointerup", { bubbles: true });
+		Object.defineProperty(up, "pointerId", { value: 1 });
+		marker.dispatchEvent(up);
+		// Re-enter: releasing the press cleared the gesture; the resumed
+		// auto-scroll still requires the pointer parked at the edge.
+		pointer("pointermove", 495);
 		runScrollFrames();
 		expect(view.viewportEl.scrollTop).toBeGreaterThan(before); // resumed
 	});
@@ -189,15 +202,6 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 
 	it("respects the pointerAutoScroll setting", () => {
 		settings.pointerAutoScroll = false;
-		pointer("pointerenter", 495);
-		pointer("pointermove", 495);
-		const before = view.viewportEl.scrollTop;
-		runScrollFrames();
-		expect(view.viewportEl.scrollTop).toBe(before);
-	});
-
-	it("respects reduced motion (animationEnabled off)", () => {
-		settings.animationEnabled = false;
 		pointer("pointerenter", 495);
 		pointer("pointermove", 495);
 		const before = view.viewportEl.scrollTop;

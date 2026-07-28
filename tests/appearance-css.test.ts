@@ -148,22 +148,6 @@ describe("overflow edge fades", () => {
 	});
 });
 
-describe("text effect variables", () => {
-	it("applies the TS-built halo under its feature class only", () => {
-		expect(css).toMatch(
-			/\.glide-outline-root--text-halo[^{]*\{[^}]*text-shadow:\s*var\(--glide-text-halo/,
-		);
-		// The old directional shadow class is gone for good.
-		expect(css).not.toContain("glide-outline-root--text-shadow");
-		expect(css).not.toContain("--glide-text-shadow:");
-	});
-
-	it("has no stroke rules left (P1-2 removed the stroke mode)", () => {
-		expect(css).not.toContain("glide-outline-root--text-stroke");
-		expect(css).not.toContain("-webkit-text-stroke");
-	});
-});
-
 describe("level badge", () => {
 	it("hides the badge unless the feature class is on", () => {
 		const base = exactBlock(".glide-outline-level-badge");
@@ -222,18 +206,45 @@ describe("H1–H6 label typography ramp", () => {
 	});
 });
 
-describe("hover interaction corridor", () => {
-	it("keeps the motion wrapper inert while collapsed", () => {
+describe("pointer targeting surfaces", () => {
+	it("keeps the motion wrapper permanently inert (never a click target)", () => {
 		const motion = exactBlock(".glide-outline-motion");
 		expect(motion).toMatch(/pointer-events:\s*none/);
+		// No state may ever re-enable the corridor: hover is maintained by
+		// the geometric Pointer Envelope in JS, and ONLY the real marker and
+		// card elements may trigger jumps.
+		expect(css).not.toMatch(
+			/\.glide-outline-motion[^{]*\{[^}]*pointer-events:\s*auto/,
+		);
 	});
 
-	it("activates the corridor only when expanded or focused", () => {
-		expect(css).toMatch(
-			/\.glide-outline-root\.is-expanded\s+\.glide-outline-motion[^{]*\{[^}]*pointer-events:\s*auto/,
+	it("keeps the reveal wrapper permanently inert", () => {
+		expect(css).not.toMatch(
+			/\.glide-outline-reveal[^{]*\{[^}]*pointer-events:\s*auto/,
 		);
+	});
+
+	it("has no large transparent interaction surface", () => {
+		expect(css).not.toMatch(/glide-outline-interaction-surface/);
+	});
+
+	it("re-enables pointer events on real markers and cards when expanded", () => {
 		expect(css).toMatch(
-			/\.glide-outline-root:focus-within\s+\.glide-outline-motion[^{]*\{[^}]*pointer-events:\s*auto/,
+			/\.glide-outline-card[^{]*\{[^}]*pointer-events:\s*auto/,
 		);
+	});
+});
+
+describe("motion is always full", () => {
+	it("has no reduced-motion rule left in the stylesheet", () => {
+		// Motion is fixed at full: the runtime never applies a
+		// --motion-reduced class, so no rule may keep it alive.
+		expect(css).not.toMatch(/glide-outline-root--motion-reduced/);
+	});
+
+	it("never lets prefers-reduced-motion disable plugin transitions", () => {
+		// The OS "Animation effects" toggle (Windows) maps to this media
+		// query — the plugin's animations must stay on regardless.
+		expect(css).not.toMatch(/@media\s*\(prefers-reduced-motion/);
 	});
 });
