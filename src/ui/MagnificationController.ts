@@ -1,5 +1,9 @@
 import { computeCollisionFreeMagnification } from "../utils/geometry";
-import { computePointerAutoScrollVelocity } from "../utils/overflow";
+import {
+	computeAutoScrollZones,
+	computePointerAutoScroll,
+} from "../utils/overflow";
+import type { AutoScrollStopReason } from "../utils/overflow";
 import { DisposableStore } from "../utils/disposable";
 import {
 	bridgeRectFor,
@@ -32,6 +36,9 @@ import type { GlideOutlineView } from "./GlideOutlineView";
 
 interface CachedItem {
 	el: HTMLElement;
+	/** Heading key (`data-key`) — links the row to its envelope item so
+	 * motion updates can re-derive envelope rects mathematically (§十四). */
+	key: string;
 	/**
 	 * Base vertical center in viewport client coordinates — where the row
 	 * is LAID OUT. Rows themselves never transform (`--glide-shift-y`
@@ -58,11 +65,15 @@ interface CachedItem {
  * marker↔card gap crossing (re-entry within the grace cancels collapse). */
 const COLLAPSE_GRACE_MS = 100;
 
-/** Pointer auto-scroll: peak speed in px/s at the very edge (strength 1).
- * `pointerAutoScrollStrength` (P1-3) scales this AND the acceleration cap
+/** Pointer auto-scroll: peak speed in px/s at the very edge (speed 1).
+ * `pointerAutoScrollSpeed` (P1-3) scales this AND the acceleration cap
  * linearly, so the motion character (ramp shape, damping feel) is
- * preserved at every strength — only the tempo changes. */
+ * preserved at every speed setting — only the tempo changes. */
 export const AUTO_SCROLL_MAX_SPEED = 320;
+/** §十一 hysteresis: once auto-scroll is latched, the pointer must retreat
+ * this many px past the trigger zone's inner boundary before the session
+ * ends with "zone-exit" — small jitter never re-arms the dwell gate. */
+export const AUTO_SCROLL_EXIT_HYSTERESIS_PX = 12;
 /** Dwell before the list starts moving, so brushing an edge does not
  * immediately yank the heading the user was about to click. */
 export const AUTO_SCROLL_DWELL_MS = 140;
@@ -86,6 +97,57 @@ export const MOTION_ACTIVE_CLASS = "glide-outline-row--motion-active";
 const MAX_MOTION_DT_MS = 100;
 /** Fallback time step for the first frame after the loop was idle. */
 const DEFAULT_MOTION_DT_MS = 16.7;
+
+/** Reason a full geometry rebuild ran (PerfCapture histogram, §十五). */
+type GeometryRebuildReason = "initial" | "invalidate" | "expand" | "resize";
+
+/**
+ * §八: the old single `pointerInside` boolean conflated four independent
+ * facts, which made auto-scroll stop/start decisions ambiguous (a gap
+ * crossing looked identical to a real exit). Split into explicit fields:
+ */
+interface PointerInteractionState {
+	/** Pointer physically over a real element (rail / marker / card). */
+	overElement: boolean;
+	/** Pointer inside the geometric envelope (incl. transparent gaps). */
+	insideEnvelope: boolean;
+	/** §九 latch: an auto-scroll session is engaged. Held through gaps and
+	 * hysteresis-sized jitter; released only by an explicit stop reason. */
+	autoScrollLatched: boolean;
+	/** Why the last auto-scroll session ended (diagnostics / perf). */
+	lastStopReason: AutoScrollStopReason | null;
+}
+
+function idlePointerState(): PointerInteractionState {
+	return {
+		overElement: false,
+		insideEnvelope: false,
+		autoScrollLatched: false,
+		lastStopReason: null,
+	};
+}
+
+/**
+ * §十四: move a cached rect with its row's motion — vertical shift plus
+ * vertical scale growth around the rect's own center (`transform-origin`
+ * is `left/right center`, so vertical growth IS center-symmetric).
+ */
+function applyMotionDeltaToRect(r: Rect, dy: number, ratio: number): void {
+	const cy = (r.top + r.bottom) / 2 + dy;
+	const hh = ((r.bottom - r.top) / 2) * ratio;
+	r.top = cy - hh;
+	r.bottom = cy + hh;
+}
+
+/** §十七: quantize CSS var payloads — scale to 4 decimals, shift to
+ * 0.1 px. Sub-quantum churn produces byte-identical strings and is
+ * dropped by the equality/epsilon guards before touching the DOM. */
+function quantizeScale(value: number): number {
+	return Math.round(value * 10000) / 10000;
+}
+function quantizeShift(value: number): number {
+	return Math.round(value * 10) / 10;
+}
 
 interface PressedHeadingState {
 	pointerId: number;
@@ -142,6 +204,15 @@ export class MagnificationController {
 	private cache: CachedItem[] = [];
 	/** O(1) element → cache index (anchor resolution, rebuild carry). */
 	private cacheIndexByEl = new Map<HTMLElement, number>();
+	/** O(1) heading key → cache index (envelope motion derivation, §十四). */
+	private cacheIndexByKey = new Map<string, number>();
+	/** Per-key displayed shift/scale at envelope collect time — the basis
+	 * for deriving envelope rects mathematically instead of re-reading
+	 * getBoundingClientRect after every motion write (§十四). */
+	private envelopeMotionShift = new Map<string, number>();
+	private envelopeMotionScale = new Map<string, number>();
+	/** Why the next full geometry rebuild runs (PerfCapture, §十五). */
+	private cacheDirtyReason: GeometryRebuildReason = "initial";
 	/** Solver input view over `cache` (rebuilt with it, delta-shifted). */
 	private layout: { center: number; height: number }[] = [];
 	/** Cached base centers / heights for the active-range binary search. */
@@ -183,8 +254,8 @@ export class MagnificationController {
 	/** Dwell gate: velocity only applies after the pointer lingered. */
 	private dwellTimer = 0;
 	private dwellPassed = false;
-	/** True only while the pointer is physically inside the envelope. */
-	private pointerInside = false;
+	/** §八 four-field pointer interaction state (replaces `pointerInside`). */
+	private pointer: PointerInteractionState = idlePointerState();
 	/** Timestamp of the previous frame for time-based scroll deltas. */
 	private lastFrameTime = Number.NaN;
 	/** Timestamp base for the motion interpolation step (section 11). */
@@ -295,8 +366,28 @@ export class MagnificationController {
 		// Window blur must release any held pointer and stop auto-scroll.
 		this.disposables.listen(win, "blur", this.onWindowBlur);
 
-		const resizeObserver = new win.ResizeObserver(() => {
-			this.cacheDirty = true;
+		// §十五: coalesced + thresholded resize handling. Both observed
+		// elements report through ONE callback, and sub-pixel size churn
+		// (fractional layout rounding during magnification) is ignored —
+		// only a ≥1 px change in either dimension is a real resize.
+		const lastSizes = new Map<Element, { w: number; h: number }>();
+		const resizeObserver = new win.ResizeObserver((entries) => {
+			let significant = false;
+			for (const entry of entries) {
+				const w = entry.contentRect.width;
+				const h = entry.contentRect.height;
+				const prev = lastSizes.get(entry.target);
+				if (
+					!prev ||
+					Math.abs(prev.w - w) >= 1 ||
+					Math.abs(prev.h - h) >= 1
+				) {
+					significant = true;
+				}
+				lastSizes.set(entry.target, { w, h });
+			}
+			if (!significant) return;
+			this.markCacheDirty("resize");
 			this.envelopeDirty = true;
 			this.schedule();
 		});
@@ -307,7 +398,7 @@ export class MagnificationController {
 
 	/** Called when the heading list or settings changed (centers are stale). */
 	invalidate(): void {
-		this.cacheDirty = true;
+		this.markCacheDirty("invalidate");
 		this.envelopeDirty = true;
 		this.perf?.count("cacheInvalidationCount");
 		if (this.isExpanded()) this.schedule();
@@ -317,9 +408,15 @@ export class MagnificationController {
 		this.cancelFrame();
 		this.cancelCollapse();
 		this.clearPressed();
-		this.stopAutoScroll();
+		this.stopAutoScroll("dispose");
 		this.clearMagnification();
 		this.disposables.dispose();
+	}
+
+	/** Mark the geometry cache stale and remember why (§十五). */
+	private markCacheDirty(reason: GeometryRebuildReason): void {
+		this.cacheDirty = true;
+		this.cacheDirtyReason = reason;
 	}
 
 	private isExpanded(): boolean {
@@ -336,9 +433,10 @@ export class MagnificationController {
 	private onPointerEnter = (event: PointerEvent): void => {
 		this.cancelCollapse();
 		this.pointerExpanded = true;
-		this.pointerInside = true;
+		this.pointer.overElement = true;
+		this.pointer.insideEnvelope = true;
 		// Expansion changes layout → full remeasure is genuinely needed.
-		this.cacheDirty = true;
+		this.markCacheDirty("expand");
 		this.envelopeDirty = true;
 		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
@@ -362,11 +460,12 @@ export class MagnificationController {
 		this.cancelCollapse();
 		if (!this.pointerExpanded) {
 			this.pointerExpanded = true;
-			this.cacheDirty = true;
+			this.markCacheDirty("expand");
 			this.envelopeDirty = true;
 			this.syncExpanded();
 		}
-		this.pointerInside = true;
+		this.pointer.overElement = true;
+		this.pointer.insideEnvelope = true;
 		this.trackPointerVelocity(event);
 		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
@@ -394,19 +493,25 @@ export class MagnificationController {
 			this.rebuildEnvelope();
 		}
 		if (pointInEnvelope(this.envelope, event.clientX, event.clientY)) {
-			// Inside a transparent gap — keep expanded, but the pointer is no
-			// longer over a real element, so stop auto-scroll / clear anchor.
-			this.pointerInside = false;
+			// Inside a transparent gap — keep expanded and, when a latched
+			// auto-scroll session is running, keep it running too (§十二:
+			// the horizontal band between marker and card is stable ground;
+			// lateral wandering must not stutter an active scroll).
+			this.pointer.overElement = false;
+			this.pointer.insideEnvelope = true;
 			this.pointerAnchorEl = null;
 			this.anchorDirty = false;
-			this.stopAutoScroll();
+			if (!this.pointer.autoScrollLatched) {
+				this.stopAutoScroll("pointer-left");
+			}
 			this.cancelCollapse();
 			return;
 		}
-		this.pointerInside = false;
+		this.pointer.overElement = false;
+		this.pointer.insideEnvelope = false;
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
-		this.stopAutoScroll();
+		this.stopAutoScroll("pointer-left");
 		this.armCollapse();
 	};
 
@@ -419,6 +524,18 @@ export class MagnificationController {
 	 */
 	private onWindowPointerMove = (event: PointerEvent): void => {
 		if (!this.isExpanded() || this.pressed) return;
+		// §十三 dedup: moves over the outline's own elements already reached
+		// onPointerMove via bubbling — running the window containment test
+		// for them too would double the per-move work for zero information
+		// (the pointer is trivially inside). Only moves OUTSIDE the root
+		// (editor surface, transparent gaps) need the geometric test.
+		const target = event.target;
+		if (
+			target instanceof this.win.Node &&
+			this.view.rootEl.contains(target)
+		) {
+			return;
+		}
 		this.perf?.count("pointermoveCount");
 		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
@@ -441,13 +558,18 @@ export class MagnificationController {
 		// zero rect. Trust element-level enter/move/leave state instead.
 		if (!this.envelopeIsMeasurable()) return;
 		if (pointInEnvelope(this.envelope, this.lastPointerX, this.lastPointerY)) {
+			// §十二: a window-level move that lands inside the envelope is a
+			// gap crossing, not an exit — the latch (if any) survives.
+			this.pointer.insideEnvelope = true;
+			this.pointer.overElement = false;
 			this.cancelCollapse();
 			return;
 		}
-		this.pointerInside = false;
+		this.pointer.overElement = false;
+		this.pointer.insideEnvelope = false;
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
-		this.stopAutoScroll();
+		this.stopAutoScroll("pointer-left");
 		this.armCollapse();
 	}
 
@@ -534,7 +656,7 @@ export class MagnificationController {
 		};
 		// Stop pointer edge auto-scroll while the target is held.
 		this.pressed = pressed;
-		this.stopAutoScroll();
+		this.stopAutoScroll("pressed");
 		// Section 12: freezing is structural — the frame loop is suspended
 		// while pressed (schedule() refuses, frame() early-returns), and no
 		// CSS transition remains on the continuous transforms, so BOTH the
@@ -607,8 +729,9 @@ export class MagnificationController {
 
 	private onWindowBlur = (): void => {
 		this.clearPressed();
-		this.stopAutoScroll();
-		this.pointerInside = false;
+		this.stopAutoScroll("window-blur");
+		this.pointer.overElement = false;
+		this.pointer.insideEnvelope = false;
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
 		this.armCollapse();
@@ -646,14 +769,16 @@ export class MagnificationController {
 		this.view.setFollowEnabled(!expanded);
 		if (!expanded) {
 			this.cancelFrame();
-			this.stopAutoScroll();
+			this.stopAutoScroll("collapsed");
 			this.clearMagnification();
 			this.envelope = { railRect: emptyRect(), items: [] };
+			this.envelopeMotionShift.clear();
+			this.envelopeMotionScale.clear();
 			this.activeRange = emptyActiveRange();
 			this.windowCheckPending = false;
 			this.lastMotionTime = Number.NaN;
 		} else {
-			this.cacheDirty = true;
+			this.markCacheDirty("expand");
 			this.envelopeDirty = true;
 			this.schedule();
 		}
@@ -697,7 +822,13 @@ export class MagnificationController {
 		const settings = this.getSettings();
 		// Active row window from cached numbers (pure, O(log n)).
 		this.activeRange = this.computeRange();
-		if (this.envelopeDirty) this.rebuildEnvelope();
+		// §十四 gating: a stale envelope is only rebuilt when a containment
+		// decision actually needs it (a deferred window check is pending).
+		// Motion keeps the cached rects fresh mathematically (see the write
+		// phase), so frames without a pending check skip the rect reads.
+		if (this.envelopeDirty && this.windowCheckPending) {
+			this.rebuildEnvelope();
+		}
 
 		// Deferred window containment test — pure math on cached rects.
 		this.processWindowCheck();
@@ -819,9 +950,12 @@ export class MagnificationController {
 		}
 		if (writes > 0) {
 			this.perf?.count("cssVarWriteCount", writes);
-			// Card/marker rects moved → the envelope is genuinely stale.
-			// This REPLACES the old unconditional per-frame dirty (section 5).
-			this.envelopeDirty = true;
+			// §十四: card/marker rects moved with the motion — derive the
+			// cached envelope rects mathematically from the displayed
+			// shift/scale deltas instead of re-reading layout. Only rows
+			// whose item is missing from the cache fall back to a dirty
+			// flag (→ full rebuild on the next needed containment check).
+			this.updateEnvelopeFromMotion();
 		}
 		// Keep the loop alive until every displayed value converged.
 		if (converging) this.schedule();
@@ -869,20 +1003,23 @@ export class MagnificationController {
 			}
 			return writes;
 		}
-		const scale = state.displayedScale;
+		// §十七: write QUANTIZED values (scale 1e-4, shift 0.1 px). The
+		// epsilon guard compares against the last quantized write, so
+		// sub-quantum interpolation churn never reaches the style system.
+		const scale = quantizeScale(state.displayedScale);
 		const scaleBase = Number.isNaN(entry.lastWrittenScale)
 			? 1
 			: entry.lastWrittenScale;
-		if (Math.abs(scale - scaleBase) >= SCALE_EPSILON) {
+		if (scale !== scaleBase && Math.abs(scale - scaleBase) >= SCALE_EPSILON) {
 			el.style.setProperty("--glide-scale", String(scale));
 			entry.lastWrittenScale = scale;
 			writes++;
 		}
-		const shift = state.displayedShift;
+		const shift = quantizeShift(state.displayedShift);
 		const shiftBase = Number.isNaN(entry.lastWrittenShift)
 			? 0
 			: entry.lastWrittenShift;
-		if (Math.abs(shift - shiftBase) >= SHIFT_EPSILON) {
+		if (shift !== shiftBase && Math.abs(shift - shiftBase) >= SHIFT_EPSILON) {
 			el.style.setProperty("--glide-shift-y", `${shift}px`);
 			entry.lastWrittenShift = shift;
 			writes++;
@@ -892,12 +1029,24 @@ export class MagnificationController {
 
 	/**
 	 * One pointer-follow auto-scroll step inside the coordinated RAF loop.
+	 *
+	 * §八~§十一 state machine:
+	 *   idle ──(target≠0, dwell passes)──▶ latched
+	 *   latched ──(gap crossing / lateral jitter / <12 px zone retreat)──▶
+	 *             latched (session survives — the whole point of the latch)
+	 *   latched ──(explicit stop reason)──▶ idle, reason recorded
 	 */
 	private stepAutoScroll(settings: GlideOutlineSettings): void {
+		const pointer = this.pointer;
 		// Focus-only expansion never auto-scrolls; a held pointer locks the
-		// list so the click target cannot slide away mid-click.
-		if (!this.pointerExpanded || !this.pointerInside || this.pressed) {
-			this.stopAutoScroll();
+		// list so the click target cannot slide away mid-click. A latched
+		// session survives gap crossings (overElement false) as long as the
+		// pointer stays inside the envelope's stable band (§十二).
+		const engaged =
+			pointer.overElement ||
+			(pointer.autoScrollLatched && pointer.insideEnvelope);
+		if (!this.pointerExpanded || this.pressed || !engaged) {
+			this.stopAutoScroll(this.pressed ? "pressed" : "pointer-left");
 			return;
 		}
 		const now = this.win.performance.now();
@@ -913,24 +1062,54 @@ export class MagnificationController {
 			if (Math.abs(this.pointerVelocityY) < 1) this.pointerVelocityY = 0;
 		}
 
-		// P1-3: strength scales speed AND acceleration linearly, so the
-		// ramp/damp character is identical at every strength setting.
-		const strength = settings.pointerAutoScrollStrength;
+		// P1-3: speed scales max velocity AND acceleration linearly, so the
+		// ramp/damp character is identical at every speed setting.
+		const speed = settings.pointerAutoScrollSpeed;
+		const zonePx = settings.pointerAutoScrollZone;
 		const overflow = this.view.getOverflowState();
-		const target = computePointerAutoScrollVelocity({
+		const result = computePointerAutoScroll({
 			pointerY: this.lastPointerY,
 			pointerVelocityY: this.pointerVelocityY,
 			viewportTop: this.viewportTop,
 			viewportBottom: this.viewportBottom,
-			maxSpeed: AUTO_SCROLL_MAX_SPEED * strength,
+			maxSpeed: AUTO_SCROLL_MAX_SPEED * speed,
+			triggerZonePx: zonePx,
 			canScrollUp: overflow.canScrollUp,
 			canScrollDown: overflow.canScrollDown,
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
 			reducedMotion: false,
 		});
+		const target = result.velocity;
+
+		// §十八 config echo — only while a capture is running (zero cost
+		// otherwise; `active` is a plain boolean read).
+		const perf = this.perf;
+		if (perf?.active === true) {
+			const zones = computeAutoScrollZones(
+				this.viewportBottom - this.viewportTop,
+				zonePx,
+			);
+			perf.setAutoScrollConfig({
+				configuredSpeed: speed,
+				configuredTriggerArea: zonePx,
+				computedPreZone: zones.preZone,
+				computedStrongZone: zones.strongZone,
+				hysteresisPx: AUTO_SCROLL_EXIT_HYSTERESIS_PX,
+			});
+		}
 
 		if (target === 0 && this.appliedVelocity === 0) {
-			this.stopAutoScroll();
+			// §十一 hysteresis: a latched session in the dead zone survives
+			// while the pointer is within 12 px of the trigger boundary —
+			// re-entering resumes instantly without a second dwell.
+			if (
+				pointer.autoScrollLatched &&
+				result.stopReason === "dead-zone" &&
+				this.withinZoneHysteresis(zonePx)
+			) {
+				return; // latch held; next pointermove reschedules
+			}
+			this.stopAutoScroll(result.stopReason ?? "dead-zone");
 			return;
 		}
 		if (!this.dwellPassed) {
@@ -947,9 +1126,16 @@ export class MagnificationController {
 			return;
 		}
 
+		// §九: the session is live — latch it (idempotent; counted once).
+		if (!pointer.autoScrollLatched) {
+			pointer.autoScrollLatched = true;
+			pointer.lastStopReason = null;
+			perf?.count("autoScrollStartCount");
+		}
+
 		if (dt > 0) {
 			// Acceleration-capped chase → continuous ramps and damping.
-			const maxDelta = AUTO_SCROLL_ACCEL * strength * dt;
+			const maxDelta = AUTO_SCROLL_ACCEL * speed * dt;
 			const delta = target - this.appliedVelocity;
 			this.appliedVelocity +=
 				Math.min(maxDelta, Math.max(-maxDelta, delta));
@@ -958,15 +1144,36 @@ export class MagnificationController {
 			}
 			if (this.appliedVelocity !== 0) {
 				this.view.viewportEl.scrollTop += this.appliedVelocity * dt;
-				this.perf?.count("autoScrollFrameCount");
+				perf?.count("autoScrollFrameCount");
+				perf?.addAutoScrollSample(target, this.appliedVelocity);
 			}
 		}
 		// Keep the loop alive while there is motion or a pending target.
 		this.schedule();
 	}
 
-	/** Cancel the dwell gate, damping state and time base (velocity → 0). */
-	private stopAutoScroll(): void {
+	/** §十一: pointer within (preZone + hysteresis) of either edge? */
+	private withinZoneHysteresis(zonePx: number): boolean {
+		const height = this.viewportBottom - this.viewportTop;
+		if (!(height > 0) || !Number.isFinite(this.lastPointerY)) return false;
+		const { preZone } = computeAutoScrollZones(height, zonePx);
+		const distTop = this.lastPointerY - this.viewportTop;
+		const distBottom = this.viewportBottom - this.lastPointerY;
+		const nearest = Math.min(distTop, distBottom);
+		return nearest >= 0 && nearest <= preZone + AUTO_SCROLL_EXIT_HYSTERESIS_PX;
+	}
+
+	/**
+	 * Cancel the dwell gate, damping state and time base (velocity → 0),
+	 * release the latch and record WHY the session ended (§九/§十八).
+	 * No-op sessions (nothing armed, nothing latched) record nothing.
+	 */
+	private stopAutoScroll(reason: AutoScrollStopReason): void {
+		const hadSession =
+			this.pointer.autoScrollLatched ||
+			this.dwellPassed ||
+			this.dwellTimer !== 0 ||
+			this.appliedVelocity !== 0;
 		if (this.dwellTimer !== 0) {
 			this.win.clearTimeout(this.dwellTimer);
 			this.dwellTimer = 0;
@@ -975,6 +1182,12 @@ export class MagnificationController {
 		this.lastFrameTime = Number.NaN;
 		this.appliedVelocity = 0;
 		this.pointerVelocityY = 0;
+		if (hadSession) {
+			this.pointer.lastStopReason = reason;
+			this.perf?.count("autoScrollStopCount");
+			this.perf?.countStopReason(reason);
+		}
+		this.pointer.autoScrollLatched = false;
 	}
 
 	/** Map the DOM-hit anchor element to its cache index (-1 = blank).
@@ -1025,6 +1238,7 @@ export class MagnificationController {
 	private rebuildCache(): void {
 		this.cacheDirty = false;
 		this.perf?.count("geometryRebuildCount");
+		this.perf?.countRebuildReason(this.cacheDirtyReason);
 		// Viewport bounds are cached here (not per frame) — they only move
 		// on layout changes, which also dirty this cache.
 		const viewportRect = this.view.viewportEl.getBoundingClientRect();
@@ -1037,6 +1251,7 @@ export class MagnificationController {
 		for (const entry of this.cache) prevByEl.set(entry.el, entry);
 		const next: CachedItem[] = [];
 		const nextIndex = new Map<HTMLElement, number>();
+		const nextByKey = new Map<string, number>();
 		const centers: number[] = [];
 		const heights: number[] = [];
 		const layout: { center: number; height: number }[] = [];
@@ -1062,8 +1277,10 @@ export class MagnificationController {
 			const baseCenter = rect.top + rect.height / 2;
 			const height = measured > 0 ? measured : rect.height;
 			nextIndex.set(el, next.length);
+			nextByKey.set(key, next.length);
 			next.push({
 				el,
+				key,
 				baseCenter,
 				visualCenter: baseCenter + motion.displayedShift,
 				height,
@@ -1086,6 +1303,7 @@ export class MagnificationController {
 		}
 		this.cache = next;
 		this.cacheIndexByEl = nextIndex;
+		this.cacheIndexByKey = nextByKey;
 		this.centers = centers;
 		this.heights = heights;
 		this.layout = layout;
@@ -1117,9 +1335,60 @@ export class MagnificationController {
 			start,
 			end,
 		);
+		// §十四: snapshot the motion state each item was collected AT, so
+		// later frames can move the rects mathematically by the delta.
+		this.envelopeMotionShift.clear();
+		this.envelopeMotionScale.clear();
+		for (const item of this.envelope.items) {
+			const idx = this.cacheIndexByKey.get(item.key);
+			const state = idx !== undefined ? this.cache[idx]?.motion : undefined;
+			this.envelopeMotionShift.set(item.key, state?.displayedShift ?? 0);
+			this.envelopeMotionScale.set(item.key, state?.displayedScale ?? 1);
+		}
 		const rows = this.envelope.items.length;
 		this.perf?.addEnvelopeSample(rows);
 		this.perf?.count("markerCardRectReadCount", rows * 2);
+	}
+
+	/**
+	 * §十四 CachedVisualGeometry: advance the cached envelope rects by the
+	 * motion deltas (displayed shift + vertical scale growth around the
+	 * rect center) — pure math, zero getBoundingClientRect. Horizontal
+	 * scale growth is deliberately ignored: it only ever ENLARGES the real
+	 * card beyond the cached rect, and a pointer over that grown area is
+	 * over a real element, which element-level events already handle.
+	 */
+	private updateEnvelopeFromMotion(): void {
+		const items = this.envelope.items;
+		if (items.length === 0) return;
+		for (const item of items) {
+			const idx = this.cacheIndexByKey.get(item.key);
+			if (idx === undefined || !this.cache[idx]) {
+				// Row left the cache — this item is stale; a full rebuild
+				// will run before the next containment decision needs it.
+				this.envelopeDirty = true;
+				continue;
+			}
+			const state = this.cache[idx].motion;
+			const prevShift = this.envelopeMotionShift.get(item.key) ?? 0;
+			const prevScale = this.envelopeMotionScale.get(item.key) ?? 1;
+			const dy = state.displayedShift - prevShift;
+			const ratio =
+				prevScale > 0 ? state.displayedScale / prevScale : 1;
+			if (dy === 0 && ratio === 1) continue;
+			applyMotionDeltaToRect(item.markerRect, dy, ratio);
+			applyMotionDeltaToRect(item.cardRect, dy, ratio);
+			const bridge = MagnificationController.buildBridge(
+				item.markerRect,
+				item.cardRect,
+			);
+			item.bridgeRect.left = bridge.left;
+			item.bridgeRect.top = bridge.top;
+			item.bridgeRect.right = bridge.right;
+			item.bridgeRect.bottom = bridge.bottom;
+			this.envelopeMotionShift.set(item.key, state.displayedShift);
+			this.envelopeMotionScale.set(item.key, state.displayedScale);
+		}
 	}
 
 	private clearMagnification(): void {

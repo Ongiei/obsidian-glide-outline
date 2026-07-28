@@ -83,11 +83,17 @@ export function computeActiveMotionRange(
 	let lo = input.viewportTop;
 	let hi = input.viewportBottom;
 	if (Number.isFinite(input.pointerY)) {
+		// The pointer's magnification disc: rows within `radius` of the
+		// pointer can scale. Radius is added HERE only (§十六) — adding it
+		// again below would double-count it and inflate the active window.
 		lo = Math.min(lo, input.pointerY - radius);
 		hi = Math.max(hi, input.pointerY + radius);
 	}
-	lo -= allowance + radius;
-	hi += allowance + radius;
+	// Displacement allowance: rows just outside the influence interval can
+	// still be pushed by displaced neighbours — but never farther than the
+	// allowance, which already includes the scale growth of the biggest row.
+	lo -= allowance;
+	hi += allowance;
 
 	// Binary search: first row whose bottom edge reaches `lo`.
 	let start = lowerBound(centers, heights, lo);
