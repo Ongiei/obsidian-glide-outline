@@ -53,8 +53,10 @@ interface CachedItem {
 }
 
 /** Grace period before collapsing, so crossing a transparent gap between
- * two magnification-displaced neighbours does not flicker the outline shut. */
-const COLLAPSE_GRACE_MS = 120;
+ * two magnification-displaced neighbours does not flicker the outline shut.
+ * 100 ms: snappier exit than the original 120 ms while still bridging the
+ * marker↔card gap crossing (re-entry within the grace cancels collapse). */
+const COLLAPSE_GRACE_MS = 100;
 
 /** Pointer auto-scroll: peak speed in px/s at the very edge (strength 1).
  * `pointerAutoScrollStrength` (P1-3) scales this AND the acceleration cap
