@@ -14,6 +14,7 @@ import { matchPreviewHeadings } from "../utils/previewHeadings";
 import { resolveMotionState } from "../utils/motion";
 import { ScrollCorrector } from "./ScrollCorrector";
 import type { Diagnostics } from "./Diagnostics";
+import type { PerfCapture } from "./PerfCapture";
 
 /** Breathing room above a jumped-to heading, in px (editor modes). */
 const JUMP_Y_MARGIN = 12;
@@ -54,6 +55,8 @@ export class GlideOutlineController {
 		private readonly getSettings: () => GlideOutlineSettings,
 		editorUpdates?: EditorUpdateBridge,
 		private readonly diagnostics: Diagnostics | null = null,
+		/** On-demand perf capture (section 3); shared with magnification. */
+		private readonly perf: PerfCapture | null = null,
 	) {
 		this.renderComponent.load();
 		this.outlineView = new GlideOutlineView(view.contentEl, getSettings, {
@@ -70,6 +73,7 @@ export class GlideOutlineController {
 			this.diagnostics,
 			// Pointer activation (pointerup lock, section 9/10).
 			(item) => this.jumpTo(item),
+			this.perf,
 		);
 		this.tracker = new ActiveHeadingTracker(view, (key) =>
 			this.outlineView.setActiveKey(key),

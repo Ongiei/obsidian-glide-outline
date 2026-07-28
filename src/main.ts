@@ -2,6 +2,7 @@ import { Notice, Plugin } from "obsidian";
 import type { Editor, MarkdownView, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { Diagnostics } from "./core/Diagnostics";
+import { PerfCapture } from "./core/PerfCapture";
 import { resolveMotionState } from "./utils/motion";
 import {
 	DEFAULT_SETTINGS,
@@ -35,6 +36,8 @@ export default class GlideOutlinePlugin extends Plugin {
 	private readonly editorUpdates = new EditorUpdateBridge();
 	/** Shared interaction diagnostics (pointer activation + jump landing). */
 	private readonly diagnostics = new Diagnostics();
+	/** On-demand performance capture (section 3) — zero cost while off. */
+	private readonly perf = new PerfCapture();
 
 	override async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
@@ -105,11 +108,48 @@ export default class GlideOutlinePlugin extends Plugin {
 				await this.copyDiagnostics();
 			},
 		});
+		// On-demand performance capture (perf spec section 3). Sampling is
+		// NEVER always-on: hot paths check a plain boolean and every buffer
+		// is a fixed-size ring. Start → interact → Stop copies the report.
+		this.addCommand({
+			id: "perf-capture-start",
+			name: "Start Glide Outline performance capture",
+			callback: () => {
+				if (this.perf.active) {
+					new Notice("Glide Outline: capture already running.");
+					return;
+				}
+				this.perf.start(window);
+				new Notice(
+					"Glide Outline: performance capture started. " +
+						"Interact with the outline, then run the stop command.",
+				);
+			},
+		});
+		this.addCommand({
+			id: "perf-capture-stop",
+			name: "Stop and copy Glide Outline performance capture",
+			callback: async () => {
+				const report = this.perf.stop(window);
+				if (!report) {
+					new Notice("Glide Outline: no capture is running.");
+					return;
+				}
+				await navigator.clipboard.writeText(
+					JSON.stringify(report, null, 2),
+				);
+				new Notice(
+					"Glide Outline: performance report copied to clipboard.",
+				);
+			},
+		});
 
 		this.app.workspace.onLayoutReady(() => this.lifecycle.start());
 	}
 
 	override onunload(): void {
+		// Never leave a longtask observer behind (section 3).
+		if (this.perf.active) this.perf.stop(window);
 		if (this.saveTimer !== 0) {
 			window.clearTimeout(this.saveTimer);
 			this.saveTimer = 0;
@@ -189,6 +229,7 @@ export default class GlideOutlinePlugin extends Plugin {
 			() => this.settings,
 			this.editorUpdates,
 			this.diagnostics,
+			this.perf,
 		);
 	}
 
