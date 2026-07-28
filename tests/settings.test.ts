@@ -123,9 +123,10 @@ describe("normalizeSettings", () => {
 		expect(normalizeSettings({ levelIndent: 5 }).levelIndent).toBe(5);
 	});
 
-	it("clamps edgeFadeSize into 12–64 and accepts the toggles", () => {
+	it("clamps edgeFadeSize into 12–120 and accepts the toggles", () => {
 		expect(normalizeSettings({ edgeFadeSize: 1 }).edgeFadeSize).toBe(12);
-		expect(normalizeSettings({ edgeFadeSize: 500 }).edgeFadeSize).toBe(64);
+		expect(normalizeSettings({ edgeFadeSize: 500 }).edgeFadeSize).toBe(120);
+		expect(normalizeSettings({ edgeFadeSize: 100 }).edgeFadeSize).toBe(100);
 		expect(normalizeSettings({ edgeFadeEnabled: false }).edgeFadeEnabled).toBe(false);
 		expect(normalizeSettings({ pointerAutoScroll: false }).pointerAutoScroll).toBe(false);
 	});
@@ -361,7 +362,7 @@ describe("resetAppearance", () => {
 });
 
 describe("pointerAutoScrollStrength (P1-3)", () => {
-	it("defaults to 1 and clamps into 0.25–2", () => {
+	it("defaults to 1 and clamps into 0.25–4", () => {
 		expect(normalizeSettings({}).pointerAutoScrollStrength).toBe(1);
 		expect(
 			normalizeSettings({ pointerAutoScrollStrength: 0 })
@@ -370,7 +371,11 @@ describe("pointerAutoScrollStrength (P1-3)", () => {
 		expect(
 			normalizeSettings({ pointerAutoScrollStrength: 99 })
 				.pointerAutoScrollStrength,
-		).toBe(2);
+		).toBe(4);
+		expect(
+			normalizeSettings({ pointerAutoScrollStrength: 3 })
+				.pointerAutoScrollStrength,
+		).toBe(3);
 		expect(
 			normalizeSettings({ pointerAutoScrollStrength: 1.5 })
 				.pointerAutoScrollStrength,

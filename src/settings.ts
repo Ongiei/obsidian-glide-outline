@@ -156,8 +156,8 @@ export const RANGES = {
 	verticalOffset: { min: -400, max: 400 },
 	horizontalOffset: { min: 0, max: 64 },
 	levelIndent: { min: 0, max: 8 },
-	edgeFadeSize: { min: 12, max: 64 },
-	pointerAutoScrollStrength: { min: 0.25, max: 2 },
+	edgeFadeSize: { min: 12, max: 120 },
+	pointerAutoScrollStrength: { min: 0.25, max: 4 },
 	// 2.25 (P1-1): the collision solver keeps neighbours readable even at
 	// high peaks, so the old 1.75 cap was purely conservative.
 	maxScale: { min: 1, max: 2.25 },
@@ -993,7 +993,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					.setLimits(
 						RANGES.pointerAutoScrollStrength.min,
 						RANGES.pointerAutoScrollStrength.max,
-						0.05,
+						0.1,
 					)
 					.setValue(s.pointerAutoScrollStrength)
 					.setDynamicTooltip()
