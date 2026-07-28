@@ -45,9 +45,11 @@ export const CARD_BORDER_WIDTH = 1;
 /** Width the H1–H6 badge (incl. its gap) adds to the card, px. */
 export const LEVEL_BADGE_ALLOWANCE = 26;
 
-interface ItemRecord {
+export interface ItemRecord {
 	rowEl: HTMLElement;
 	buttonEl: HTMLButtonElement;
+	/** Cached at creation — envelope rebuilds never querySelector for it. */
+	markerEl: HTMLElement;
 	cardEl: HTMLElement;
 	badgeEl: HTMLElement;
 	labelEl: HTMLElement;
@@ -365,28 +367,51 @@ export class GlideOutlineView {
 		return Array.from(this.rootEl.classList);
 	}
 
+	/** Stable ItemRecord access for geometry consumers (section 6). */
+	getItemRecord(key: string): ItemRecord | undefined {
+		return this.itemRecords.get(key);
+	}
+
 	/**
 	 * Build the geometric Pointer Envelope from the actual (post-transform)
-	 * marker and card rectangles of every visible heading, plus the rail
-	 * hit zone. The bridge of each heading spans ONLY its own marker and
-	 * card, so a long title can never widen a short neighbour's hover range.
+	 * marker and card rectangles of the ACTIVE RANGE of visible headings,
+	 * plus the rail hit zone. The bridge of each heading spans ONLY its own
+	 * marker and card, so a long title can never widen a short neighbour's
+	 * hover range.
 	 *
-	 * Intended to be called from a single RAF pass (not per pointermove):
-	 * it reads `getBoundingClientRect` for every visible item.
+	 * Intended to be called from a single RAF read phase (never per
+	 * pointermove): it reads `getBoundingClientRect` only for the rows in
+	 * [startIndex, endIndex] (inclusive; defaults to all visible items).
+	 * Marker/card elements come from the ItemRecord cache — no
+	 * querySelector per rebuild.
 	 */
-	collectEnvelope(hTolerance = 9, vTolerance = 5): PointerEnvelope {
+	collectEnvelope(
+		hTolerance = 9,
+		vTolerance = 5,
+		startIndex = 0,
+		endIndex = this.items.length - 1,
+	): PointerEnvelope {
 		const railRect = rectFrom(this.hitZoneEl.getBoundingClientRect());
-		const items = this.items.map((item) => {
+		const items: PointerEnvelope["items"] = [];
+		const first = Math.max(0, startIndex);
+		const last = Math.min(this.items.length - 1, endIndex);
+		for (let i = first; i <= last; i++) {
+			const item = this.items[i];
 			const record = this.itemRecords.get(item.key);
-			const markerEl = record?.buttonEl.querySelector<HTMLElement>(
-				".glide-outline-marker",
+			const markerRect = rectFrom(
+				record?.markerEl.getBoundingClientRect() ?? zeroRect(),
 			);
-			const cardEl = record?.cardEl;
-			const markerRect = rectFrom(markerEl?.getBoundingClientRect() ?? zeroRect());
-			const cardRect = rectFrom(cardEl?.getBoundingClientRect() ?? zeroRect());
-			const bridgeRect = bridgeRectFor(markerRect, cardRect, hTolerance, vTolerance);
-			return { key: item.key, markerRect, cardRect, bridgeRect };
-		});
+			const cardRect = rectFrom(
+				record?.cardEl.getBoundingClientRect() ?? zeroRect(),
+			);
+			const bridgeRect = bridgeRectFor(
+				markerRect,
+				cardRect,
+				hTolerance,
+				vTolerance,
+			);
+			items.push({ key: item.key, markerRect, cardRect, bridgeRect });
+		}
 		return { railRect, items };
 	}
 
@@ -585,6 +610,7 @@ export class GlideOutlineView {
 		return {
 			rowEl: row,
 			buttonEl: button,
+			markerEl: marker,
 			cardEl: card,
 			badgeEl: badge,
 			labelEl: label,
