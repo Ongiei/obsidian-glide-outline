@@ -10,35 +10,13 @@ export type MarkerStyle = "line" | "dot";
  * ticks, roman numerals — can be added without another migration.
  */
 export type LevelIndicatorStyle = "none" | "badge";
-/**
- * Label text enhancement for readability over busy backgrounds.
- * - "none": plain text (default — no dirty edges, ever)
- * - "halo": soft omnidirectional glow (multi-layer, no offset)
- * A directional drop shadow is deliberately NOT offered any more: it read
- * as smudged edges, especially with bold CJK glyphs. The hairline stroke
- * (`-webkit-text-stroke`) was removed too (P1-2): at 0.5px it visibly
- * thinned Latin glyphs and pixel-snapped inconsistently across zoom
- * levels. Persisted `"stroke"` values normalize to `"none"`.
- */
-export type TextEffectMode = "none" | "halo";
 
 /**
- * Structured text effect. Replaces both the legacy `textShadow: boolean`
- * and the interim `TextShadowSettings` object; `normalizeTextEffect`
- * migrates each older shape (boolean → none/halo, structured shadow →
- * carries color/opacity/blur over).
+ * Visual style of the label card behind each heading.
+ * The former `textEffect` (halo) member was removed for the first
+ * release: persisted `textEffect` / `textShadow` fields of any
+ * generation are silently ignored by `normalizeCard`.
  */
-export interface TextEffectSettings {
-	mode: TextEffectMode;
-	/** Halo color; hex `#rgb` or `#rrggbb`. */
-	color: string;
-	/** Effect alpha in percent, 0–100. */
-	opacity: number;
-	/** Halo radius in px — drives all three glow layers. */
-	blur: number;
-}
-
-/** Visual style of the label card behind each heading. */
 export interface LabelAppearanceSettings {
 	/** Card background opacity in percent (0 = pure text mode). */
 	opacity: number;
@@ -52,8 +30,6 @@ export interface LabelAppearanceSettings {
 	paddingX: number;
 	/** Vertical padding in px. */
 	paddingY: number;
-	/** Label text enhancement (halo / stroke) for busy backgrounds. */
-	textEffect: TextEffectSettings;
 }
 
 export interface GlideOutlineSettings {
@@ -84,10 +60,18 @@ export interface GlideOutlineSettings {
 	/** Slowly scroll the list when the pointer dwells near an edge. */
 	pointerAutoScroll: boolean;
 	/**
-	 * Multiplier on the pointer auto-scroll speed/acceleration (P1-3).
-	 * 1 = the tuned default feel; 0.25 = very gentle; 2 = brisk.
+	 * Multiplier on the pointer auto-scroll speed/acceleration.
+	 * 1 = the tuned default feel; 0.25 = very gentle; 4 = brisk.
+	 * Renamed from the legacy `pointerAutoScrollStrength` field, which
+	 * is migrated on load and then silently ignored.
 	 */
-	pointerAutoScrollStrength: number;
+	pointerAutoScrollSpeed: number;
+	/**
+	 * Height in px of the edge trigger area for pointer auto-scroll,
+	 * measured from each list edge. The effective pre-zone is capped at
+	 * half the viewport height so short panes never overlap zones.
+	 */
+	pointerAutoScrollZone: number;
 	markerStyle: MarkerStyle;
 	/** Peak scale at pointer distance 0. */
 	maxScale: number;
@@ -109,13 +93,6 @@ export interface GlideOutlineSettings {
 	card: LabelAppearanceSettings;
 }
 
-export const DEFAULT_TEXT_EFFECT: TextEffectSettings = {
-	mode: "none",
-	color: "#000000",
-	opacity: 45,
-	blur: 3,
-};
-
 export const DEFAULT_CARD: LabelAppearanceSettings = {
 	opacity: 78,
 	border: false,
@@ -123,7 +100,6 @@ export const DEFAULT_CARD: LabelAppearanceSettings = {
 	shadow: false,
 	paddingX: 7,
 	paddingY: 1,
-	textEffect: { ...DEFAULT_TEXT_EFFECT },
 };
 
 export const DEFAULT_SETTINGS: GlideOutlineSettings = {
@@ -137,7 +113,8 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	edgeFadeEnabled: true,
 	edgeFadeSize: 28,
 	pointerAutoScroll: true,
-	pointerAutoScrollStrength: 1,
+	pointerAutoScrollSpeed: 1,
+	pointerAutoScrollZone: 120,
 	markerStyle: "line",
 	maxScale: 1.25,
 	radius: 90,
@@ -146,10 +123,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	cardGap: 4,
 	showLevels: [true, true, true, true, true, true],
 	renderMarkdown: false,
-	card: {
-		...DEFAULT_CARD,
-		textEffect: { ...DEFAULT_TEXT_EFFECT },
-	},
+	card: { ...DEFAULT_CARD },
 };
 
 export const RANGES = {
@@ -157,7 +131,8 @@ export const RANGES = {
 	horizontalOffset: { min: 0, max: 64 },
 	levelIndent: { min: 0, max: 8 },
 	edgeFadeSize: { min: 12, max: 120 },
-	pointerAutoScrollStrength: { min: 0.25, max: 4 },
+	pointerAutoScrollSpeed: { min: 0.25, max: 4 },
+	pointerAutoScrollZone: { min: 40, max: 220 },
 	// 2.25 (P1-1): the collision solver keeps neighbours readable even at
 	// high peaks, so the old 1.75 cap was purely conservative.
 	maxScale: { min: 1, max: 2.25 },
@@ -169,8 +144,6 @@ export const RANGES = {
 	cardRadius: { min: 0, max: 16 },
 	cardPaddingX: { min: 0, max: 18 },
 	cardPaddingY: { min: 0, max: 10 },
-	textEffectOpacity: { min: 0, max: 100 },
-	textEffectBlur: { min: 1, max: 8 },
 } as const;
 
 function clamp(value: unknown, min: number, max: number, fallback: number): number {
@@ -182,102 +155,11 @@ function bool(value: unknown, fallback: boolean): boolean {
 	return typeof value === "boolean" ? value : fallback;
 }
 
-const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
-
-function hexColor(value: unknown, fallback: string): string {
-	return typeof value === "string" && HEX_COLOR_RE.test(value)
-		? value
-		: fallback;
-}
-
-function hexToRgb(color: string): { r: number; g: number; b: number } {
-	const hex = color.length === 4
-		? `#${color[1]}${color[1]}${color[2]}${color[2]}${color[3]}${color[3]}`
-		: color;
-	return {
-		r: parseInt(hex.slice(1, 3), 16),
-		g: parseInt(hex.slice(3, 5), 16),
-		b: parseInt(hex.slice(5, 7), 16),
-	};
-}
-
-function rgba(color: string, alpha: number): string {
-	const { r, g, b } = hexToRgb(color);
-	const a = Math.round(Math.max(0, Math.min(1, alpha)) * 1000) / 1000;
-	return `rgba(${r}, ${g}, ${b}, ${a})`;
-}
-
-/**
- * Migrate + normalize the text effect. Three persisted generations:
- *   1. boolean `textShadow`         → mode "halo"/"none"
- *   2. structured `textShadow` obj  → mode from `enabled`, carries
- *      color/opacity/blur (offsets are dropped — directional shadows are
- *      exactly what the redesign removes)
- *   3. current `textEffect` object  → validated field by field
- * The retired `"stroke"` mode (P1-2) folds into `"none"` — silently
- * dropping the effect is safer than surprising users with a halo they
- * never chose.
- */
-export function normalizeTextEffect(raw: unknown): TextEffectSettings {
-	if (typeof raw === "boolean") {
-		return { ...DEFAULT_TEXT_EFFECT, mode: raw ? "halo" : "none" };
-	}
-	const data = (raw ?? {}) as Record<string, unknown>;
-	const mode: TextEffectMode =
-		data.mode === "halo" || data.mode === "none"
-			? data.mode
-			: data.mode === "stroke"
-				? "none"
-				: typeof data.enabled === "boolean"
-					? data.enabled
-						? "halo"
-						: "none"
-					: DEFAULT_TEXT_EFFECT.mode;
-	return {
-		mode,
-		color: hexColor(data.color, DEFAULT_TEXT_EFFECT.color),
-		opacity: clamp(
-			data.opacity,
-			RANGES.textEffectOpacity.min,
-			RANGES.textEffectOpacity.max,
-			DEFAULT_TEXT_EFFECT.opacity,
-		),
-		blur: clamp(
-			data.blur,
-			RANGES.textEffectBlur.min,
-			RANGES.textEffectBlur.max,
-			DEFAULT_TEXT_EFFECT.blur,
-		),
-	};
-}
-
-/**
- * Halo `text-shadow` value for `--glide-text-halo`.
- *
- * NOT a directional drop shadow: three concentric zero-offset layers make
- * a soft underlay that stays symmetric around every glyph — the old
- * `0 1px 2px` look smudged bold CJK strokes downward. Layer alphas taper
- * (1 / 0.8 / 0.5) so the outer ring never reads as a dark border.
- * Returns "none" for every non-halo mode so the variable stays valid.
- */
-export function textEffectHaloCss(effect: TextEffectSettings): string {
-	if (effect.mode !== "halo") return "none";
-	const alpha = effect.opacity / 100;
-	const core = rgba(effect.color, alpha);
-	const mid = rgba(effect.color, alpha * 0.8);
-	const outer = rgba(effect.color, alpha * 0.5);
-	return [
-		`0 0 1px ${core}`,
-		`0 0 ${effect.blur}px ${mid}`,
-		`0 0 ${effect.blur * 2}px ${outer}`,
-	].join(", ");
-}
-
 function normalizeCard(raw: unknown): LabelAppearanceSettings {
-	const data = (raw ?? {}) as Partial<LabelAppearanceSettings> & {
-		/** Legacy persisted field (boolean or structured shadow object). */
-		textShadow?: unknown;
-	};
+	// Legacy persisted fields `textEffect` / `textShadow` (halo, any
+	// generation) are silently ignored: the text effect feature was
+	// removed entirely before the first release.
+	const data = (raw ?? {}) as Partial<LabelAppearanceSettings>;
 	return {
 		opacity: clamp(
 			data.opacity,
@@ -305,15 +187,15 @@ function normalizeCard(raw: unknown): LabelAppearanceSettings {
 			RANGES.cardPaddingY.max,
 			DEFAULT_CARD.paddingY,
 		),
-		// Current field wins; otherwise migrate whatever `textShadow`
-		// generation is on disk (boolean or structured object).
-		textEffect: normalizeTextEffect(data.textEffect ?? data.textShadow),
 	};
 }
 
 /** Merge persisted data with defaults and clamp everything into valid ranges. */
 export function normalizeSettings(raw: unknown): GlideOutlineSettings {
-	const data = (raw ?? {}) as Partial<GlideOutlineSettings>;
+	const data = (raw ?? {}) as Partial<GlideOutlineSettings> & {
+		/** Legacy field renamed to `pointerAutoScrollSpeed`; migrated on load. */
+		pointerAutoScrollStrength?: unknown;
+	};
 	const levels = Array.isArray(data.showLevels) ? data.showLevels : [];
 	return {
 		enabled: bool(data.enabled, DEFAULT_SETTINGS.enabled),
@@ -357,11 +239,19 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 			data.pointerAutoScroll,
 			DEFAULT_SETTINGS.pointerAutoScroll,
 		),
-		pointerAutoScrollStrength: clamp(
-			data.pointerAutoScrollStrength,
-			RANGES.pointerAutoScrollStrength.min,
-			RANGES.pointerAutoScrollStrength.max,
-			DEFAULT_SETTINGS.pointerAutoScrollStrength,
+		// Current field wins; otherwise migrate the legacy
+		// `pointerAutoScrollStrength` value (same unit and range).
+		pointerAutoScrollSpeed: clamp(
+			data.pointerAutoScrollSpeed ?? data.pointerAutoScrollStrength,
+			RANGES.pointerAutoScrollSpeed.min,
+			RANGES.pointerAutoScrollSpeed.max,
+			DEFAULT_SETTINGS.pointerAutoScrollSpeed,
+		),
+		pointerAutoScrollZone: clamp(
+			data.pointerAutoScrollZone,
+			RANGES.pointerAutoScrollZone.min,
+			RANGES.pointerAutoScrollZone.max,
+			DEFAULT_SETTINGS.pointerAutoScrollZone,
 		),
 		markerStyle: data.markerStyle === "dot" || data.markerStyle === "line"
 			? data.markerStyle
@@ -390,9 +280,9 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 			typeof levels[i] === "boolean" ? (levels[i] as boolean) : true,
 		) as GlideOutlineSettings["showLevels"],
 		renderMarkdown: bool(data.renderMarkdown, DEFAULT_SETTINGS.renderMarkdown),
-		// Legacy persisted fields `motionMode` and `animationEnabled` are
-		// silently ignored: motion behaviour is no longer configurable —
-		// the plugin always runs with full motion.
+		// Legacy persisted fields `motionMode`, `animationEnabled`,
+		// `pointerAutoScrollStrength` (migrated above) and
+		// `card.textEffect` / `card.textShadow` are silently ignored.
 		card: normalizeCard(data.card),
 	};
 }
@@ -413,14 +303,9 @@ export function normalizeSettingsInPlace(
 ): GlideOutlineSettings {
 	const clean = normalizeSettings(target);
 	Object.assign(target, clean, {
-		// Nested objects must also keep their identity (`s.card` and
-		// `s.card.textEffect` are captured by settings-tab closures too).
-		card: Object.assign(target.card ?? {}, clean.card, {
-			textEffect: Object.assign(
-				target.card?.textEffect ?? {},
-				clean.card.textEffect,
-			),
-		}),
+		// Nested objects must also keep their identity (`s.card` is
+		// captured by settings-tab closures too).
+		card: Object.assign(target.card ?? {}, clean.card),
 		showLevels: clean.showLevels,
 	});
 	return target;
@@ -429,8 +314,9 @@ export function normalizeSettingsInPlace(
 /**
  * Restore appearance-related values to their defaults.
  * Deliberately preserved: enabled, position, vertical/horizontal offset,
- * pointer auto-scroll (and its strength), shown levels and Markdown
- * rendering — those encode workflow and placement, not appearance.
+ * pointer auto-scroll (and its speed / trigger area), shown levels and
+ * Markdown rendering — those encode workflow and placement, not
+ * appearance.
  */
 export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 	return {
@@ -445,7 +331,7 @@ export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 		levelIndicatorStyle: DEFAULT_SETTINGS.levelIndicatorStyle,
 		edgeFadeEnabled: DEFAULT_SETTINGS.edgeFadeEnabled,
 		edgeFadeSize: DEFAULT_SETTINGS.edgeFadeSize,
-		card: { ...DEFAULT_CARD, textEffect: { ...DEFAULT_TEXT_EFFECT } },
+		card: { ...DEFAULT_CARD },
 	};
 }
 
@@ -460,12 +346,7 @@ export function resetAppearanceInPlace(
 ): GlideOutlineSettings {
 	const clean = resetAppearance(target);
 	Object.assign(target, clean, {
-		card: Object.assign(target.card ?? {}, clean.card, {
-			textEffect: Object.assign(
-				target.card?.textEffect ?? {},
-				clean.card.textEffect,
-			),
-		}),
+		card: Object.assign(target.card ?? {}, clean.card),
 	});
 	return target;
 }
@@ -487,16 +368,11 @@ const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string }> = [
  * `aria-controls`/`aria-labelledby` pairing, roving tabindex with
  * Arrow/Home/End keyboard support. Native Obsidian `Setting` rows only —
  * no framework. Styling rides on Obsidian theme variables (styles.css).
- *
- * P1-4: the text-effect dropdown re-renders ONLY its detail container —
- * a full `display()` would destroy the dropdown mid-interaction and
- * reset the scroll position.
  */
 export class GlideOutlineSettingTab extends PluginSettingTab {
 	private activeTab: SettingsTabId = "general";
 	private panelEl: HTMLElement | null = null;
 	private tabButtons = new Map<SettingsTabId, HTMLElement>();
-	private textEffectDetailsEl: HTMLElement | null = null;
 
 	constructor(app: App, private readonly plugin: GlideOutlinePlugin) {
 		super(app, plugin);
@@ -540,7 +416,6 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 
 	override hide(): void {
 		this.panelEl = null;
-		this.textEffectDetailsEl = null;
 		this.tabButtons.clear();
 	}
 
@@ -588,7 +463,6 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 		const panel = this.panelEl;
 		if (!panel) return;
 		panel.empty();
-		this.textEffectDetailsEl = null;
 		switch (this.activeTab) {
 			case "general":
 				this.renderGeneral(panel);
@@ -673,7 +547,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 		}
 	}
 
-	// --- Appearance: marker, typography, card, hierarchy, text effect --
+	// --- Appearance: marker, typography, card, hierarchy ---------------
 
 	private renderAppearance(containerEl: HTMLElement): void {
 		const s = this.plugin.settings;
@@ -826,32 +700,6 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		// --- Text effect
-		new Setting(containerEl).setName("Text effect").setHeading();
-
-		new Setting(containerEl)
-			.setName("Text effect")
-			.setDesc("Halo adds a soft glow around label text for readability over busy backgrounds — most useful in pure text mode.")
-			.addDropdown((dropdown) =>
-				dropdown
-					.addOption("none", "None")
-					.addOption("halo", "Halo")
-					.setValue(s.card.textEffect.mode)
-					.onChange((value) => {
-						s.card.textEffect.mode = value === "halo" ? "halo" : "none";
-						this.plugin.previewSettings();
-						// P1-4: rebuild ONLY the detail rows below — a full
-						// display() would tear the dropdown out from under
-						// the user and reset the page scroll position.
-						this.renderTextEffectDetails();
-					}),
-			);
-
-		this.textEffectDetailsEl = containerEl.createDiv({
-			cls: "glide-settings-texteffect-details",
-		});
-		this.renderTextEffectDetails();
-
 		// --- Rendering
 		new Setting(containerEl).setName("Rendering").setHeading();
 
@@ -866,56 +714,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 	}
 
-	/** Partial rebuild of the halo detail rows (P1-4). */
-	private renderTextEffectDetails(): void {
-		const containerEl = this.textEffectDetailsEl;
-		if (!containerEl) return;
-		containerEl.empty();
-		const s = this.plugin.settings;
-		if (s.card.textEffect.mode === "none") return;
-
-		new Setting(containerEl)
-			.setName("Effect color")
-			.addColorPicker((picker) =>
-				picker.setValue(s.card.textEffect.color).onChange((value) => {
-					s.card.textEffect.color = value;
-					this.plugin.previewSettings();
-				}),
-			);
-
-		new Setting(containerEl)
-			.setName("Effect opacity")
-			.addSlider((slider) =>
-				slider
-					.setLimits(
-						RANGES.textEffectOpacity.min,
-						RANGES.textEffectOpacity.max,
-						5,
-					)
-					.setValue(s.card.textEffect.opacity)
-					.setDynamicTooltip()
-					.onChange((value) => {
-						s.card.textEffect.opacity = value;
-						this.plugin.previewSettings();
-					}),
-			);
-
-		new Setting(containerEl)
-			.setName("Halo size")
-			.setDesc("Radius of the glow, in pixels.")
-			.addSlider((slider) =>
-				slider
-					.setLimits(RANGES.textEffectBlur.min, RANGES.textEffectBlur.max, 1)
-					.setValue(s.card.textEffect.blur)
-					.setDynamicTooltip()
-					.onChange((value) => {
-						s.card.textEffect.blur = value;
-						this.plugin.previewSettings();
-					}),
-			);
-	}
-
-	// --- Motion: magnification, animation, edges, auto-scroll ----------
+	// --- Motion: magnification, edges, auto-scroll ---------------------
 
 	private renderMotion(containerEl: HTMLElement): void {
 		const s = this.plugin.settings;
@@ -986,19 +785,37 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Auto-scroll strength")
+			.setName("Auto-scroll speed")
 			.setDesc("Speed multiplier for pointer edge auto-scroll. 1 is the tuned default; lower is gentler, higher is brisker.")
 			.addSlider((slider) =>
 				slider
 					.setLimits(
-						RANGES.pointerAutoScrollStrength.min,
-						RANGES.pointerAutoScrollStrength.max,
+						RANGES.pointerAutoScrollSpeed.min,
+						RANGES.pointerAutoScrollSpeed.max,
 						0.1,
 					)
-					.setValue(s.pointerAutoScrollStrength)
+					.setValue(s.pointerAutoScrollSpeed)
 					.setDynamicTooltip()
 					.onChange((value) => {
-						s.pointerAutoScrollStrength = value;
+						s.pointerAutoScrollSpeed = value;
+						this.plugin.previewSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Auto-scroll trigger area")
+			.setDesc("Height of the edge zone that starts auto-scroll, in pixels from each list edge. Capped at half the list height on short panes.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(
+						RANGES.pointerAutoScrollZone.min,
+						RANGES.pointerAutoScrollZone.max,
+						10,
+					)
+					.setValue(s.pointerAutoScrollZone)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.pointerAutoScrollZone = value;
 						this.plugin.previewSettings();
 					}),
 			);
