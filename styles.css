@@ -214,9 +214,19 @@
 		var(--glide-label-gap, 6px) + var(--glide-level-indent, 0px)
 	);
 	height: 100%;
-	transform: translateY(var(--glide-shift-y, 0px));
-	transition: transform 140ms cubic-bezier(0.33, 0, 0.2, 1);
+	/* Continuous displacement is RAF-interpolated in TS (section 11) —
+	   NO CSS transition here, or the two systems would fight over the
+	   same transform. translate3d keeps the row on a compositable path. */
+	transform: translate3d(0, var(--glide-shift-y, 0px), 0);
 	pointer-events: none;
+}
+
+/* GPU layer hints ONLY for rows inside the active motion range
+   (section 15). The controller adds/removes this class; a converged or
+   out-of-range row never holds a standing layer. */
+.glide-outline-row--motion-active .glide-outline-motion,
+.glide-outline-row--motion-active .glide-outline-card {
+	will-change: transform;
 }
 
 /* The motion corridor is NEVER interactive (section 6/7): a click in the
@@ -368,9 +378,9 @@
 		transparent
 	);
 	transform: scale(var(--glide-scale, 1));
-	transition:
-		transform 90ms ease-out,
-		background-color 160ms ease;
+	/* Continuous scale is RAF-interpolated in TS (section 11): transform
+	   deliberately has NO transition. Discrete color changes keep theirs. */
+	transition: background-color 160ms ease;
 	pointer-events: none;
 }
 
