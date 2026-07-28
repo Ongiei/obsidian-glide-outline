@@ -1,6 +1,7 @@
 import { PluginSettingTab, Setting } from "obsidian";
 import type { App } from "obsidian";
 import type GlideOutlinePlugin from "./main";
+import type { MotionMode } from "./utils/motion";
 
 export type OutlinePosition = "left" | "right";
 export type MarkerStyle = "line" | "dot";
@@ -104,7 +105,14 @@ export interface GlideOutlineSettings {
 	cardGap: number;
 	/** showLevels[level - 1] — whether H(level) is rendered. */
 	showLevels: [boolean, boolean, boolean, boolean, boolean, boolean];
-	animationEnabled: boolean;
+	/**
+	 * Explicit motion behaviour. Replaces the old boolean `animationEnabled`,
+	 * whose only failure was that it could not override an OS
+	 * `prefers-reduced-motion` report (on Windows the system "Animation
+	 * effects" toggle maps to that media query, so a user who wanted motion
+	 * got none). "full" always enables motion; "system" follows the OS.
+	 */
+	motionMode: MotionMode;
 	/** Render inline Markdown (bold, code, links…) inside labels. */
 	renderMarkdown: boolean;
 	card: LabelAppearanceSettings;
@@ -146,7 +154,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	maxLabelWidth: 240,
 	cardGap: 4,
 	showLevels: [true, true, true, true, true, true],
-	animationEnabled: true,
+	motionMode: "system",
 	renderMarkdown: false,
 	card: {
 		...DEFAULT_CARD,
@@ -182,6 +190,21 @@ function clamp(value: unknown, min: number, max: number, fallback: number): numb
 
 function bool(value: unknown, fallback: boolean): boolean {
 	return typeof value === "boolean" ? value : fallback;
+}
+
+/**
+ * Migrate the legacy boolean `animationEnabled` to the explicit `MotionMode`:
+ *   animationEnabled === true  → "system"  (follow OS reduced-motion)
+ *   animationEnabled === false → "reduced" (no motion)
+ * An explicit, valid `motionMode` always wins; anything else falls back to
+ * the default ("system").
+ */
+function normalizeMotionMode(raw: unknown, legacyAnimation: unknown): MotionMode {
+	if (raw === "system" || raw === "full" || raw === "reduced") return raw;
+	if (typeof legacyAnimation === "boolean") {
+		return legacyAnimation ? "system" : "reduced";
+	}
+	return DEFAULT_SETTINGS.motionMode;
 }
 
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
@@ -391,11 +414,13 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 		showLevels: [0, 1, 2, 3, 4, 5].map((i) =>
 			typeof levels[i] === "boolean" ? (levels[i] as boolean) : true,
 		) as GlideOutlineSettings["showLevels"],
-		animationEnabled: bool(
-			data.animationEnabled,
-			DEFAULT_SETTINGS.animationEnabled,
-		),
 		renderMarkdown: bool(data.renderMarkdown, DEFAULT_SETTINGS.renderMarkdown),
+		motionMode: normalizeMotionMode(
+			data.motionMode,
+			// Legacy field, no longer part of GlideOutlineSettings — read via
+			// an index signature so old vaults still migrate cleanly.
+			(data as Record<string, unknown>).animationEnabled,
+		),
 		card: normalizeCard(data.card),
 	};
 }
@@ -448,7 +473,7 @@ export function resetAppearance(s: GlideOutlineSettings): GlideOutlineSettings {
 		levelIndicatorStyle: DEFAULT_SETTINGS.levelIndicatorStyle,
 		edgeFadeEnabled: DEFAULT_SETTINGS.edgeFadeEnabled,
 		edgeFadeSize: DEFAULT_SETTINGS.edgeFadeSize,
-		animationEnabled: DEFAULT_SETTINGS.animationEnabled,
+		motionMode: DEFAULT_SETTINGS.motionMode,
 		card: { ...DEFAULT_CARD, textEffect: { ...DEFAULT_TEXT_EFFECT } },
 	};
 }
@@ -953,13 +978,21 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Animation")
-			.setDesc("Disable for instant reveal without motion.")
-			.addToggle((toggle) =>
-				toggle.setValue(s.animationEnabled).onChange(async (value) => {
-					s.animationEnabled = value;
-					await this.plugin.applySettings();
-				}),
+			.setName("Motion behavior")
+			.setDesc(
+				"Follow system honors the OS reduced-motion setting; Full motion enables magnification and auto-scroll even when the OS asks for reduced; Reduced motion shows headings instantly with no motion.",
+			)
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("system", "Follow system")
+					.addOption("full", "Full motion")
+					.addOption("reduced", "Reduced motion")
+					.setValue(s.motionMode)
+					.onChange(async (value) => {
+						s.motionMode =
+							value === "full" || value === "reduced" ? value : "system";
+						await this.plugin.applySettings();
+					}),
 			);
 
 		// --- Overflow

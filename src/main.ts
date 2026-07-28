@@ -1,6 +1,8 @@
-import { Plugin } from "obsidian";
+import { Notice, Plugin } from "obsidian";
 import type { Editor, MarkdownView, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
+import { Diagnostics } from "./core/Diagnostics";
+import { resolveMotionState } from "./utils/motion";
 import {
 	DEFAULT_SETTINGS,
 	GlideOutlineSettingTab,
@@ -31,6 +33,8 @@ export default class GlideOutlinePlugin extends Plugin {
 	private saveTimer = 0;
 	/** ONE workspace-wide CM update feed, fanned out per view (P0-2). */
 	private readonly editorUpdates = new EditorUpdateBridge();
+	/** Shared interaction diagnostics (pointer activation + jump landing). */
+	private readonly diagnostics = new Diagnostics();
 
 	override async onload(): Promise<void> {
 		this.settings = normalizeSettings(await this.loadData());
@@ -88,6 +92,17 @@ export default class GlideOutlinePlugin extends Plugin {
 				this.settings.position =
 					this.settings.position === "right" ? "left" : "right";
 				await this.applySettings();
+			},
+		});
+		// Section 3: one-click Windows/macOS motion triage. Captures the OS
+		// reduced-motion report, the chosen mode, the RESOLVED motion state
+		// and the last pointer/jump interactions — enough to tell "motion
+		// disabled by the OS" from "wrong heading" from "wrong drop point".
+		this.addCommand({
+			id: "copy-diagnostics",
+			name: "Copy Glide Outline diagnostics",
+			callback: async () => {
+				await this.copyDiagnostics();
 			},
 		});
 
@@ -173,7 +188,48 @@ export default class GlideOutlinePlugin extends Plugin {
 			this.provider,
 			() => this.settings,
 			this.editorUpdates,
+			this.diagnostics,
 		);
+	}
+
+	/**
+	 * Build and copy the diagnostics JSON (section 3). Runs even when no
+	 * outline is mounted — the OS motion report and settings alone already
+	 * answer "why is nothing animating on Windows".
+	 */
+	private async copyDiagnostics(): Promise<void> {
+		const systemReduced = window.matchMedia(
+			"(prefers-reduced-motion: reduce)",
+		).matches;
+		const s = this.settings;
+		const payload = {
+			timestamp: new Date().toISOString(),
+			pluginVersion: this.manifest.version,
+			platform: navigator.platform,
+			userAgent: navigator.userAgent,
+			systemPrefersReducedMotion: systemReduced,
+			motionMode: s.motionMode,
+			resolvedMotion: resolveMotionState(s.motionMode, systemReduced),
+			settings: {
+				enabled: s.enabled,
+				position: s.position,
+				markerStyle: s.markerStyle,
+				maxScale: s.maxScale,
+				radius: s.radius,
+				cardGap: s.cardGap,
+				pointerAutoScroll: s.pointerAutoScroll,
+				pointerAutoScrollStrength: s.pointerAutoScrollStrength,
+				edgeFadeEnabled: s.edgeFadeEnabled,
+				edgeFadeSize: s.edgeFadeSize,
+				showLevels: s.showLevels,
+				renderMarkdown: s.renderMarkdown,
+			},
+			outline: this.controller?.getDiagnosticsSnapshot() ?? null,
+			lastPointerActivation: this.diagnostics.lastPointerActivation,
+			lastJump: this.diagnostics.lastJump,
+		};
+		await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+		new Notice("Glide Outline diagnostics copied to clipboard.");
 	}
 
 	private detachController(): void {

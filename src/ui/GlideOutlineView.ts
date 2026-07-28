@@ -7,6 +7,18 @@ import {
 } from "../utils/layout";
 import { computeOverflowState } from "../utils/overflow";
 import type { OverflowState } from "../utils/overflow";
+import { resolveMotionState } from "../utils/motion";
+import { bridgeRectFor } from "../utils/envelope";
+import type { PointerEnvelope, Rect } from "../utils/envelope";
+
+/** Copy the four edges out of a DOMRect-like object into our Rect shape. */
+function rectFrom(r: { left: number; top: number; right: number; bottom: number }): Rect {
+	return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+}
+
+function zeroRect(): Rect {
+	return { left: 0, top: 0, right: 0, bottom: 0 };
+}
 
 export interface GlideOutlineViewHandlers {
 	onJump(item: HeadingItem): void;
@@ -69,15 +81,6 @@ interface ItemRecord {
 export class GlideOutlineView {
 	readonly rootEl: HTMLElement;
 	readonly hitZoneEl: HTMLElement;
-	/**
-	 * Continuous transparent interaction surface (P0-1). Sits UNDER the
-	 * visual layers and spans the whole hover envelope (rail → farthest
-	 * card edge, plus the vertical safe areas), so the quadrilateral dead
-	 * spot between two magnification-displaced neighbours stays inside
-	 * the outline's pointer envelope. Interactive only while expanded /
-	 * focused; it never handles clicks and carries no aria semantics.
-	 */
-	readonly interactionSurfaceEl: HTMLElement;
 	readonly viewportEl: HTMLElement;
 	readonly listEl: HTMLElement;
 
@@ -114,13 +117,6 @@ export class GlideOutlineView {
 		this.hitZoneEl = this.doc.createElement("div");
 		this.hitZoneEl.className = "glide-outline-hit-zone";
 
-		// Below the viewport in DOM order → below every visual layer in
-		// paint order (no z-index games). Purely presentational: it must
-		// stay invisible to the accessibility tree.
-		this.interactionSurfaceEl = this.doc.createElement("div");
-		this.interactionSurfaceEl.className = "glide-outline-interaction-surface";
-		this.interactionSurfaceEl.setAttribute("aria-hidden", "true");
-
 		this.viewportEl = this.doc.createElement("div");
 		this.viewportEl.className = "glide-outline-viewport";
 
@@ -130,7 +126,6 @@ export class GlideOutlineView {
 
 		this.viewportEl.appendChild(this.listEl);
 		this.rootEl.appendChild(this.hitZoneEl);
-		this.rootEl.appendChild(this.interactionSurfaceEl);
 		this.rootEl.appendChild(this.viewportEl);
 		hostEl.appendChild(this.rootEl);
 
@@ -259,6 +254,14 @@ export class GlideOutlineView {
 		return this.rootEl.classList.contains("is-expanded");
 	}
 
+	/** Current OS `prefers-reduced-motion` report for this outline's window. */
+	private systemReducedMotion(): boolean {
+		const win = this.doc.defaultView;
+		return (
+			win?.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
+		);
+	}
+
 	/** Re-apply CSS variables and position classes after a settings change. */
 	applySettings(): void {
 		const s = this.getSettings();
@@ -267,7 +270,17 @@ export class GlideOutlineView {
 		root.classList.toggle("glide-outline-root--right", s.position === "right");
 		root.classList.toggle("glide-outline-root--left", s.position === "left");
 		root.classList.toggle("glide-outline-root--marker-dot", s.markerStyle === "dot");
-		root.classList.toggle("glide-outline-root--no-anim", !s.animationEnabled);
+
+		// Motion behaviour: a single resolved policy shared with the
+		// magnification controller and the editor jump. "full" always
+		// enables motion (overriding an OS reduced-motion report — the
+		// Windows fix); "reduced" or "system"+"reduced" disable transitions
+		// via the --motion-reduced root class; "system"+"full" keeps the
+		// base CSS transitions. CSS owns the actual transition values, so
+		// no inline style is needed here.
+		const motion = resolveMotionState(s.motionMode, this.systemReducedMotion());
+		root.classList.toggle("glide-outline-root--motion-full", s.motionMode === "full");
+		root.classList.toggle("glide-outline-root--motion-reduced", motion.reduced);
 
 		root.style.setProperty("--glide-rail-width", `${RAIL_WIDTH}px`);
 		root.style.setProperty("--glide-label-gap", `${LABEL_GAP}px`);
@@ -337,6 +350,46 @@ export class GlideOutlineView {
 		return this.overflowState;
 	}
 
+	/** Viewport scroll metrics, for diagnostics. */
+	getViewportMetrics(): { scrollTop: number; clientHeight: number; scrollHeight: number } {
+		const vp = this.viewportEl;
+		return {
+			scrollTop: vp.scrollTop,
+			clientHeight: vp.clientHeight,
+			scrollHeight: vp.scrollHeight,
+		};
+	}
+
+	/** Root class list (as strings), for diagnostics. */
+	getRootClassList(): string[] {
+		return Array.from(this.rootEl.classList);
+	}
+
+	/**
+	 * Build the geometric Pointer Envelope from the actual (post-transform)
+	 * marker and card rectangles of every visible heading, plus the rail
+	 * hit zone. The bridge of each heading spans ONLY its own marker and
+	 * card, so a long title can never widen a short neighbour's hover range.
+	 *
+	 * Intended to be called from a single RAF pass (not per pointermove):
+	 * it reads `getBoundingClientRect` for every visible item.
+	 */
+	collectEnvelope(hTolerance = 9, vTolerance = 5): PointerEnvelope {
+		const railRect = rectFrom(this.hitZoneEl.getBoundingClientRect());
+		const items = this.items.map((item) => {
+			const record = this.itemRecords.get(item.key);
+			const markerEl = record?.buttonEl.querySelector<HTMLElement>(
+				".glide-outline-marker",
+			);
+			const cardEl = record?.cardEl;
+			const markerRect = rectFrom(markerEl?.getBoundingClientRect() ?? zeroRect());
+			const cardRect = rectFrom(cardEl?.getBoundingClientRect() ?? zeroRect());
+			const bridgeRect = bridgeRectFor(markerRect, cardRect, hTolerance, vTolerance);
+			return { key: item.key, markerRect, cardRect, bridgeRect };
+		});
+		return { railRect, items };
+	}
+
 	/**
 	 * Re-evaluate overflow and toggle the edge fade classes. Runs on scroll,
 	 * after measurement passes and after responsive width changes.
@@ -377,7 +430,11 @@ export class GlideOutlineView {
 		for (const item of this.items) {
 			if (item.level > deepestLevel) deepestLevel = item.level;
 		}
-		const { rootWidth, labelContentWidth, compact, interactionWidth } =
+		// NOTE: the solver still reports `interactionWidth`, but nothing
+		// consumes it as a CSS var anymore — the transparent interaction
+		// surface is gone; hover is maintained by the geometric Pointer
+		// Envelope (collectEnvelope + MagnificationController).
+		const { rootWidth, labelContentWidth, compact } =
 			computeResponsiveWidth({
 			hostWidth: this.hostEl.clientWidth || 0,
 			maxLabelWidth: s.maxLabelWidth,
@@ -398,10 +455,6 @@ export class GlideOutlineView {
 		this.rootEl.style.setProperty(
 			"--glide-label-content-width",
 			`${labelContentWidth}px`,
-		);
-		this.rootEl.style.setProperty(
-			"--glide-interaction-width",
-			`${interactionWidth}px`,
 		);
 		this.rootEl.classList.toggle("glide-outline-root--compact", compact);
 	}
@@ -515,6 +568,12 @@ export class GlideOutlineView {
 		row.appendChild(button);
 
 		button.addEventListener("click", (event) => {
+			// Mouse/touch activation is handled by the pointerup lock in the
+			// magnification controller, which also suppresses this synthetic
+			// click (a real pointer click has event.detail > 0). Only a
+			// keyboard activation — Enter / Space — arrives here with
+			// event.detail === 0, so the two paths can never double-fire.
+			if (event.detail !== 0) return;
 			// Links rendered inside labels handle their own navigation.
 			// Duck-typed instead of instanceof — safe in pop-out windows.
 			const target = event.target as Partial<Element> | null;

@@ -1,6 +1,16 @@
 import { computeCollisionFreeMagnification } from "../utils/geometry";
 import { computePointerAutoScrollVelocity } from "../utils/overflow";
 import { DisposableStore } from "../utils/disposable";
+import { resolveMotionState } from "../utils/motion";
+import {
+	bridgeRectFor,
+	emptyRect,
+	pointInEnvelope,
+} from "../utils/envelope";
+import type { PointerEnvelope, Rect } from "../utils/envelope";
+import { resolveClickTarget } from "../utils/activation";
+import type { Diagnostics } from "../core/Diagnostics";
+import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
 import type { GlideOutlineView } from "./GlideOutlineView";
 
@@ -22,8 +32,8 @@ interface CachedItem {
 	lastShift: number;
 }
 
-/** Grace period before collapsing, so crossing the transparent gap between
- * the rail and a label card does not flicker the outline shut. */
+/** Grace period before collapsing, so crossing a transparent gap between
+ * two magnification-displaced neighbours does not flicker the outline shut. */
 const COLLAPSE_GRACE_MS = 120;
 
 /** Pointer auto-scroll: peak speed in px/s at the very edge (strength 1).
@@ -41,6 +51,25 @@ export const POINTER_VELOCITY_SMOOTHING = 0.3;
  * acceleration cap that turns raw target speeds into damped motion. */
 export const AUTO_SCROLL_ACCEL = 1400;
 
+/** Horizontal / vertical slack (px) added to each heading's bridge rect so
+ * the hover envelope stays comfortable without growing to the longest title. */
+const ENVELOPE_H_TOLERANCE = 9;
+const ENVELOPE_V_TOLERANCE = 5;
+/** Release-point tolerance (px) around the locked target on pointerup. */
+const ACTIVATION_RELEASE_TOLERANCE = 8;
+
+interface PressedHeadingState {
+	pointerId: number;
+	headingKey: string;
+	targetType: "marker" | "card";
+	downX: number;
+	downY: number;
+	/** Actual (post-transform) rect of the locked target at pointerdown. */
+	targetRect: Rect;
+	/** Element the pointer was captured on (for releasePointerCapture). */
+	captured: HTMLElement | null;
+}
+
 /**
  * Pointer-proximity expand/collapse + dock magnification.
  *
@@ -56,6 +85,12 @@ export const AUTO_SCROLL_ACCEL = 1400;
  *   - pointerExpanded: pointer near the rail / over a card
  *   - focusExpanded:   keyboard focus inside the outline
  * The outline stays expanded while either is true.
+ *
+ * Hover is maintained by a GEOMETRIC Pointer Envelope (not a large
+ * transparent DOM plane): the union of the rail hit zone and each visible
+ * heading's actual marker / card / bridge rectangles. A long heading
+ * cannot widen a short neighbour's hover range, and only real markers and
+ * cards ever trigger a jump.
  */
 export class MagnificationController {
 	private readonly disposables = new DisposableStore();
@@ -76,8 +111,15 @@ export class MagnificationController {
 	private focusExpanded = false;
 	private rafId = 0;
 	private collapseTimer = 0;
+	private lastPointerX = Number.NaN;
 	private lastPointerY = Number.NaN;
 	private reducedMotionQuery: MediaQueryList;
+	// --- Pointer Envelope (geometric hover maintenance) ----------------
+	/** Union of rail hit zone + per-heading marker/card/bridge rects. */
+	private envelope: PointerEnvelope = { railRect: emptyRect(), items: [] };
+	/** Rebuild the envelope on the next demand (RAF-coalesced — never per
+	 * pointermove). */
+	private envelopeDirty = true;
 	// --- Pointer edge auto-scroll state (coordinated in the same RAF as
 	// magnification, so the two never fight over frames).
 	/** Viewport bounds cached alongside the item cache — no per-frame rect. */
@@ -86,9 +128,7 @@ export class MagnificationController {
 	/** Dwell gate: velocity only applies after the pointer lingered. */
 	private dwellTimer = 0;
 	private dwellPassed = false;
-	/** pointerdown → scrolling locked until pointerup re-evaluates. */
-	private pointerHeld = false;
-	/** True only while the pointer is physically inside the outline. */
+	/** True only while the pointer is physically inside the envelope. */
 	private pointerInside = false;
 	/** Timestamp of the previous frame for time-based scroll deltas. */
 	private lastFrameTime = Number.NaN;
@@ -99,10 +139,19 @@ export class MagnificationController {
 	private lastMoveTime = Number.NaN;
 	/** Currently APPLIED scroll speed after accel-cap damping, px/s. */
 	private appliedVelocity = 0;
+	// --- Pointer activation lock (section 9) --------------------------
+	/** Set on pointerdown over a real marker/card; cleared on pointerup /
+	 * pointercancel / window blur / dispose. While set, magnification
+	 * displacement is frozen so the locked target cannot slide away. */
+	private pressed: PressedHeadingState | null = null;
 
 	constructor(
 		private readonly view: GlideOutlineView,
 		private readonly getSettings: () => GlideOutlineSettings,
+		private readonly diagnostics: Diagnostics | null = null,
+		/** Pointer activation path (pointerup lock). Keyboard activation
+		 * goes through the view's click handler instead — never both. */
+		private readonly onJump: ((item: HeadingItem) => void) | null = null,
 	) {
 		const doc = view.rootEl.ownerDocument;
 		const win = doc.defaultView as (Window & typeof globalThis) | null;
@@ -110,56 +159,43 @@ export class MagnificationController {
 		this.win = win;
 		this.reducedMotionQuery = win.matchMedia("(prefers-reduced-motion: reduce)");
 
-		const { hitZoneEl, interactionSurfaceEl, viewportEl, listEl, rootEl } =
-			view;
+		const { hitZoneEl, listEl, rootEl, viewportEl } = view;
 
-		// Rail strip: enter/move/leave.
+		// Rail strip + real cards/markers: enter/move/leave. The motion
+		// corridor and the removed interaction surface are NOT interactive,
+		// so the only elements that bubble here are the rail, markers and
+		// cards — exactly what may keep the outline open or trigger a jump.
 		this.disposables.listen(hitZoneEl, "pointerenter", this.onPointerEnter);
 		this.disposables.listen(hitZoneEl, "pointermove", this.onPointerMove);
 		this.disposables.listen(hitZoneEl, "pointerleave", this.onPointerLeave);
-		// Cards and markers bubble through the list — one listener set, no
-		// per-item handlers. The viewport itself is pointer-transparent.
 		this.disposables.listen(listEl, "pointerenter", this.onPointerEnter);
 		this.disposables.listen(listEl, "pointermove", this.onPointerMove);
 		this.disposables.listen(listEl, "pointerleave", this.onPointerLeave);
-		// Continuous interaction surface (P0-1): closes the quadrilateral
-		// hover hole between two magnification-displaced rows. Interactive
-		// only while expanded (CSS), so these listeners cannot expand a
-		// collapsed outline; they only KEEP it expanded and keep feeding
-		// pointerY into magnification + auto-scroll.
-		this.disposables.listen(
-			interactionSurfaceEl,
-			"pointerenter",
-			this.onPointerEnter,
-		);
-		this.disposables.listen(
-			interactionSurfaceEl,
-			"pointermove",
-			this.onPointerMove,
-		);
-		this.disposables.listen(
-			interactionSurfaceEl,
-			"pointerleave",
-			this.onPointerLeave,
-		);
 
-		// Wheel on the rail strip or the interaction surface scrolls the
-		// outline, not the editor (Phase 10 / P0-1).
+		// Window-level pointer tracking keeps the envelope honest when the
+		// pointer crosses a transparent gap (e.g. the intra-row marker↔card
+		// gap) straight into the editor — no real element fires a leave
+		// there, so only a window listener can detect the exit. Cheap: it
+		// only does a cached-rect containment test and rebuilds geometry
+		// only when the dirty flag is set.
+		this.disposables.listen(win, "pointermove", this.onWindowPointerMove, {
+			passive: true,
+		});
+
+		// Wheel on the rail strip scrolls the outline, not the editor.
 		const onWheel = (event: WheelEvent): void => {
 			if (!this.isExpanded()) return;
 			event.preventDefault();
 			viewportEl.scrollTop += event.deltaY;
 		};
 		this.disposables.listen(hitZoneEl, "wheel", onWheel, { passive: false });
-		this.disposables.listen(interactionSurfaceEl, "wheel", onWheel, {
-			passive: false,
-		});
 
 		this.disposables.listen(
 			viewportEl,
 			"scroll",
 			() => {
 				this.cacheDirty = true;
+				this.envelopeDirty = true;
 				// User is scrolling the outline — pause active-heading follow.
 				this.view.setFollowEnabled(false);
 				this.schedule();
@@ -167,19 +203,11 @@ export class MagnificationController {
 			{ passive: true },
 		);
 
-		// Pointer edge auto-scroll: pointerdown locks the list so the user's
-		// click target cannot slide away mid-click; pointerup re-evaluates.
-		this.disposables.listen(rootEl, "pointerdown", () => {
-			this.pointerHeld = true;
-		});
-		this.disposables.listen(rootEl, "pointerup", () => {
-			this.pointerHeld = false;
-			// Position unchanged but the lock lifted — resume if still edged.
-			this.schedule();
-		});
-		this.disposables.listen(rootEl, "pointercancel", () => {
-			this.pointerHeld = false;
-		});
+		// Pointer activation lock (section 9): pointerdown over a real
+		// marker/card captures the target; pointerup verifies and jumps.
+		this.disposables.listen(rootEl, "pointerdown", this.onRootPointerDown);
+		this.disposables.listen(rootEl, "pointerup", this.onRootPointerUp);
+		this.disposables.listen(rootEl, "pointercancel", this.onRootPointerCancel);
 
 		// Keyboard focus keeps the outline open (P1-2).
 		this.disposables.listen(rootEl, "focusin", () => {
@@ -193,8 +221,12 @@ export class MagnificationController {
 			this.syncExpanded();
 		});
 
+		// Window blur must release any held pointer and stop auto-scroll.
+		this.disposables.listen(win, "blur", this.onWindowBlur);
+
 		const resizeObserver = new win.ResizeObserver(() => {
 			this.cacheDirty = true;
+			this.envelopeDirty = true;
 			this.schedule();
 		});
 		resizeObserver.observe(view.listEl);
@@ -205,12 +237,14 @@ export class MagnificationController {
 	/** Called when the heading list or settings changed (centers are stale). */
 	invalidate(): void {
 		this.cacheDirty = true;
+		this.envelopeDirty = true;
 		if (this.isExpanded()) this.schedule();
 	}
 
 	dispose(): void {
 		this.cancelFrame();
 		this.cancelCollapse();
+		this.clearPressed();
 		this.stopAutoScroll();
 		this.clearMagnification();
 		this.disposables.dispose();
@@ -232,6 +266,8 @@ export class MagnificationController {
 		this.pointerExpanded = true;
 		this.pointerInside = true;
 		this.cacheDirty = true;
+		this.envelopeDirty = true;
+		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
 		this.trackPointerAnchor(event);
 		// Fresh gesture: no carried-over velocity from a previous visit.
@@ -246,22 +282,110 @@ export class MagnificationController {
 		if (!this.pointerExpanded) {
 			this.pointerExpanded = true;
 			this.cacheDirty = true;
+			this.envelopeDirty = true;
 			this.syncExpanded();
 		}
 		this.pointerInside = true;
 		this.trackPointerVelocity(event);
+		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
 		this.trackPointerAnchor(event);
 		this.schedule();
 	};
 
 	/**
+	 * Leaving a real element (rail / marker / card): if the pointer moved to
+	 * another outline element (relatedTarget still in root) do nothing. If
+	 * it is still inside the geometric envelope (a transparent gap between
+	 * magnified neighbours, or the intra-row marker↔card gap) keep the
+	 * outline open but stop auto-scroll. Otherwise start the collapse grace.
+	 */
+	private onPointerLeave = (event: PointerEvent): void => {
+		const related = event.relatedTarget;
+		if (this.isNodeInRoot(related)) return;
+		if (this.envelopeDirty) this.rebuildEnvelope();
+		if (pointInEnvelope(this.envelope, event.clientX, event.clientY)) {
+			// Inside a transparent gap — keep expanded, but the pointer is no
+			// longer over a real element, so stop auto-scroll / clear anchor.
+			this.pointerInside = false;
+			this.pointerAnchorEl = null;
+			this.stopAutoScroll();
+			this.cancelCollapse();
+			return;
+		}
+		this.pointerInside = false;
+		this.pointerAnchorEl = null;
+		this.stopAutoScroll();
+		this.armCollapse();
+	};
+
+	/**
+	 * Window-level move: catches exits from transparent gaps (no real
+	 * element fires a leave there). Only collapses when the pointer is
+	 * genuinely outside the envelope; otherwise it is a no-op. Geometry is
+	 * rebuilt only when dirty, so this stays cheap on every window move.
+	 */
+	private onWindowPointerMove = (event: PointerEvent): void => {
+		if (!this.isExpanded() || this.pressed) return;
+		this.lastPointerX = event.clientX;
+		this.lastPointerY = event.clientY;
+		if (this.envelopeDirty) this.rebuildEnvelope();
+		// Degenerate envelope (no measurable geometry — e.g. jsdom, or a
+		// detached/zero-size outline): never base a collapse decision on a
+		// zero rect, or the pointer would be "always outside" and auto-scroll
+		// would be killed on the first window move. In that case trust the
+		// element-level enter/move/leave state instead.
+		if (!this.envelopeIsMeasurable()) return;
+		if (!pointInEnvelope(this.envelope, event.clientX, event.clientY)) {
+			this.pointerInside = false;
+			this.pointerAnchorEl = null;
+			this.stopAutoScroll();
+			this.armCollapse();
+		}
+	};
+
+	/**
+	 * Whether the geometric envelope carries real geometry. When it is empty
+	 * or has zero area (common in headless tests and right after mount before
+	 * layout settles) it cannot authoritatively say the pointer left — so a
+	 * window-level move must not collapse the outline on that basis.
+	 */
+	private envelopeIsMeasurable(): boolean {
+		const e = this.envelope;
+		if (!e.items.length) return false;
+		let area = 0;
+		if (e.railRect.right > e.railRect.left && e.railRect.bottom > e.railRect.top) {
+			area += (e.railRect.right - e.railRect.left) * (e.railRect.bottom - e.railRect.top);
+		}
+		for (const item of e.items) {
+			// Use the RAW marker/card rects: the bridge carries a fixed
+			// tolerance, so it has nonzero area even around zero-size rects.
+			for (const r of [item.markerRect, item.cardRect]) {
+				if (r.right > r.left && r.bottom > r.top) {
+					area += (r.right - r.left) * (r.bottom - r.top);
+				}
+			}
+		}
+		return area > 0;
+	}
+
+	/** Collapse grace: only fires when the pointer truly left the envelope. */
+	private armCollapse(): void {
+		this.cancelCollapse();
+		this.collapseTimer = this.win.setTimeout(() => {
+			this.collapseTimer = 0;
+			this.pointerExpanded = false;
+			this.syncExpanded();
+		}, COLLAPSE_GRACE_MS);
+	}
+
+	/**
 	 * DOM hit-testing for the magnification anchor (P0-5): when the event
 	 * target sits inside a row, that row is what the user visually points
 	 * at — even when magnification displaced it away from its base center.
-	 * Blank-area events (hit zone, interaction surface) clear the anchor;
-	 * the solver then falls back to nearest-visual-center interpolation.
-	 * Duck-typed `closest` — safe in pop-out windows.
+	 * Blank-area events (rail strip) clear the anchor; the solver then falls
+	 * back to nearest-visual-center interpolation. Duck-typed `closest` —
+	 * safe in pop-out windows.
 	 */
 	private trackPointerAnchor(event: PointerEvent): void {
 		const target = event.target as Partial<Element> | null;
@@ -291,26 +415,123 @@ export class MagnificationController {
 		this.lastMoveTime = now;
 	}
 
-	private onPointerLeave = (event: PointerEvent): void => {
-		// The pointer envelope is the UNION of interaction surface, rail
-		// hit zone, markers and cards — leaving one element toward another
-		// element of the envelope (relatedTarget still inside the root)
-		// never even arms the collapse timer.
-		const related = event.relatedTarget;
-		if (this.isNodeInRoot(related)) return;
-		// Auto-scroll must stop IMMEDIATELY on pointerleave — only the
-		// expand/collapse state gets the grace period.
+	private onRootPointerDown = (event: PointerEvent): void => {
+		const activation = resolveClickTarget(event.target);
+		if (!activation) return; // not on a real marker / card
+		const item = this.view.getItems().find((c) => c.key === activation.key);
+		if (!item) return;
+		const targetEl = (event.target as Partial<Element> | null)?.closest?.(
+			".glide-outline-marker, .glide-outline-card",
+		) as HTMLElement | null;
+		if (!targetEl) return;
+		const rect = targetEl.getBoundingClientRect();
+		const pressed: PressedHeadingState = {
+			pointerId: event.pointerId,
+			headingKey: activation.key,
+			targetType: activation.targetType,
+			downX: event.clientX,
+			downY: event.clientY,
+			targetRect: {
+				left: rect.left,
+				top: rect.top,
+				right: rect.right,
+				bottom: rect.bottom,
+			},
+			captured: null,
+		};
+		// Stop pointer edge auto-scroll while the target is held.
+		this.pressed = pressed;
+		this.stopAutoScroll();
+		// Capture the pointer so pointerup fires even if it drifts off the
+		// (possibly magnified / displaced) target. Magnification displacement
+		// is frozen while held (frame returns early), so the locked rect
+		// stays valid for the release-point tolerance test.
+		try {
+			targetEl.setPointerCapture(event.pointerId);
+			pressed.captured = targetEl;
+		} catch {
+			// Pointer capture unsupported here — fall back to coordinate test.
+		}
+	};
+
+	private onRootPointerUp = (event: PointerEvent): void => {
+		const pressed = this.pressed;
+		if (!pressed || event.pointerId !== pressed.pointerId) return;
+		this.pressed = null;
+		if (pressed.captured) {
+			try {
+				pressed.captured.releasePointerCapture(event.pointerId);
+			} catch {
+				// Capture already released — ignore.
+			}
+		}
+		const r = pressed.targetRect;
+		const inside =
+			event.clientX >= r.left - ACTIVATION_RELEASE_TOLERANCE &&
+			event.clientX <= r.right + ACTIVATION_RELEASE_TOLERANCE &&
+			event.clientY >= r.top - ACTIVATION_RELEASE_TOLERANCE &&
+			event.clientY <= r.bottom + ACTIVATION_RELEASE_TOLERANCE;
+		const item = this.view.getItems().find((c) => c.key === pressed.headingKey);
+		if (inside && item) {
+			this.diagnostics?.recordPointerActivation({
+				headingKey: item.key,
+				headingText: item.text,
+				headingLine: item.line,
+				targetType: pressed.targetType,
+				downX: pressed.downX,
+				downY: pressed.downY,
+				upX: event.clientX,
+				upY: event.clientY,
+				accepted: true,
+			});
+			// Resume magnification / auto-scroll on the next frame.
+			this.schedule();
+			this.onJump?.(item);
+		} else {
+			this.diagnostics?.recordPointerActivation({
+				headingKey: pressed.headingKey,
+				headingText: item?.text ?? "",
+				headingLine: item?.line ?? -1,
+				targetType: pressed.targetType,
+				downX: pressed.downX,
+				downY: pressed.downY,
+				upX: event.clientX,
+				upY: event.clientY,
+				accepted: false,
+				rejectionReason: inside ? "heading-not-found" : "release-outside-target",
+			});
+			this.schedule();
+		}
+	};
+
+	private onRootPointerCancel = (event: PointerEvent): void => {
+		const pressed = this.pressed;
+		if (!pressed || event.pointerId !== pressed.pointerId) return;
+		this.clearPressed();
+		this.schedule();
+	};
+
+	private onWindowBlur = (): void => {
+		this.clearPressed();
+		this.stopAutoScroll();
 		this.pointerInside = false;
 		this.pointerAnchorEl = null;
-		this.stopAutoScroll();
-		// Grace period: crossing the transparent gap must not collapse.
-		this.cancelCollapse();
-		this.collapseTimer = this.win.setTimeout(() => {
-			this.collapseTimer = 0;
-			this.pointerExpanded = false;
-			this.syncExpanded();
-		}, COLLAPSE_GRACE_MS);
+		this.armCollapse();
 	};
+
+	/** Release any held pointer target cleanly (pointercancel / blur / dispose). */
+	private clearPressed(): void {
+		if (!this.pressed) return;
+		const pressed = this.pressed;
+		if (pressed.captured) {
+			try {
+				pressed.captured.releasePointerCapture(pressed.pointerId);
+			} catch {
+				// Already released.
+			}
+		}
+		this.pressed = null;
+	}
 
 	private cancelCollapse(): void {
 		if (this.collapseTimer !== 0) {
@@ -332,14 +553,16 @@ export class MagnificationController {
 			this.cancelFrame();
 			this.stopAutoScroll();
 			this.clearMagnification();
+			this.envelope = { railRect: emptyRect(), items: [] };
 		} else {
 			this.cacheDirty = true;
+			this.envelopeDirty = true;
 			this.schedule();
 		}
 	}
 
 	private schedule(): void {
-		if (this.rafId !== 0) return;
+		if (this.rafId !== 0 || this.pressed) return;
 		this.rafId = this.win.requestAnimationFrame(this.frame);
 	}
 
@@ -352,13 +575,23 @@ export class MagnificationController {
 
 	private frame = (): void => {
 		this.rafId = 0;
+		// While a heading is held (pointerdown) the displacement is frozen so
+		// the locked target cannot slide away; auto-scroll is already stopped.
+		if (this.pressed) return;
 		if (!this.isExpanded()) return;
 		if (this.cacheDirty) this.rebuildCache();
+		if (this.envelopeDirty) this.rebuildEnvelope();
 		if (this.cache.length === 0 || Number.isNaN(this.lastPointerY)) return;
 
 		const settings = this.getSettings();
-		const reduced =
-			this.reducedMotionQuery.matches || !settings.animationEnabled;
+		// Single resolved motion policy — shared with the view (CSS) and the
+		// controller (jump behaviour). Replaces the old boolean that could not
+		// override an OS reduced-motion report (the Windows failure).
+		const motion = resolveMotionState(
+			settings.motionMode,
+			this.reducedMotionQuery.matches,
+		);
+		const reduced = motion.reduced;
 		// Pure math over cached geometry — no DOM reads inside the frame.
 		// The pointer is in VISUAL space; `shifts` + the DOM-hit anchor let
 		// the solver map it back to base space (P0-5), so the row the user
@@ -396,23 +629,13 @@ export class MagnificationController {
 		// Pointer edge auto-scroll shares this frame: scrolling marks the
 		// cache dirty (viewport scroll event), so the NEXT frame recomputes
 		// client centers and magnification follows the moving rows smoothly.
+		// The envelope is rebuilt next frame so hover tracks the new rects.
+		this.envelopeDirty = true;
 		this.stepAutoScroll(settings, reduced);
 	};
 
 	/**
 	 * One pointer-follow auto-scroll step inside the coordinated RAF loop.
-	 *
-	 * Pipeline per frame:
-	 *   1. target = computePointerAutoScrollVelocity(position, pointer
-	 *      velocity, zones, scrollability)  — pure math
-	 *   2. appliedVelocity chases target under an ACCELERATION CAP
-	 *      (AUTO_SCROLL_ACCEL px/s²) — no per-pointermove jumps, motion
-	 *      always ramps and damps continuously
-	 *   3. mutate viewport.scrollTop (time-based, refresh-rate independent)
-	 *   4. the scroll event marks the geometry cache dirty
-	 *   5. next frame rebuilds item client centers
-	 *   6. magnification continues from the unchanged pointerY
-	 *   7. the view's scroll listener updates the edge fade state
 	 */
 	private stepAutoScroll(
 		settings: GlideOutlineSettings,
@@ -420,7 +643,7 @@ export class MagnificationController {
 	): void {
 		// Focus-only expansion never auto-scrolls; a held pointer locks the
 		// list so the click target cannot slide away mid-click.
-		if (!this.pointerExpanded || !this.pointerInside || this.pointerHeld) {
+		if (!this.pointerExpanded || !this.pointerInside || this.pressed) {
 			this.stopAutoScroll();
 			return;
 		}
@@ -570,6 +793,15 @@ export class MagnificationController {
 		}
 	}
 
+	/** Rebuild the geometric Pointer Envelope from the view's live rects. */
+	private rebuildEnvelope(): void {
+		this.envelopeDirty = false;
+		this.envelope = this.view.collectEnvelope(
+			ENVELOPE_H_TOLERANCE,
+			ENVELOPE_V_TOLERANCE,
+		);
+	}
+
 	private clearMagnification(): void {
 		for (const entry of this.cache) {
 			entry.el.style.removeProperty("--glide-scale");
@@ -581,5 +813,10 @@ export class MagnificationController {
 		}
 		this.shifts.fill(0);
 		this.pointerAnchorEl = null;
+	}
+
+	/** Bridge rect builder exposed for tests / geometry verification. */
+	static buildBridge(marker: Rect, card: Rect): Rect {
+		return bridgeRectFor(marker, card, ENVELOPE_H_TOLERANCE, ENVELOPE_V_TOLERANCE);
 	}
 }

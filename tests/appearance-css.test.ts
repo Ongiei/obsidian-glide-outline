@@ -222,18 +222,52 @@ describe("H1–H6 label typography ramp", () => {
 	});
 });
 
-describe("hover interaction corridor", () => {
-	it("keeps the motion wrapper inert while collapsed", () => {
+describe("pointer targeting surfaces", () => {
+	it("keeps the motion wrapper permanently inert (never a click target)", () => {
 		const motion = exactBlock(".glide-outline-motion");
 		expect(motion).toMatch(/pointer-events:\s*none/);
+		// No state may ever re-enable the corridor: hover is maintained by
+		// the geometric Pointer Envelope in JS, and ONLY the real marker and
+		// card elements may trigger jumps.
+		expect(css).not.toMatch(
+			/\.glide-outline-motion[^{]*\{[^}]*pointer-events:\s*auto/,
+		);
 	});
 
-	it("activates the corridor only when expanded or focused", () => {
-		expect(css).toMatch(
-			/\.glide-outline-root\.is-expanded\s+\.glide-outline-motion[^{]*\{[^}]*pointer-events:\s*auto/,
+	it("keeps the reveal wrapper permanently inert", () => {
+		expect(css).not.toMatch(
+			/\.glide-outline-reveal[^{]*\{[^}]*pointer-events:\s*auto/,
 		);
+	});
+
+	it("has no large transparent interaction surface", () => {
+		expect(css).not.toMatch(/glide-outline-interaction-surface/);
+	});
+
+	it("re-enables pointer events on real markers and cards when expanded", () => {
 		expect(css).toMatch(
-			/\.glide-outline-root:focus-within\s+\.glide-outline-motion[^{]*\{[^}]*pointer-events:\s*auto/,
+			/\.glide-outline-card[^{]*\{[^}]*pointer-events:\s*auto/,
 		);
+	});
+});
+
+describe("motion mode root classes", () => {
+	it("disables transitions under --motion-reduced", () => {
+		expect(css).toMatch(
+			/\.glide-outline-root--motion-reduced[^{]*\{[^}]*transition:\s*none/,
+		);
+	});
+
+	it("does not blanket-disable transitions via an unconditional reduced-motion media query", () => {
+		// Full motion must be able to OVERRIDE the OS setting (the Windows
+		// "Animation effects" fix), so the stylesheet may no longer contain
+		// an unconditional prefers-reduced-motion block that kills
+		// transitions regardless of the plugin's motion mode.
+		const mediaBlocks = css.match(
+			/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\n\}/g,
+		);
+		for (const block of mediaBlocks ?? []) {
+			expect(block).toMatch(/--motion|glide-outline-root--motion/);
+		}
 	});
 });

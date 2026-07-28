@@ -11,9 +11,18 @@ import { GlideOutlineView } from "../ui/GlideOutlineView";
 import { MagnificationController } from "../ui/MagnificationController";
 import { sameHeadingKeys } from "../utils/headingIdentity";
 import { matchPreviewHeadings } from "../utils/previewHeadings";
+import { resolveMotionState } from "../utils/motion";
+import { ScrollCorrector } from "./ScrollCorrector";
+import type { Diagnostics } from "./Diagnostics";
 
 /** Breathing room above a jumped-to heading, in px (editor modes). */
 const JUMP_Y_MARGIN = 12;
+/** Acceptable final landing error after a jump, px (section 12: 2–4). */
+const JUMP_TOLERANCE_PX = 3;
+/** Max correction passes per jump — never loops on pathological layouts. */
+const JUMP_MAX_CORRECTIONS = 3;
+/** Settle-timeout fallback when `scrollend` never fires (600–800 ms). */
+const JUMP_SETTLE_TIMEOUT_MS = 700;
 
 /** Minimal CM surface for jump scrolling (accessed defensively). */
 interface CmView {
@@ -36,15 +45,19 @@ export class GlideOutlineController {
 	private items: HeadingItem[] = [];
 	private disposed = false;
 	private unsubscribeEditorUpdates: (() => void) | null = null;
+	/** In-flight editor jump correction; a new jump cancels the old one. */
+	private corrector: ScrollCorrector | null = null;
 
 	constructor(
 		private readonly view: MarkdownView,
 		private readonly provider: HeadingProvider,
 		private readonly getSettings: () => GlideOutlineSettings,
 		editorUpdates?: EditorUpdateBridge,
+		private readonly diagnostics: Diagnostics | null = null,
 	) {
 		this.renderComponent.load();
 		this.outlineView = new GlideOutlineView(view.contentEl, getSettings, {
+			// Keyboard activation (Enter / Space, event.detail === 0).
 			onJump: (item) => this.jumpTo(item),
 			renderLabel: (labelEl, item) => this.renderLabel(labelEl, item),
 			// Row geometry re-measured → magnification cache is stale.
@@ -54,6 +67,9 @@ export class GlideOutlineController {
 		this.magnification = new MagnificationController(
 			this.outlineView,
 			getSettings,
+			this.diagnostics,
+			// Pointer activation (pointerup lock, section 9/10).
+			(item) => this.jumpTo(item),
 		);
 		this.tracker = new ActiveHeadingTracker(view, (key) =>
 			this.outlineView.setActiveKey(key),
@@ -119,12 +135,32 @@ export class GlideOutlineController {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		this.corrector?.dispose();
+		this.corrector = null;
 		this.unsubscribeEditorUpdates?.();
 		this.unsubscribeEditorUpdates = null;
 		this.tracker.dispose();
 		this.magnification.dispose();
 		this.outlineView.dispose();
 		this.renderComponent.unload();
+	}
+
+	/** Live snapshot for the "Copy Glide Outline diagnostics" command. */
+	getDiagnosticsSnapshot(): Record<string, unknown> {
+		const settings = this.getSettings();
+		const systemReduced = this.prefersReducedMotion();
+		return {
+			viewMode: this.view.getMode(),
+			filePath: this.view.file?.path ?? null,
+			headingCount: this.items.length,
+			visibleHeadingCount: this.outlineView.getItems().length,
+			systemPrefersReducedMotion: systemReduced,
+			motionMode: settings.motionMode,
+			resolvedMotion: resolveMotionState(settings.motionMode, systemReduced),
+			rootClasses: this.outlineView.getRootClassList(),
+			outlineViewport: this.outlineView.getViewportMetrics(),
+			overflow: this.outlineView.getOverflowState(),
+		};
 	}
 
 	/**
@@ -157,9 +193,14 @@ export class GlideOutlineController {
 	private jumpTo(item: HeadingItem): void {
 		if (this.disposed) return;
 		const settings = this.getSettings();
-		const reduced = this.prefersReducedMotion();
-		const behavior: ScrollBehavior =
-			settings.animationEnabled && !reduced ? "smooth" : "auto";
+		// Single resolved motion policy — the same resolver the view (CSS
+		// classes) and the magnification controller use, so "full" motion
+		// really does override an OS reduced-motion report (Windows fix).
+		const motion = resolveMotionState(
+			settings.motionMode,
+			this.prefersReducedMotion(),
+		);
+		const behavior: ScrollBehavior = motion.smoothJump ? "smooth" : "auto";
 
 		// P0-2/P0-3: lock the target active for the duration of the scroll
 		// so intermediate headings never flicker active mid-flight.
@@ -187,14 +228,10 @@ export class GlideOutlineController {
 		const editor = this.view.editor;
 		const line = Math.min(item.line, Math.max(0, editor.lineCount() - 1));
 		const cm = (editor as unknown as { cm?: CmView }).cm;
-		if (cm && typeof cm.dispatch === "function") {
+		if (cm && typeof cm.dispatch === "function" && cm.scrollDOM) {
 			try {
 				const offset = editor.posToOffset({ line, ch: 0 });
-				if (behavior === "smooth" && cm.scrollDOM) {
-					this.smoothScrollEditor(cm, offset);
-				} else {
-					cm.dispatch({ effects: this.scrollEffect(offset) });
-				}
+				this.startEditorCorrection(item, cm, offset, behavior);
 				return;
 			} catch {
 				// CM internals shifted — fall through to the public API.
@@ -204,6 +241,14 @@ export class GlideOutlineController {
 			{ from: { line, ch: 0 }, to: { line, ch: 0 } },
 			true,
 		);
+		this.diagnostics?.recordJump({
+			headingKey: item.key,
+			headingText: item.text,
+			expectedLine: line,
+			mode: "editor",
+			behavior: behavior === "smooth" ? "smooth" : "auto",
+			correctionCount: 0,
+		});
 	}
 
 	private scrollEffect(offset: number): StateEffect<unknown> {
@@ -214,32 +259,86 @@ export class GlideOutlineController {
 	}
 
 	/**
-	 * Animate toward the estimated position, then correct exactly (P0-3).
-	 * The final dispatch is a no-op when the estimate was already right;
-	 * for drifted estimates it snaps the heading to the intended margin.
+	 * Corrected editor jump (section 12). Smooth mode animates toward the
+	 * current estimate first; auto mode dispatches the exact effect right
+	 * away. Either way a ScrollCorrector verifies the landing position
+	 * after the scroll settles (scrollend AND a 600–800 ms timeout
+	 * fallback — whichever fires first), re-corrects while the error
+	 * exceeds the tolerance, and stops at the correction cap. The final
+	 * error and pass count are recorded for the diagnostics command, which
+	 * is how a "wrong drop point" is told apart from a "wrong heading".
 	 */
-	private smoothScrollEditor(cm: CmView, offset: number): void {
+	private startEditorCorrection(
+		item: HeadingItem,
+		cm: CmView,
+		offset: number,
+		behavior: ScrollBehavior,
+	): void {
+		this.corrector?.dispose();
+		this.corrector = null;
 		const scroller = cm.scrollDOM;
-		const top = Math.max(0, cm.lineBlockAt(offset).top - JUMP_Y_MARGIN);
-		scroller.scrollTo({ top, behavior: "smooth" });
-		const correct = (): void => {
-			if (this.disposed) return;
-			try {
-				cm.dispatch({ effects: this.scrollEffect(offset) });
-			} catch {
-				// View detached mid-scroll — nothing left to correct.
-			}
-		};
-		// scrollend ships in every Chromium Obsidian runs on; the timeout
-		// covers exotic embeds. Either way the correction runs exactly once.
-		if ("onscrollend" in scroller) {
-			scroller.addEventListener("scrollend", correct, { once: true });
-		} else {
-			this.view.contentEl.ownerDocument.defaultView?.setTimeout(
-				correct,
-				600,
-			);
+		const win = this.view.contentEl.ownerDocument.defaultView as
+			| (Window & typeof globalThis)
+			| null;
+		const smooth = behavior === "smooth";
+		if (!win) {
+			// Detached document — no timers available; jump uncorrected.
+			cm.dispatch({ effects: this.scrollEffect(offset) });
+			return;
 		}
+		if (smooth) {
+			// Animate toward the current estimate; the corrector waits for
+			// the animation to settle before dispatching the exact effect,
+			// so the animation is never cancelled mid-flight.
+			const top = Math.max(0, cm.lineBlockAt(offset).top - JUMP_Y_MARGIN);
+			scroller.scrollTo({ top, behavior: "smooth" });
+		}
+		const corrector = new ScrollCorrector({
+			tolerance: JUMP_TOLERANCE_PX,
+			maxCorrections: JUMP_MAX_CORRECTIONS,
+			timeoutMs: JUMP_SETTLE_TIMEOUT_MS,
+			// Signed landing error, clamped to the reachable scroll range so
+			// a heading near the document bottom is not a false failure.
+			measureError: () => {
+				try {
+					const desired = Math.max(
+						0,
+						Math.min(
+							cm.lineBlockAt(offset).top - JUMP_Y_MARGIN,
+							scroller.scrollHeight - scroller.clientHeight,
+						),
+					);
+					return scroller.scrollTop - desired;
+				} catch {
+					return 0; // view detached — report "landed"
+				}
+			},
+			apply: () => {
+				if (this.disposed) return;
+				try {
+					cm.dispatch({ effects: this.scrollEffect(offset) });
+				} catch {
+					// View detached mid-scroll — nothing left to correct.
+				}
+			},
+			done: (finalErrorPx, correctionCount) => {
+				if (this.corrector === corrector) this.corrector = null;
+				this.diagnostics?.recordJump({
+					headingKey: item.key,
+					headingText: item.text,
+					expectedLine: item.line,
+					mode: "editor",
+					behavior: smooth ? "smooth" : "auto",
+					finalErrorPx,
+					correctionCount,
+				});
+			},
+			win,
+			scroller,
+			smoothFirst: smooth,
+		});
+		this.corrector = corrector;
+		corrector.start();
 	}
 
 	/**
@@ -250,6 +349,14 @@ export class GlideOutlineController {
 	 * renderer has produced it.
 	 */
 	private jumpInPreview(item: HeadingItem, behavior: ScrollBehavior): void {
+		this.diagnostics?.recordJump({
+			headingKey: item.key,
+			headingText: item.text,
+			expectedLine: item.line,
+			mode: "preview",
+			behavior: behavior === "smooth" ? "smooth" : "auto",
+			correctionCount: 0,
+		});
 		if (this.scrollPreviewToItem(item, behavior)) return;
 		this.view.setEphemeralState({ line: item.line });
 		const win = this.view.contentEl.ownerDocument.defaultView;

@@ -14,24 +14,14 @@
      1. .glide-outline-hit-zone  – thin transparent strip over the rail
      2. .glide-outline-marker    – rail-width hit slots (line drawn via ::before)
      3. .glide-outline-card      – visible label cards, expanded state only
-     4. .glide-outline-motion    – EXPANDED ONLY: per-row interaction
-        corridor. Its box is exactly marker + column-gap + card
-        (width: max-content, full row height); collapsed, it reverts to
-        pointer-transparent, and it never extends past the card into the
-        text body.
-     5. .glide-outline-interaction-surface – EXPANDED ONLY: one CONTINUOUS
-        transparent plane under all visual layers. Per-row corridors move
-        with --glide-shift-y during magnification, which opens a
-        quadrilateral hover hole centered between two displaced
-        neighbours; this surface closes it. It spans the root vertically
-        (viewport height including the safe padding areas) and
-        horizontally from the rail to the farthest safe card edge
-        (--glide-interaction-width, written by the width solver), mirrored
-        for left/right outlines. It paints nothing, owns no clicks and no
-        aria semantics — clicks fall through to nothing (blank space never
-        jumps). Collapsed, it is pointer-transparent, so the editor text
-        under it stays fully clickable, selectable and scrollable.
-   The editor underneath stays fully clickable everywhere else.
+   The motion and reveal wrappers are PERMANENTLY pointer-events: none —
+   they are drawing layers, never click targets, so a click can only land
+   on the element the user visually sees. Hover across the transparent
+   gaps between magnification-displaced rows is maintained in JS by the
+   geometric Pointer Envelope (union of each heading's actual marker /
+   card / bridge rects — see MagnificationController), NOT by any large
+   transparent DOM plane. The editor underneath stays fully clickable
+   everywhere outside the rail strip and the visible cards.
 
    Transform responsibilities:
      .glide-outline-motion  vertical displacement → --glide-shift-y
@@ -92,41 +82,6 @@
 
 .glide-outline-root--left .glide-outline-hit-zone {
 	left: 0;
-}
-
-/* Continuous interaction surface (P0-1): a fully transparent plane that
-   keeps the pointer inside the hover envelope while it crosses the
-   quadrilateral gap between two magnification-displaced rows. It paints
-   NOTHING (no background, border or shadow — the single-card invariant
-   is untouched) and is interactive only while the outline is expanded
-   or holds keyboard focus. Width comes from the width solver via
-   --glide-interaction-width (rail → farthest safe card edge, including
-   indent, padding, border and shadow allowances at max magnification);
-   it never exceeds the root, so the editor text beyond the cards stays
-   clickable even while expanded. */
-.glide-outline-interaction-surface {
-	position: absolute;
-	top: 0;
-	bottom: 0;
-	width: var(--glide-interaction-width, var(--glide-root-width, 340px));
-	max-width: 100%;
-	background: none;
-	border: none;
-	box-shadow: none;
-	pointer-events: none;
-}
-
-.glide-outline-root--right .glide-outline-interaction-surface {
-	right: 0;
-}
-
-.glide-outline-root--left .glide-outline-interaction-surface {
-	left: 0;
-}
-
-.glide-outline-root.is-expanded .glide-outline-interaction-surface,
-.glide-outline-root:focus-within .glide-outline-interaction-surface {
-	pointer-events: auto;
 }
 
 /* Drawing layers: never intercept the pointer. --glide-viewport-pad keeps
@@ -264,18 +219,11 @@
 	pointer-events: none;
 }
 
-/* Interaction corridor: while the outline is expanded (or focused), the
-   whole motion box — marker, the gap between marker and card, the card
-   and the row slack around the text — accepts the pointer. This is what
-   keeps hover alive when the pointer crosses the transparent gap or sits
-   in the blank space beside a short label. The box is width: max-content
-   inside an edge-anchored button, so it can never grow into a full-width
-   editor-blocking bar. Clicks in the corridor bubble to the item button,
-   which enlarges the effective click target for edge cases too. */
-.glide-outline-root.is-expanded .glide-outline-motion,
-.glide-outline-root:focus-within .glide-outline-motion {
-	pointer-events: auto;
-}
+/* The motion corridor is NEVER interactive (section 6/7): a click in the
+   marker↔card gap or the row slack must not jump anywhere, and hover
+   continuity across those transparent gaps is the Pointer Envelope's job
+   (geometry in TS), not a DOM plane's. Only .glide-outline-marker and
+   .glide-outline-card accept the pointer. */
 
 /* DOM order is marker → reveal; on the right edge the marker must sit at
    the outermost position, so the row is reversed visually. */
@@ -635,22 +583,34 @@
 }
 
 /* --------------------------------------------------------------------------
-   Animation opt-out: settings toggle and prefers-reduced-motion.
-   JS also stops writing --glide-scale / --glide-shift-y in these states,
+   Motion behaviour (section 4/5). The RESOLVED motion state is written by
+   GlideOutlineView.applySettings as a root class:
+     --motion-reduced  → mode "reduced", or mode "system" while the OS
+                         reports prefers-reduced-motion: transitions off.
+     --motion-full     → mode "full": motion ALWAYS on, even when the OS
+                         asks for reduced (the Windows "Animation effects"
+                         toggle maps to that media query — this class is
+                         what lets Full motion override it).
+   JS also stops writing --glide-scale / --glide-shift-y under reduced,
    so no !important is needed anywhere.
+
+   The media query below is deliberately NOT unconditional: it only
+   applies while the root is not --motion-full, covering live OS toggles
+   between two applySettings passes in "system" mode without ever locking
+   a "full" user out of motion.
    -------------------------------------------------------------------------- */
-.glide-outline-root--no-anim .glide-outline-marker::before,
-.glide-outline-root--no-anim .glide-outline-motion,
-.glide-outline-root--no-anim .glide-outline-reveal,
-.glide-outline-root--no-anim .glide-outline-card {
+.glide-outline-root--motion-reduced .glide-outline-marker::before,
+.glide-outline-root--motion-reduced .glide-outline-motion,
+.glide-outline-root--motion-reduced .glide-outline-reveal,
+.glide-outline-root--motion-reduced .glide-outline-card {
 	transition: none;
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.glide-outline-marker::before,
-	.glide-outline-motion,
-	.glide-outline-reveal,
-	.glide-outline-card {
+	.glide-outline-root:not(.glide-outline-root--motion-full) .glide-outline-marker::before,
+	.glide-outline-root:not(.glide-outline-root--motion-full) .glide-outline-motion,
+	.glide-outline-root:not(.glide-outline-root--motion-full) .glide-outline-reveal,
+	.glide-outline-root:not(.glide-outline-root--motion-full) .glide-outline-card {
 		transition: none;
 	}
 }
