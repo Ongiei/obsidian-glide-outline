@@ -75,11 +75,19 @@ describe("edge level badge", () => {
 		expect(badge?.getAttribute("aria-hidden")).toBe("true");
 	});
 
-	it("keeps hierarchy readable for screen readers via aria-label", () => {
+	it("keeps hierarchy readable for screen readers via aria-labelledby", () => {
 		const button = view.listEl.querySelector<HTMLElement>(
 			"button.glide-outline-item",
 		);
-		expect(button?.getAttribute("aria-label")).toBe("H1: Alpha");
+		// The accessible name lives in a sr-only span referenced by
+		// aria-labelledby (NOT aria-label, which Obsidian renders as a
+		// hover tooltip that duplicated the magnified card text).
+		const labelId = button?.getAttribute("aria-labelledby");
+		expect(labelId).toBeTruthy();
+		const a11y = labelId
+			? view.rootEl.querySelector<HTMLElement>(`#${labelId}`)
+			: null;
+		expect(a11y?.textContent).toBe("H1: Alpha");
 	});
 
 	it("toggles the feature class from levelIndicatorStyle", () => {

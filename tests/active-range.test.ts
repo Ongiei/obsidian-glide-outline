@@ -173,9 +173,15 @@ describe("computeActiveMotionRange", () => {
 
 	it("range boundary rows are provably identity (displacement allowance)", () => {
 		// A row strictly outside the influence interval sits farther than
-		// radius + allowance from every influence source, so the cosine
-		// falloff is exactly zero there — entering the range mid-scroll can
-		// never make a row jump from a non-zero value.
+		// the displacement allowance from every influence source, so the
+		// cosine falloff is exactly zero there — entering the range
+		// mid-scroll can never make a row jump from a non-zero value.
+		//
+		// §十六: the magnification radius is applied ONCE, at the pointer's
+		// disc (pointerY ± radius). Here the pointer (15300) sits inside the
+		// viewport window [15000, 15600], so the disc does not extend past
+		// the viewport edges — the window is just the viewport expanded by
+		// the displacement allowance, not by radius again.
 		const { centers, heights } = rows(1000);
 		const range = computeActiveMotionRange({
 			...BASE,
@@ -187,8 +193,8 @@ describe("computeActiveMotionRange", () => {
 			overscan: 0,
 		});
 		const allowance = displacementAllowance(BASE.maxScale, 24);
-		const lo = 15000 - allowance - BASE.radius;
-		const hi = 15600 + allowance + BASE.radius;
+		const lo = 15000 - allowance;
+		const hi = 15600 + allowance;
 		if (range.start > 0) {
 			const outsideBottom = centers[range.start - 1] + 12;
 			expect(outsideBottom).toBeLessThan(lo);

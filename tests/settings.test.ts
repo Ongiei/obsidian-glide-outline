@@ -2,13 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
 	DEFAULT_CARD,
 	DEFAULT_SETTINGS,
-	DEFAULT_TEXT_EFFECT,
 	normalizeSettings,
 	normalizeSettingsInPlace,
-	normalizeTextEffect,
 	resetAppearance,
 	resetAppearanceInPlace,
-	textEffectHaloCss,
 } from "../src/settings";
 
 describe("normalizeSettings", () => {
@@ -132,135 +129,33 @@ describe("normalizeSettings", () => {
 	});
 });
 
-describe("normalizeTextEffect", () => {
-	it("migrates the legacy boolean true to a halo", () => {
-		expect(normalizeTextEffect(true)).toEqual({
-			...DEFAULT_TEXT_EFFECT,
-			mode: "halo",
-		});
-	});
-
-	it("migrates the legacy boolean false to none", () => {
-		expect(normalizeTextEffect(false)).toEqual({
-			...DEFAULT_TEXT_EFFECT,
-			mode: "none",
-		});
-	});
-
-	it("returns the disabled default for missing/invalid input", () => {
-		expect(normalizeTextEffect(undefined)).toEqual(DEFAULT_TEXT_EFFECT);
-		expect(normalizeTextEffect(null)).toEqual(DEFAULT_TEXT_EFFECT);
-		expect(normalizeTextEffect({})).toEqual(DEFAULT_TEXT_EFFECT);
-		expect(DEFAULT_TEXT_EFFECT.mode).toBe("none");
-	});
-
-	it("migrates a structured legacy text-shadow object via `enabled`", () => {
-		expect(normalizeTextEffect({ enabled: true, blur: 5 })).toEqual({
-			...DEFAULT_TEXT_EFFECT,
-			mode: "halo",
-			blur: 5,
-		});
-		expect(normalizeTextEffect({ enabled: false }).mode).toBe("none");
-	});
-
-	it("drops the legacy directional offsets entirely", () => {
-		const effect = normalizeTextEffect({
-			enabled: true,
-			offsetX: 2,
-			offsetY: 4,
-		});
-		expect(effect).not.toHaveProperty("offsetX");
-		expect(effect).not.toHaveProperty("offsetY");
-	});
-
-	it("accepts every explicit mode and rejects unknown ones", () => {
-		expect(normalizeTextEffect({ mode: "halo" }).mode).toBe("halo");
-		expect(normalizeTextEffect({ mode: "none" }).mode).toBe("none");
-		expect(normalizeTextEffect({ mode: "glow" }).mode).toBe(
-			DEFAULT_TEXT_EFFECT.mode,
-		);
-	});
-
-	it("folds the retired stroke mode into none (P1-2)", () => {
-		expect(normalizeTextEffect({ mode: "stroke" }).mode).toBe("none");
-		// Color/opacity/blur survive so switching to Halo keeps the tuning.
-		const s = normalizeTextEffect({
-			mode: "stroke",
-			color: "#abc",
-			opacity: 80,
-			blur: 5,
-		});
-		expect(s.color).toBe("#abc");
-		expect(s.opacity).toBe(80);
-		expect(s.blur).toBe(5);
-	});
-
-	it("clamps opacity into 0–100 and blur into 1–8", () => {
-		const s = normalizeTextEffect({ mode: "halo", opacity: 500, blur: -2 });
-		expect(s.opacity).toBe(100);
-		expect(s.blur).toBe(1);
-		expect(normalizeTextEffect({ blur: 99 }).blur).toBe(8);
-	});
-
-	it("rejects invalid colors and keeps valid 3/6-digit hex", () => {
-		expect(normalizeTextEffect({ color: "red" }).color).toBe(
-			DEFAULT_TEXT_EFFECT.color,
-		);
-		expect(normalizeTextEffect({ color: "#12" }).color).toBe(
-			DEFAULT_TEXT_EFFECT.color,
-		);
-		expect(normalizeTextEffect({ color: "#abc" }).color).toBe("#abc");
-		expect(normalizeTextEffect({ color: "#A1B2C3" }).color).toBe("#A1B2C3");
-	});
-
-	it("migrates via normalizeSettings from a legacy card.textShadow boolean", () => {
-		const on = normalizeSettings({ card: { textShadow: true } });
-		expect(on.card.textEffect.mode).toBe("halo");
-		const off = normalizeSettings({ card: { textShadow: false } });
-		expect(off.card.textEffect.mode).toBe("none");
-	});
-
-	it("prefers the current textEffect over a stale legacy textShadow", () => {
-		const s = normalizeSettings({
-			card: { textShadow: false, textEffect: { mode: "halo" } },
-		});
-		expect(s.card.textEffect.mode).toBe("halo");
-	});
-});
-
-describe("textEffectHaloCss", () => {
-	it("returns none for the none mode", () => {
-		expect(textEffectHaloCss({ ...DEFAULT_TEXT_EFFECT, mode: "none" })).toBe(
-			"none",
-		);
-	});
-
-	it("builds three concentric zero-offset layers (no direction)", () => {
-		const css = textEffectHaloCss({
-			mode: "halo",
-			color: "#000000",
-			opacity: 40,
-			blur: 3,
-		});
-		expect(css).toBe(
-			"0 0 1px rgba(0, 0, 0, 0.4), 0 0 3px rgba(0, 0, 0, 0.32), 0 0 6px rgba(0, 0, 0, 0.2)",
-		);
-		// Every layer starts with a 0 0 offset — never a directional smear.
-		for (const layer of css.split(", 0 0")) {
-			expect(layer).not.toMatch(/^\s*\d+px \d+px/);
+describe("removed text effect (§五)", () => {
+	it("silently ignores every legacy text-effect shape", () => {
+		// Legacy boolean textShadow, structured textShadow and the full
+		// textEffect object must all normalize without error and without
+		// leaving any trace on the card settings.
+		for (const legacyCard of [
+			{ textShadow: true },
+			{ textShadow: { enabled: true, blur: 5 } },
+			{ textEffect: { mode: "halo", color: "#abc", opacity: 80, blur: 5 } },
+			{ textShadow: false, textEffect: { mode: "none" } },
+		]) {
+			const s = normalizeSettings({ card: legacyCard });
+			expect(s.card).toEqual(DEFAULT_CARD);
+			expect(s.card).not.toHaveProperty("textEffect");
+			expect(s.card).not.toHaveProperty("textShadow");
 		}
 	});
 
-	it("expands 3-digit hex colors", () => {
-		const css = textEffectHaloCss({
-			mode: "halo",
-			color: "#f00",
-			opacity: 100,
-			blur: 2,
-		});
-		expect(css).toContain("0 0 1px rgba(255, 0, 0, 1)");
-		expect(css).toContain("0 0 2px rgba(255, 0, 0, 0.8)");
-		expect(css).toContain("0 0 4px rgba(255, 0, 0, 0.5)");
+	it("keeps the final label appearance shape minimal", () => {
+		expect(Object.keys(DEFAULT_CARD).sort()).toEqual([
+			"border",
+			"opacity",
+			"paddingX",
+			"paddingY",
+			"radius",
+			"shadow",
+		]);
 	});
 });
 
@@ -268,23 +163,19 @@ describe("normalizeSettingsInPlace", () => {
 	it("preserves the identity of the settings object and nested card", () => {
 		const settings = normalizeSettings({});
 		const card = settings.card;
-		const textEffect = settings.card.textEffect;
 		settings.maxScale = 99 as never;
 		const result = normalizeSettingsInPlace(settings);
 		expect(result).toBe(settings);
 		expect(settings.card).toBe(card);
-		expect(settings.card.textEffect).toBe(textEffect);
 	});
 
 	it("clamps out-of-range values in place", () => {
 		const settings = normalizeSettings({});
 		settings.maxScale = 99;
 		settings.card.opacity = 500;
-		settings.card.textEffect.blur = -3;
 		normalizeSettingsInPlace(settings);
 		expect(settings.maxScale).toBe(2.25);
 		expect(settings.card.opacity).toBe(100);
-		expect(settings.card.textEffect.blur).toBe(1);
 	});
 
 	it("keeps closure writes visible after repeated normalization", () => {
@@ -342,7 +233,6 @@ describe("resetAppearance", () => {
 			levelIndicatorStyle: "none",
 			edgeFadeEnabled: false,
 			edgeFadeSize: 64,
-			card: { textEffect: { mode: "halo", blur: 8 } },
 		});
 		const reset = resetAppearance(custom);
 
@@ -357,38 +247,75 @@ describe("resetAppearance", () => {
 		);
 		expect(reset.edgeFadeEnabled).toBe(DEFAULT_SETTINGS.edgeFadeEnabled);
 		expect(reset.edgeFadeSize).toBe(DEFAULT_SETTINGS.edgeFadeSize);
-		expect(reset.card.textEffect).toEqual(DEFAULT_TEXT_EFFECT);
 	});
 });
 
-describe("pointerAutoScrollStrength (P1-3)", () => {
+describe("pointerAutoScrollSpeed (P1-3, renamed from strength)", () => {
 	it("defaults to 1 and clamps into 0.25–4", () => {
-		expect(normalizeSettings({}).pointerAutoScrollStrength).toBe(1);
+		expect(normalizeSettings({}).pointerAutoScrollSpeed).toBe(1);
 		expect(
-			normalizeSettings({ pointerAutoScrollStrength: 0 })
-				.pointerAutoScrollStrength,
+			normalizeSettings({ pointerAutoScrollSpeed: 0 }).pointerAutoScrollSpeed,
 		).toBe(0.25);
 		expect(
-			normalizeSettings({ pointerAutoScrollStrength: 99 })
-				.pointerAutoScrollStrength,
+			normalizeSettings({ pointerAutoScrollSpeed: 99 }).pointerAutoScrollSpeed,
 		).toBe(4);
 		expect(
-			normalizeSettings({ pointerAutoScrollStrength: 3 })
-				.pointerAutoScrollStrength,
+			normalizeSettings({ pointerAutoScrollSpeed: 3 }).pointerAutoScrollSpeed,
 		).toBe(3);
 		expect(
-			normalizeSettings({ pointerAutoScrollStrength: 1.5 })
-				.pointerAutoScrollStrength,
+			normalizeSettings({ pointerAutoScrollSpeed: 1.5 }).pointerAutoScrollSpeed,
 		).toBe(1.5);
 		expect(
-			normalizeSettings({ pointerAutoScrollStrength: "fast" })
-				.pointerAutoScrollStrength,
+			normalizeSettings({ pointerAutoScrollSpeed: "fast" })
+				.pointerAutoScrollSpeed,
 		).toBe(1);
 	});
 
+	it("migrates the legacy pointerAutoScrollStrength field (same unit)", () => {
+		const s = normalizeSettings({ pointerAutoScrollStrength: 2.5 });
+		expect(s.pointerAutoScrollSpeed).toBe(2.5);
+		expect(s).not.toHaveProperty("pointerAutoScrollStrength");
+		// An explicit new value wins over a stale legacy one.
+		expect(
+			normalizeSettings({
+				pointerAutoScrollSpeed: 0.5,
+				pointerAutoScrollStrength: 3,
+			}).pointerAutoScrollSpeed,
+		).toBe(0.5);
+		// Legacy values clamp into the shared range.
+		expect(
+			normalizeSettings({ pointerAutoScrollStrength: 99 })
+				.pointerAutoScrollSpeed,
+		).toBe(4);
+	});
+
 	it("survives resetAppearance (workflow, not appearance)", () => {
-		const custom = normalizeSettings({ pointerAutoScrollStrength: 0.5 });
-		expect(resetAppearance(custom).pointerAutoScrollStrength).toBe(0.5);
+		const custom = normalizeSettings({ pointerAutoScrollSpeed: 0.5 });
+		expect(resetAppearance(custom).pointerAutoScrollSpeed).toBe(0.5);
+	});
+});
+
+describe("pointerAutoScrollZone (§十)", () => {
+	it("defaults to 120 and clamps into 40–220", () => {
+		expect(normalizeSettings({}).pointerAutoScrollZone).toBe(120);
+		expect(
+			normalizeSettings({ pointerAutoScrollZone: 10 }).pointerAutoScrollZone,
+		).toBe(40);
+		expect(
+			normalizeSettings({ pointerAutoScrollZone: 999 }).pointerAutoScrollZone,
+		).toBe(220);
+		expect(
+			normalizeSettings({ pointerAutoScrollZone: 80 }).pointerAutoScrollZone,
+		).toBe(80);
+		expect(
+			normalizeSettings({ pointerAutoScrollZone: "big" })
+				.pointerAutoScrollZone,
+		).toBe(120);
+	});
+
+	it("survives resetAppearance (workflow, not appearance)", () => {
+		const custom = normalizeSettings({ pointerAutoScrollZone: 200 });
+		expect(resetAppearance(custom).pointerAutoScrollZone).toBe(200);
 	});
 });
 
@@ -397,19 +324,16 @@ describe("resetAppearanceInPlace (P1-6)", () => {
 		const settings = normalizeSettings({
 			markerStyle: "dot",
 			maxScale: 1.6,
-			card: { opacity: 0, textEffect: { mode: "halo", blur: 8 } },
+			card: { opacity: 0 },
 		});
 		const card = settings.card;
-		const textEffect = settings.card.textEffect;
 		const result = resetAppearanceInPlace(settings);
 		// Identity: the same objects every closure captured stay live.
 		expect(result).toBe(settings);
 		expect(settings.card).toBe(card);
-		expect(settings.card.textEffect).toBe(textEffect);
 		// Values: reset to defaults.
 		expect(settings.markerStyle).toBe(DEFAULT_SETTINGS.markerStyle);
 		expect(settings.maxScale).toBe(DEFAULT_SETTINGS.maxScale);
 		expect(settings.card).toEqual(DEFAULT_CARD);
-		expect(settings.card.textEffect).toEqual(DEFAULT_TEXT_EFFECT);
 	});
 });

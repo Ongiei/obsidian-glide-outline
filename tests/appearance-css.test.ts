@@ -148,22 +148,6 @@ describe("overflow edge fades", () => {
 	});
 });
 
-describe("text effect variables", () => {
-	it("applies the TS-built halo under its feature class only", () => {
-		expect(css).toMatch(
-			/\.glide-outline-root--text-halo[^{]*\{[^}]*text-shadow:\s*var\(--glide-text-halo/,
-		);
-		// The old directional shadow class is gone for good.
-		expect(css).not.toContain("glide-outline-root--text-shadow");
-		expect(css).not.toContain("--glide-text-shadow:");
-	});
-
-	it("has no stroke rules left (P1-2 removed the stroke mode)", () => {
-		expect(css).not.toContain("glide-outline-root--text-stroke");
-		expect(css).not.toContain("-webkit-text-stroke");
-	});
-});
-
 describe("level badge", () => {
 	it("hides the badge unless the feature class is on", () => {
 		const base = exactBlock(".glide-outline-level-badge");

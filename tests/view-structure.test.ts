@@ -73,7 +73,15 @@ describe("GlideOutlineView DOM structure (single visual card)", () => {
 		expect(buttons.length).toBe(3);
 		for (const button of buttons) {
 			expect(button.getAttribute("type")).toBe("button");
-			expect(button.getAttribute("aria-label")).toMatch(/^H\d: /);
+			// Accessible name comes from a sr-only span via aria-labelledby
+			// (aria-label is deliberately avoided — Obsidian shows it as a
+			// hover tooltip).
+			const labelId = button.getAttribute("aria-labelledby");
+			expect(labelId).toBeTruthy();
+			const a11y = labelId
+				? view.rootEl.querySelector<HTMLElement>(`#${labelId}`)
+				: null;
+			expect(a11y?.textContent).toMatch(/^H\d: /);
 		}
 	});
 
