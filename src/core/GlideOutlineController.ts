@@ -226,6 +226,17 @@ export class GlideOutlineController {
 	private jumpInEditor(item: HeadingItem, behavior: ScrollBehavior): void {
 		const editor = this.view.editor;
 		const line = Math.min(item.line, Math.max(0, editor.lineCount() - 1));
+		// Section 5/6: clicking an outline item moves the cursor to the
+		// heading line and focuses the editor. The jump lock + cursor guard
+		// are armed FIRST so the resulting selectionSet is recognized as
+		// programmatic and does not interrupt the jump.
+		this.tracker.beginEditorJump(item.key, line);
+		try {
+			editor.setCursor({ line, ch: 0 });
+			editor.focus();
+		} catch {
+			// Editor detached mid-jump — scrolling below is still safe.
+		}
 		const cm = (editor as unknown as { cm?: CmView }).cm;
 		if (cm && typeof cm.dispatch === "function" && cm.scrollDOM) {
 			try {
@@ -381,7 +392,38 @@ export class GlideOutlineController {
 		);
 		if (!match) return false;
 		match.element.scrollIntoView({ behavior, block: "start" });
+		this.focusPreviewHeading(match.element);
 		return true;
+	}
+
+	/**
+	 * Section 7: after a Reading-Mode jump the heading element receives
+	 * real DOM focus (screen readers / keyboard users get a sensible
+	 * position). Headings are not focusable by default, so a temporary
+	 * `tabindex="-1"` is added and restored on blur — the tab order is
+	 * never permanently altered. `preventScroll` keeps the smooth scroll
+	 * already in flight untouched.
+	 */
+	private focusPreviewHeading(element: HTMLElement): void {
+		const hadTabindex = element.hasAttribute("tabindex");
+		if (!hadTabindex) element.setAttribute("tabindex", "-1");
+		try {
+			element.focus({ preventScroll: true });
+		} catch {
+			// Older environments without options support — best effort.
+			try {
+				element.focus();
+			} catch {
+				/* detached element — ignore */
+			}
+		}
+		if (!hadTabindex) {
+			element.addEventListener(
+				"blur",
+				() => element.removeAttribute("tabindex"),
+				{ once: true },
+			);
+		}
 	}
 
 	private prefersReducedMotion(): boolean {
