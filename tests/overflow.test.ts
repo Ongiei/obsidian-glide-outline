@@ -69,7 +69,7 @@ describe("computeOverflowState", () => {
 });
 
 describe("computePointerAutoScrollVelocity", () => {
-	// Viewport 100–500 (height 400) → pre-scroll zone 80 px, edge zone 40 px.
+	// Viewport 100–500 (height 400) → pre-scroll zone 100 px, edge zone 50 px.
 	const BASE = {
 		pointerVelocityY: 0,
 		viewportTop: 100,
@@ -98,7 +98,7 @@ describe("computePointerAutoScrollVelocity", () => {
 	});
 
 	it("ramps speed continuously with penetration depth", () => {
-		const pre = computePointerAutoScrollVelocity({ ...BASE, pointerY: 450 });
+		const pre = computePointerAutoScrollVelocity({ ...BASE, pointerY: 430 });
 		const edge = computePointerAutoScrollVelocity({ ...BASE, pointerY: 480 });
 		const deep = computePointerAutoScrollVelocity({ ...BASE, pointerY: 495 });
 		expect(edge).toBeGreaterThan(pre);
@@ -106,17 +106,38 @@ describe("computePointerAutoScrollVelocity", () => {
 		// Quadratic curve: the pre-scroll entrance is gentle.
 		const entrance = computePointerAutoScrollVelocity({
 			...BASE,
-			pointerY: 500 - 79.9,
+			pointerY: 500 - 99.9,
 		});
 		expect(entrance).toBeLessThan(320 * 0.01);
 	});
 
 	it("keeps the pre-scroll zone below its speed share", () => {
-		// Just outside the edge zone (distance 41 px) only the pre-scroll
+		// Just outside the edge zone (distance 51 px) only the pre-scroll
 		// ramp contributes → strictly below 35% of maxSpeed.
-		const v = computePointerAutoScrollVelocity({ ...BASE, pointerY: 459 });
+		const v = computePointerAutoScrollVelocity({ ...BASE, pointerY: 449 });
 		expect(v).toBeGreaterThan(0);
 		expect(v).toBeLessThan(320 * 0.35);
+	});
+
+	it("uses the enlarged sensing zones (section 3)", () => {
+		// Height 400: pre-scroll = 25% → 100 px, edge = 12.5% → 50 px.
+		// 405 (distance 95) is INSIDE the new pre-scroll zone but was in
+		// the old dead zone (old zone was 80 px) — must now scroll.
+		expect(
+			computePointerAutoScrollVelocity({ ...BASE, pointerY: 405 }),
+		).toBeGreaterThan(0);
+		// Symmetric at the top.
+		expect(
+			computePointerAutoScrollVelocity({ ...BASE, pointerY: 195 }),
+		).toBeLessThan(0);
+		// 445 (distance 55) sits between the old edge boundary (40) and the
+		// new one (50): still pre-scroll only, below the 35% share.
+		const between = computePointerAutoScrollVelocity({
+			...BASE,
+			pointerY: 445,
+		});
+		expect(between).toBeGreaterThan(0);
+		expect(between).toBeLessThan(320 * 0.35);
 	});
 
 	it("hits max speed exactly at the physical edges", () => {
@@ -224,8 +245,8 @@ describe("computePointerAutoScrollVelocity", () => {
 	});
 
 	it("keeps a calm center in a short viewport (no zone tug-of-war)", () => {
-		// Height 60 → pre-scroll clamps to 24 px, edge to 12 px; the exact
-		// middle stays 0.
+		// Height 60 → the half-height clamp caps pre-scroll at 30 px and
+		// the edge zone at its 16 px minimum; the exact middle stays 0.
 		const short = { ...BASE, viewportTop: 100, viewportBottom: 160 };
 		expect(computePointerAutoScrollVelocity({ ...short, pointerY: 130 })).toBe(0);
 		expect(

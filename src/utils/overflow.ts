@@ -54,9 +54,9 @@ export function computeOverflowState(
    Zone model (fractions of the viewport height, px-clamped for sanity):
 
      ┌──────────────┐  ─ viewportTop
-     │  edge zone   │   strongest ramp        ~10% (12–56 px)
+     │  edge zone   │   strongest ramp        ~12.5% (16–72 px)
      ├──────────────┤
-     │  pre-scroll  │   gentle ramp           ~20% (24–120 px)
+     │  pre-scroll  │   gentle ramp           ~25% (32–160 px)
      ├──────────────┤
      │              │
      │  dead zone   │   base speed 0
@@ -75,13 +75,13 @@ export function computeOverflowState(
    -------------------------------------------------------------------------- */
 
 /** Pre-scroll zone: fraction of viewport height and px clamps. */
-export const PRE_SCROLL_FRACTION = 0.2;
-export const PRE_SCROLL_MIN_PX = 24;
-export const PRE_SCROLL_MAX_PX = 120;
+export const PRE_SCROLL_FRACTION = 0.25;
+export const PRE_SCROLL_MIN_PX = 32;
+export const PRE_SCROLL_MAX_PX = 160;
 /** Edge zone (stronger ramp): fraction of viewport height and px clamps. */
-export const EDGE_FRACTION = 0.1;
-export const EDGE_MIN_PX = 12;
-export const EDGE_MAX_PX = 56;
+export const EDGE_FRACTION = 0.125;
+export const EDGE_MIN_PX = 16;
+export const EDGE_MAX_PX = 72;
 /** Share of maxSpeed reachable in the pre-scroll zone alone. */
 export const PRE_SCROLL_SPEED_SHARE = 0.35;
 /** px/s of scroll per px/s of pointer velocity (before depth scaling). */
