@@ -35,7 +35,10 @@ export interface PerfCounters {
 	/** Envelope rebuilds and the rows they touched. */
 	envelopeRebuildCount: number;
 	envelopeRowTotal: number;
+	/** Auto-scroll session lifecycle (§十八). */
 	autoScrollFrameCount: number;
+	autoScrollStartCount: number;
+	autoScrollStopCount: number;
 	longTaskCount: number;
 	longTaskTotalMs: number;
 }
@@ -55,9 +58,20 @@ function zeroCounters(): PerfCounters {
 		envelopeRebuildCount: 0,
 		envelopeRowTotal: 0,
 		autoScrollFrameCount: 0,
+		autoScrollStartCount: 0,
+		autoScrollStopCount: 0,
 		longTaskCount: 0,
 		longTaskTotalMs: 0,
 	};
+}
+
+/** Config echo captured with the auto-scroll samples (§十八). */
+export interface AutoScrollConfigEcho {
+	configuredSpeed: number;
+	configuredTriggerArea: number;
+	computedPreZone: number;
+	computedStrongZone: number;
+	hysteresisPx: number;
 }
 
 export interface PerfReport {
@@ -83,6 +97,15 @@ export interface PerfReport {
 		avgCssWritesPerFrame: number;
 		avgRectReadsPerFrame: number;
 	};
+	/** §十八: auto-scroll session detail + config echo. */
+	autoScroll: {
+		stopReasons: Record<string, number>;
+		avgTargetVelocity: number;
+		avgAppliedVelocity: number;
+		config: AutoScrollConfigEcho | null;
+	};
+	/** §十五: why full geometry rebuilds ran. */
+	geometryRebuildReasons: Record<string, number>;
 }
 
 interface LongTaskEntryLike {
@@ -106,6 +129,13 @@ export class PerfCapture {
 	private maxSuspendedGapMs = 0;
 	/** Removes visibilitychange/blur/focus listeners added on start. */
 	private removeSuspensionListeners: (() => void) | null = null;
+	/** §十八: stop-reason / rebuild-reason histograms + velocity sums. */
+	private stopReasons: Record<string, number> = {};
+	private geometryRebuildReasons: Record<string, number> = {};
+	private autoScrollTargetSum = 0;
+	private autoScrollAppliedSum = 0;
+	private autoScrollSampleCount = 0;
+	private autoScrollConfig: AutoScrollConfigEcho | null = null;
 
 	/** Begin a capture; resets all previous data. Idempotent. */
 	start(win: Window & typeof globalThis): void {
@@ -117,6 +147,12 @@ export class PerfCapture {
 		this.suspendedGapCount = 0;
 		this.suspendedGapTotalMs = 0;
 		this.maxSuspendedGapMs = 0;
+		this.stopReasons = {};
+		this.geometryRebuildReasons = {};
+		this.autoScrollTargetSum = 0;
+		this.autoScrollAppliedSum = 0;
+		this.autoScrollSampleCount = 0;
+		this.autoScrollConfig = null;
 		this.startedAt = win.performance.now();
 		this.active = true;
 		this.observeLongTasks(win);
@@ -187,6 +223,33 @@ export class PerfCapture {
 		if (!this.active) return;
 		this.counters.envelopeRebuildCount++;
 		this.counters.envelopeRowTotal += rows;
+	}
+
+	/** §十八: histogram of why auto-scroll sessions ended. */
+	countStopReason(reason: string): void {
+		if (!this.active) return;
+		this.stopReasons[reason] = (this.stopReasons[reason] ?? 0) + 1;
+	}
+
+	/** §十五: histogram of why full geometry rebuilds ran. */
+	countRebuildReason(reason: string): void {
+		if (!this.active) return;
+		this.geometryRebuildReasons[reason] =
+			(this.geometryRebuildReasons[reason] ?? 0) + 1;
+	}
+
+	/** §十八: per-frame target vs applied velocity (magnitudes, px/s). */
+	addAutoScrollSample(targetVelocity: number, appliedVelocity: number): void {
+		if (!this.active) return;
+		this.autoScrollTargetSum += Math.abs(targetVelocity);
+		this.autoScrollAppliedSum += Math.abs(appliedVelocity);
+		this.autoScrollSampleCount++;
+	}
+
+	/** §十八: echo the effective auto-scroll configuration (last wins). */
+	setAutoScrollConfig(config: AutoScrollConfigEcho): void {
+		if (!this.active) return;
+		this.autoScrollConfig = config;
 	}
 
 	/**
@@ -290,6 +353,21 @@ export class PerfCapture {
 					(c.rowRectReadCount + c.markerCardRectReadCount) / frameDiv,
 				),
 			},
+			autoScroll: {
+				stopReasons: { ...this.stopReasons },
+				avgTargetVelocity: round2(
+					this.autoScrollSampleCount > 0
+						? this.autoScrollTargetSum / this.autoScrollSampleCount
+						: 0,
+				),
+				avgAppliedVelocity: round2(
+					this.autoScrollSampleCount > 0
+						? this.autoScrollAppliedSum / this.autoScrollSampleCount
+						: 0,
+				),
+				config: this.autoScrollConfig ? { ...this.autoScrollConfig } : null,
+			},
+			geometryRebuildReasons: { ...this.geometryRebuildReasons },
 		};
 	}
 }
