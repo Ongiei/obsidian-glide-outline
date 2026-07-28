@@ -3,7 +3,7 @@ import type { Editor, MarkdownView, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { Diagnostics } from "./core/Diagnostics";
 import { PerfCapture } from "./core/PerfCapture";
-import { resolveMotionState } from "./utils/motion";
+import { FULL_MOTION_STATE } from "./utils/motion";
 import {
 	DEFAULT_SETTINGS,
 	GlideOutlineSettingTab,
@@ -249,8 +249,7 @@ export default class GlideOutlinePlugin extends Plugin {
 			platform: navigator.platform,
 			userAgent: navigator.userAgent,
 			systemPrefersReducedMotion: systemReduced,
-			motionMode: s.motionMode,
-			resolvedMotion: resolveMotionState(s.motionMode, systemReduced),
+			resolvedMotion: FULL_MOTION_STATE,
 			settings: {
 				enabled: s.enabled,
 				position: s.position,

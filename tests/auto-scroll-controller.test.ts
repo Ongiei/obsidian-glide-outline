@@ -209,15 +209,6 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		expect(view.viewportEl.scrollTop).toBe(before);
 	});
 
-	it("respects reduced motion (motionMode reduced)", () => {
-		settings.motionMode = "reduced";
-		pointer("pointerenter", 495);
-		pointer("pointermove", 495);
-		const before = view.viewportEl.scrollTop;
-		runScrollFrames();
-		expect(view.viewportEl.scrollTop).toBe(before);
-	});
-
 	it("stops at the dead end (bottom of the list)", () => {
 		(view.viewportEl as unknown as { scrollTop: number }).scrollTop = 800; // 1200 - 400
 		view.updateOverflowState();

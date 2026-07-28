@@ -1,7 +1,6 @@
 import { computeCollisionFreeMagnification } from "../utils/geometry";
 import { computePointerAutoScrollVelocity } from "../utils/overflow";
 import { DisposableStore } from "../utils/disposable";
-import { resolveMotionState } from "../utils/motion";
 import {
 	bridgeRectFor,
 	emptyRect,
@@ -162,7 +161,6 @@ export class MagnificationController {
 	private collapseTimer = 0;
 	private lastPointerX = Number.NaN;
 	private lastPointerY = Number.NaN;
-	private reducedMotionQuery: MediaQueryList;
 	// --- Pointer Envelope (geometric hover maintenance) ----------------
 	/** Union of rail hit zone + active headings' marker/card/bridge rects. */
 	private envelope: PointerEnvelope = { railRect: emptyRect(), items: [] };
@@ -217,7 +215,6 @@ export class MagnificationController {
 		const win = doc.defaultView as (Window & typeof globalThis) | null;
 		if (!win) throw new Error("glide-outline: detached document");
 		this.win = win;
-		this.reducedMotionQuery = win.matchMedia("(prefers-reduced-motion: reduce)");
 
 		const { hitZoneEl, listEl, rootEl, viewportEl } = view;
 
@@ -720,21 +717,15 @@ export class MagnificationController {
 			this.pendingAnchorTarget = null;
 		}
 
-		// Single resolved motion policy — shared with the view (CSS) and the
-		// controller (jump behaviour).
-		const motion = resolveMotionState(
-			settings.motionMode,
-			this.reducedMotionQuery.matches,
-		);
-		const reduced = motion.reduced;
+		// Motion policy is always FULL — the user-facing setting was
+		// removed and prefers-reduced-motion is deliberately not honoured.
 
 		// Time-based interpolation step (frame-rate independent).
 		const dtMs = Number.isFinite(this.lastMotionTime)
 			? Math.min(MAX_MOTION_DT_MS, Math.max(0, now - this.lastMotionTime))
 			: DEFAULT_MOTION_DT_MS;
 		this.lastMotionTime = now;
-		// Reduced motion: displayed follows target instantly (section 11).
-		const alpha = reduced ? 1 : motionAlpha(dtMs);
+		const alpha = motionAlpha(dtMs);
 
 		const range = this.activeRange;
 		const start = range.start;
@@ -761,7 +752,7 @@ export class MagnificationController {
 				settings.maxScale,
 				settings.radius,
 				settings.cardGap,
-				reduced,
+				false,
 				{
 					currentShifts: activeShifts,
 					preferredAnchorIndex: anchorInSlice,
@@ -836,7 +827,7 @@ export class MagnificationController {
 		// Pointer edge auto-scroll shares this frame. Scrolling shifts the
 		// cached geometry by delta (scroll handler), so the next frame sees
 		// correct centers without any rect reads.
-		this.stepAutoScroll(settings, reduced);
+		this.stepAutoScroll(settings);
 		this.endFrame();
 	};
 
@@ -900,10 +891,7 @@ export class MagnificationController {
 	/**
 	 * One pointer-follow auto-scroll step inside the coordinated RAF loop.
 	 */
-	private stepAutoScroll(
-		settings: GlideOutlineSettings,
-		reduced: boolean,
-	): void {
+	private stepAutoScroll(settings: GlideOutlineSettings): void {
 		// Focus-only expansion never auto-scrolls; a held pointer locks the
 		// list so the click target cannot slide away mid-click.
 		if (!this.pointerExpanded || !this.pointerInside || this.pressed) {
@@ -936,7 +924,7 @@ export class MagnificationController {
 			canScrollUp: overflow.canScrollUp,
 			canScrollDown: overflow.canScrollDown,
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
-			reducedMotion: reduced,
+			reducedMotion: false,
 		});
 
 		if (target === 0 && this.appliedVelocity === 0) {

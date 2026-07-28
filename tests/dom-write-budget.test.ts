@@ -195,18 +195,6 @@ describe("MagnificationController DOM write budget (sections 10/14/15)", () => {
 		expect(final).toBeCloseTo(settings.maxScale, 2);
 	});
 
-	it("reduced motion applies targets instantly (no interpolation tail)", () => {
-		settings.motionMode = "reduced";
-		pointer("pointerenter", 200);
-		pointer("pointermove", 200);
-		vi.advanceTimersByTime(16);
-		flushFrame();
-		// Reduced motion: solver outputs identity — nothing is written and
-		// nothing converges over time.
-		expect(rows[3].style.getPropertyValue("--glide-scale")).toBe("");
-		expect(rafQueue.length).toBe(0); // no interpolation tail scheduled
-	});
-
 	it("collapse resets every written row and drops all GPU layer hints", () => {
 		pointer("pointerenter", 200);
 		pointer("pointermove", 200);

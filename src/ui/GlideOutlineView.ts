@@ -7,7 +7,6 @@ import {
 } from "../utils/layout";
 import { computeOverflowState } from "../utils/overflow";
 import type { OverflowState } from "../utils/overflow";
-import { resolveMotionState } from "../utils/motion";
 import { bridgeRectFor } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
 
@@ -256,14 +255,6 @@ export class GlideOutlineView {
 		return this.rootEl.classList.contains("is-expanded");
 	}
 
-	/** Current OS `prefers-reduced-motion` report for this outline's window. */
-	private systemReducedMotion(): boolean {
-		const win = this.doc.defaultView;
-		return (
-			win?.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false
-		);
-	}
-
 	/** Re-apply CSS variables and position classes after a settings change. */
 	applySettings(): void {
 		const s = this.getSettings();
@@ -273,16 +264,12 @@ export class GlideOutlineView {
 		root.classList.toggle("glide-outline-root--left", s.position === "left");
 		root.classList.toggle("glide-outline-root--marker-dot", s.markerStyle === "dot");
 
-		// Motion behaviour: a single resolved policy shared with the
-		// magnification controller and the editor jump. "full" always
-		// enables motion (overriding an OS reduced-motion report — the
-		// Windows fix); "reduced" or "system"+"reduced" disable transitions
-		// via the --motion-reduced root class; "system"+"full" keeps the
-		// base CSS transitions. CSS owns the actual transition values, so
-		// no inline style is needed here.
-		const motion = resolveMotionState(s.motionMode, this.systemReducedMotion());
-		root.classList.toggle("glide-outline-root--motion-full", s.motionMode === "full");
-		root.classList.toggle("glide-outline-root--motion-reduced", motion.reduced);
+		// Motion behaviour: always full. The --motion-full root class keeps
+		// CSS transitions alive even under an OS prefers-reduced-motion
+		// report (the media-query block in styles.css only bites while the
+		// root is NOT --motion-full), and --motion-reduced is never applied.
+		root.classList.add("glide-outline-root--motion-full");
+		root.classList.remove("glide-outline-root--motion-reduced");
 
 		root.style.setProperty("--glide-rail-width", `${RAIL_WIDTH}px`);
 		root.style.setProperty("--glide-label-gap", `${LABEL_GAP}px`);

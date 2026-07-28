@@ -251,23 +251,16 @@ describe("pointer targeting surfaces", () => {
 	});
 });
 
-describe("motion mode root classes", () => {
-	it("disables transitions under --motion-reduced", () => {
-		expect(css).toMatch(
-			/\.glide-outline-root--motion-reduced[^{]*\{[^}]*transition:\s*none/,
-		);
+describe("motion is always full", () => {
+	it("has no reduced-motion rule left in the stylesheet", () => {
+		// Motion is fixed at full: the runtime never applies a
+		// --motion-reduced class, so no rule may keep it alive.
+		expect(css).not.toMatch(/glide-outline-root--motion-reduced/);
 	});
 
-	it("does not blanket-disable transitions via an unconditional reduced-motion media query", () => {
-		// Full motion must be able to OVERRIDE the OS setting (the Windows
-		// "Animation effects" fix), so the stylesheet may no longer contain
-		// an unconditional prefers-reduced-motion block that kills
-		// transitions regardless of the plugin's motion mode.
-		const mediaBlocks = css.match(
-			/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?\n\}/g,
-		);
-		for (const block of mediaBlocks ?? []) {
-			expect(block).toMatch(/--motion|glide-outline-root--motion/);
-		}
+	it("never lets prefers-reduced-motion disable plugin transitions", () => {
+		// The OS "Animation effects" toggle (Windows) maps to this media
+		// query — the plugin's animations must stay on regardless.
+		expect(css).not.toMatch(/@media\s*\(prefers-reduced-motion/);
 	});
 });

@@ -593,37 +593,14 @@
 }
 
 /* --------------------------------------------------------------------------
-   Motion behaviour (section 4/5). The RESOLVED motion state is written by
-   GlideOutlineView.applySettings as a root class:
-     --motion-reduced  → mode "reduced", or mode "system" while the OS
-                         reports prefers-reduced-motion: transitions off.
-     --motion-full     → mode "full": motion ALWAYS on, even when the OS
-                         asks for reduced (the Windows "Animation effects"
-                         toggle maps to that media query — this class is
-                         what lets Full motion override it).
-   JS also stops writing --glide-scale / --glide-shift-y under reduced,
-   so no !important is needed anywhere.
-
-   The media query below is deliberately NOT unconditional: it only
-   applies while the root is not --motion-full, covering live OS toggles
-   between two applySettings passes in "system" mode without ever locking
-   a "full" user out of motion.
+   Motion behaviour. The plugin always runs with full motion:
+   GlideOutlineView.applySettings unconditionally applies
+   `glide-outline-root--motion-full`, and there is deliberately NO
+   prefers-reduced-motion media query here — the OS "Animation effects"
+   toggle (Windows) maps to that media query and must never switch the
+   plugin's animations off. The class itself is kept as the semantic
+   anchor so themes/snippets can still target it.
    -------------------------------------------------------------------------- */
-.glide-outline-root--motion-reduced .glide-outline-marker::before,
-.glide-outline-root--motion-reduced .glide-outline-motion,
-.glide-outline-root--motion-reduced .glide-outline-reveal,
-.glide-outline-root--motion-reduced .glide-outline-card {
-	transition: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-	.glide-outline-root:not(.glide-outline-root--motion-full) .glide-outline-marker::before,
-	.glide-outline-root:not(.glide-outline-root--motion-full) .glide-outline-motion,
-	.glide-outline-root:not(.glide-outline-root--motion-full) .glide-outline-reveal,
-	.glide-outline-root:not(.glide-outline-root--motion-full) .glide-outline-card {
-		transition: none;
-	}
-}
 
 /* --------------------------------------------------------------------------
    Settings tab (P1-5): four-section tabbed page. Pure Obsidian theme

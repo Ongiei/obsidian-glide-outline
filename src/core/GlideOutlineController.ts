@@ -11,7 +11,7 @@ import { GlideOutlineView } from "../ui/GlideOutlineView";
 import { MagnificationController } from "../ui/MagnificationController";
 import { sameHeadingKeys } from "../utils/headingIdentity";
 import { matchPreviewHeadings } from "../utils/previewHeadings";
-import { resolveMotionState } from "../utils/motion";
+import { FULL_MOTION_STATE } from "../utils/motion";
 import { ScrollCorrector } from "./ScrollCorrector";
 import type { Diagnostics } from "./Diagnostics";
 import type { PerfCapture } from "./PerfCapture";
@@ -151,16 +151,13 @@ export class GlideOutlineController {
 
 	/** Live snapshot for the "Copy Glide Outline diagnostics" command. */
 	getDiagnosticsSnapshot(): Record<string, unknown> {
-		const settings = this.getSettings();
-		const systemReduced = this.prefersReducedMotion();
 		return {
 			viewMode: this.view.getMode(),
 			filePath: this.view.file?.path ?? null,
 			headingCount: this.items.length,
 			visibleHeadingCount: this.outlineView.getItems().length,
-			systemPrefersReducedMotion: systemReduced,
-			motionMode: settings.motionMode,
-			resolvedMotion: resolveMotionState(settings.motionMode, systemReduced),
+			systemPrefersReducedMotion: this.prefersReducedMotion(),
+			resolvedMotion: FULL_MOTION_STATE,
 			rootClasses: this.outlineView.getRootClassList(),
 			outlineViewport: this.outlineView.getViewportMetrics(),
 			overflow: this.outlineView.getOverflowState(),
@@ -196,24 +193,22 @@ export class GlideOutlineController {
 
 	private jumpTo(item: HeadingItem): void {
 		if (this.disposed) return;
-		const settings = this.getSettings();
-		// Single resolved motion policy — the same resolver the view (CSS
-		// classes) and the magnification controller use, so "full" motion
-		// really does override an OS reduced-motion report (Windows fix).
-		const motion = resolveMotionState(
-			settings.motionMode,
-			this.prefersReducedMotion(),
-		);
-		const behavior: ScrollBehavior = motion.smoothJump ? "smooth" : "auto";
-
-		// P0-2/P0-3: lock the target active for the duration of the scroll
-		// so intermediate headings never flicker active mid-flight.
-		this.tracker.beginJump(item.key);
+		// Motion is always full — smooth jumps everywhere.
+		const behavior: ScrollBehavior = FULL_MOTION_STATE.smoothJump
+			? "smooth"
+			: "auto";
 
 		if (this.view.getMode() === "preview") {
+			// P0-2/P0-3: lock the target active for the duration of the
+			// scroll so intermediate headings never flicker active.
+			this.tracker.beginJump(item.key);
 			this.jumpInPreview(item, behavior);
 			return;
 		}
+		// Editor modes: the jump moves the cursor too, so the tracker arms a
+		// one-shot cursor guard (the programmatic selectionSet must not be
+		// mistaken for a user cursor move). Armed inside jumpInEditor where
+		// the clamped target line is known.
 		this.jumpInEditor(item, behavior);
 	}
 
