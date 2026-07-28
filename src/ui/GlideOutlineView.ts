@@ -1,6 +1,5 @@
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
-import { textEffectHaloCss } from "../settings";
 import {
 	computeResponsiveWidth,
 	computeVerticalSafeSpace,
@@ -18,6 +17,9 @@ function rectFrom(r: { left: number; top: number; right: number; bottom: number 
 function zeroRect(): Rect {
 	return { left: 0, top: 0, right: 0, bottom: 0 };
 }
+
+/** Monotonic id source for sr-only label elements (unique per window). */
+let a11yLabelSeq = 0;
 
 export interface GlideOutlineViewHandlers {
 	onJump(item: HeadingItem): void;
@@ -52,6 +54,13 @@ export interface ItemRecord {
 	cardEl: HTMLElement;
 	badgeEl: HTMLElement;
 	labelEl: HTMLElement;
+	/**
+	 * Screen-reader-only accessible name ("H2: Section title"). The
+	 * button points at it via `aria-labelledby` instead of `aria-label`
+	 * — Obsidian renders `aria-label` as a hover tooltip, which fought
+	 * the magnified card visually (§ tooltip removal).
+	 */
+	a11yLabelEl: HTMLElement;
 	/** Unscaled card height from the last measurement pass. */
 	baseCardHeight: number;
 	/** What the label currently displays (text or rendered source). */
@@ -290,15 +299,6 @@ export class GlideOutlineView {
 		root.style.setProperty("--glide-card-padding-y", `${card.paddingY}px`);
 		root.classList.toggle("glide-outline-root--card-border", card.border);
 		root.classList.toggle("glide-outline-root--card-shadow", card.shadow);
-		// Text effect: the CSS value is built in TS. Halo is a symmetric
-		// multi-layer glow — never a directional drop shadow. The stroke
-		// mode was removed (P1-2); persisted "stroke" normalizes to "none".
-		const effect = card.textEffect;
-		root.classList.toggle(
-			"glide-outline-root--text-halo",
-			effect.mode === "halo",
-		);
-		root.style.setProperty("--glide-text-halo", textEffectHaloCss(effect));
 		root.classList.toggle(
 			"glide-outline-root--pure-text",
 			card.opacity === 0 && !card.border && !card.shadow,
@@ -571,12 +571,23 @@ export class GlideOutlineView {
 		const label = this.doc.createElement("span");
 		label.className = "glide-outline-label";
 
+		// Visually hidden accessible name. Keeping it OUTSIDE the visual
+		// card (direct child of the button) means clip/transform on the
+		// card never affects it, and `aria-labelledby` gives keyboard and
+		// screen-reader users the same "H2: Title" announcement the old
+		// `aria-label` did — without Obsidian's hover tooltip.
+		const a11yLabel = this.doc.createElement("span");
+		a11yLabel.className = "glide-outline-a11y-label";
+		a11yLabel.id = `glide-outline-a11y-${a11yLabelSeq++}`;
+		button.setAttribute("aria-labelledby", a11yLabel.id);
+
 		card.appendChild(badge);
 		card.appendChild(label);
 		reveal.appendChild(card);
 		motion.appendChild(marker);
 		motion.appendChild(reveal);
 		button.appendChild(motion);
+		button.appendChild(a11yLabel);
 		row.appendChild(button);
 
 		button.addEventListener("click", (event) => {
@@ -601,6 +612,7 @@ export class GlideOutlineView {
 			cardEl: card,
 			badgeEl: badge,
 			labelEl: label,
+			a11yLabelEl: a11yLabel,
 			baseCardHeight: 0,
 			renderedContent: "",
 			renderedRich: false,
@@ -616,7 +628,13 @@ export class GlideOutlineView {
 		buttonEl.dataset.key = item.key;
 		record.rowEl.dataset.level = String(item.level);
 		record.rowEl.dataset.key = item.key;
-		buttonEl.setAttribute("aria-label", `H${item.level}: ${item.text}`);
+		// Accessible name lives in a sr-only span (aria-labelledby), NOT
+		// in `aria-label`: Obsidian shows aria-label as a hover tooltip,
+		// which duplicated the already-magnified card text.
+		const a11yText = `H${item.level}: ${item.text}`;
+		if (record.a11yLabelEl.textContent !== a11yText) {
+			record.a11yLabelEl.textContent = a11yText;
+		}
 		// Hierarchy staircase indent — static per level, so it lives on the
 		// button (not inside the reveal transform, which animates).
 		buttonEl.style.setProperty(

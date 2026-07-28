@@ -76,11 +76,13 @@ Settings are grouped into **General**, **Marker**, **Motion**, **Typography**, *
 | Background opacity | 78 % | Label card background; 0 turns cards into pure text. |
 | Border / Shadow | off | Optional card chrome. |
 | Level badge | on | H1–H6 badge on the rail-facing edge of each card. |
-| Text effect | none | `halo` (symmetric multi-layer glow) or `stroke` (0.5 px hairline) for readability on busy backgrounds — never a directional drop shadow. |
 | Corner radius | 4 px | Card corner rounding. |
 | Horizontal / vertical padding | 7 / 1 px | Card padding. |
 | Render Markdown in labels | off | Show inline bold/code/links in labels. |
 | Show heading levels | H1–H6 | Filter which levels appear in the rail. |
+| Pointer edge auto-scroll | on | Scroll the list when the pointer dwells near a list edge. |
+| Auto-scroll speed | 1 | Speed multiplier for pointer edge auto-scroll. |
+| Auto-scroll trigger area | 120 px | Height of the edge zone that starts auto-scroll. |
 
 Slider changes apply instantly but are saved to disk with a short debounce, so dragging never hammers the settings file.
 

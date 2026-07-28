@@ -265,10 +265,16 @@
 	height: 2px;
 	width: var(--glide-line-size, 12px);
 	border-radius: 2px;
-	background-color: var(--glide-level-color, var(--text-faint));
-	transition:
-		background-color 160ms ease,
-		opacity 160ms ease;
+	/* Marker color stability (§7): inactive markers are a FIXED quiet
+	   color at FULL opacity, expanded or collapsed. They previously used
+	   the per-level color ramp plus an `is-expanded` opacity drop to
+	   0.35, which made every line/dot visibly jump the moment the rail
+	   expanded. Depth stays encoded in line length / dot size; the label
+	   and badge carry the color ramp. Exactly two marker states remain:
+	   inactive = --text-faint, active/focus = --interactive-accent. */
+	background-color: var(--text-faint);
+	opacity: 1;
+	transition: background-color 160ms ease;
 }
 
 .glide-outline-root--right .glide-outline-marker::before {
@@ -336,10 +342,6 @@
    an absolutely positioned pseudo-element — layout size is unchanged. */
 .glide-outline-root--marker-dot .glide-outline-item.is-active .glide-outline-marker::before {
 	scale: 1.3;
-}
-
-.glide-outline-root.is-expanded .glide-outline-marker::before {
-	opacity: 0.35;
 }
 
 /* --------------------------------------------------------------------------
@@ -454,24 +456,6 @@
 	box-shadow: var(--shadow-s);
 }
 
-/* Text effect — halo: a symmetric multi-layer glow built in TypeScript
-   (three zero-offset layers, tapering alpha). Deliberately NOT a
-   directional drop shadow: `0 1px …` smudged the bottom edge of bold CJK
-   glyphs. Applies per label; the value is "none" unless mode = halo. */
-.glide-outline-root--text-halo .glide-outline-label {
-	text-shadow: var(--glide-text-halo, none);
-}
-
-/* MarkdownRenderer output (code, links, bold…) must keep the halo even
-   when theme rules would reset it on those elements. */
-.glide-outline-root--text-halo .glide-outline-label code,
-.glide-outline-root--text-halo .glide-outline-label a,
-.glide-outline-root--text-halo .glide-outline-label strong,
-.glide-outline-root--text-halo .glide-outline-label em,
-.glide-outline-root--text-halo .glide-outline-label mark {
-	text-shadow: inherit;
-}
-
 /* Pure text mode: opacity 0 + no border + no shadow → the card element
    stays (it remains the scale container) but paints nothing. */
 .glide-outline-root--pure-text .glide-outline-card {
@@ -503,6 +487,26 @@
 .glide-outline-label img,
 .glide-outline-label br {
 	display: none;
+}
+
+/* --------------------------------------------------------------------------
+   Screen-reader-only accessible name (§ tooltip removal). Each item
+   button points at one of these via `aria-labelledby` instead of
+   `aria-label`, because Obsidian surfaces `aria-label` as a hover
+   tooltip. Standard sr-only recipe: 1×1 px, clipped, out of flow,
+   pointer-transparent — announced by AT, never painted, never a target.
+   -------------------------------------------------------------------------- */
+.glide-outline-a11y-label {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+	border: 0;
+	pointer-events: none;
 }
 
 /* --------------------------------------------------------------------------
