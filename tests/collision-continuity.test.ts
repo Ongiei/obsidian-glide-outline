@@ -108,7 +108,12 @@ describe("Collision continuity: no visible overlap across pointer sweep (§三)"
 		return { top: center - h / 2, bottom: center + h / 2 };
 	}
 
-	/** Assert no visible adjacent pair overlaps beyond the allowed gap. */
+	/** Assert no visible adjacent pair overlaps beyond the allowed gap.
+	 * §六.1 contract: VISIBLE pairs keep the configured cardGap (strict,
+	 * within tolerance); OFFSCREEN active pairs may relax their gap down
+	 * to 0 — the boundary buffer compresses offscreen clearance to absorb
+	 * the residual push locally instead of propagating it — so they only
+	 * need to stay non-overlapping (gap ≥ −tolerance). */
 	function assertNoOverlap(tolerance = 1): void {
 		for (let i = 0; i + 1 < N; i++) {
 			const a = visualBox(i);
@@ -135,7 +140,10 @@ describe("Collision continuity: no visible overlap across pointer sweep (§三)"
 				baseRects[i + 1].top < viewportBottom &&
 				baseRects[i + 1].top + baseRects[i + 1].height > viewportTop;
 			if (!aActive && !bActive && !aVisible && !bVisible) continue;
-			expect(a.bottom + cardGap).toBeLessThanOrEqual(b.top + tolerance);
+			// Visible pairs keep cardGap; offscreen active pairs only need
+			// to stay non-overlapping (gap may relax to 0 per §六.1).
+			const floor = aVisible || bVisible ? cardGap : 0;
+			expect(a.bottom + floor).toBeLessThanOrEqual(b.top + tolerance);
 		}
 	}
 

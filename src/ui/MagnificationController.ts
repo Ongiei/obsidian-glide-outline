@@ -100,28 +100,19 @@ export const AUTO_SCROLL_ACCEL = 1400;
 export const COLLISION_GUARD_ROWS = 2;
 /** §三/§十四: allowed adjacent overlap slack, px (rounding tolerance). */
 export const OVERLAP_TOLERANCE_PX = 1;
-/** §四: per-row shrink of the residual boundary shift while tapering it
- * to 0 across off-screen rows. One whole CSS pixel per pair: the chain
- * is written in LOCKSTEP with the boundary row's quantized shift (see
- * taperBoundary), so each pair closes by exactly this amount — equal to
- * OVERLAP_TOLERANCE_PX with zero rounding noise on top. */
-export const COLLISION_TAPER_STEP_PX = 1;
-/** §四 handoff apron: the first rows of the taper chain use a HALF-pixel
- * step. When the collision slice grows (pointer move / scroll), it
- * absorbs the nearest chain rows, whose pair closure becomes the START
- * point of the solver interpolation; raw closure then shrinks toward the
- * headroom target, but independent per-row DPR rounding adds up to ±1px
- * of written noise on top (§三 empirically: 1.113px on the after-scroll
- * handoff frame with a full-pixel chain). Halving the initial closure
- * keeps written transient closure within tolerance. Only the near rows
- * need this — far chain rows never hand off while far — so the apron is
- * bounded and the 1px step beyond it keeps the chain short (§九/§十). */
+/** §四/§六 handoff apron: when a layout has NO offscreen gap to relax
+ * (cardGap=0 → baseGap=0), the buffer collapses to the 1px tolerance
+ * taper. The first rows then use a HALF-pixel step so that when the
+ * collision slice later absorbs them, the inherited pair closure (plus
+ * DPR rounding noise) stays within tolerance (§三: 1.113px overshoot on
+ * the after-scroll handoff with a full-pixel step). Only the near rows
+ * need this; far rows never hand off while far. */
 export const COLLISION_TAPER_APRON_ROWS = 8;
 export const COLLISION_TAPER_APRON_STEP_PX = 0.5;
-/** §四: hard cap on taper rows per side (write-budget guard). The taper
- * normally stops on its own once the boundary shift decays to 0; the cap
- * bounds pathological shifts so rows far outside the viewport stay at
- * identity (never written, §九/§十 budget). */
+/** §四/§六: hard cap on taper rows per side (write-budget guard). The
+ * buffer normally stops on its own once the boundary shift is absorbed
+ * by offscreen gap relaxation; the cap bounds pathological shifts so
+ * rows far outside the viewport stay at identity (never written). */
 export const COLLISION_TAPER_MAX_ROWS = 160;
 
 /** Horizontal / vertical slack (px) added to each heading's bridge rect so
@@ -1131,37 +1122,35 @@ export class MagnificationController {
 					activeLayout.length,
 				);
 			}
-			// §四/§十 boundary taper — LOCKSTEP SNAP chain. The solved
-			// boundary row carries a residual push; identity rows just
-			// outside would overlap it. The chain walks that push to 0
-			// across off-screen rows, one whole CSS pixel per row, but
-			// unlike solver rows the chain does NOT interpolate: it is
-			// re-anchored EVERY frame to the boundary row's predicted
-			// post-interpolation WRITTEN shift (same stepToward +
-			// quantizeShift the write phase applies) and its displayed
-			// values snap straight to target. Consequences (§三 evidence
-			// drove this design):
-			//   • chain pairs are exactly one grid-aligned pixel apart in
-			//     WRITTEN space on every frame — closure == tolerance with
-			//     ZERO quantization noise (interpolating chains produced
-			//     lagging fractional values whose independent rounding
-			//     stacked up to ~1.1px, failing §三);
-			//   • the seam pair (boundary ↔ first chain row) additionally
-			//     compensates the boundary row's scaled half-height growth
-			//     h·(s−1)/2, quantized UP with SHIFT_EPSILON margin so an
-			//     epsilon-skipped boundary write can never push the seam
-			//     past tolerance;
-			//   • snapping is invisible: chain rows sit beyond
-			//     Visible+guard by construction, and they FOLLOW the
-			//     smoothly interpolating boundary anchor, so their motion
-			//     is continuous anyway;
-			//   • the chain ends after ~|shift| rows — far rows keep
-			//     identity targets and are never written (§九/§十 budget).
+			// §四/§六 boundary buffer — LOCKSTEP SNAP with OFFSCREEN GAP
+			// RELAXATION. The solved boundary row carries a residual push
+			// that identity rows just outside would overlap. Instead of a
+			// fixed 1px/row taper (which needs |shift| rows and inflated
+			// the collision range to ~78 rows avg, §三 perf regression),
+			// each offscreen buffer pair may COMPRESS its gap from the
+			// base clearance down to 0 (and one tolerance unit into
+			// overlap) to absorb the push locally. The per-row step is
+			// therefore max(baseGap, tolerance) — for a real cardGap of
+			// 6 the push absorbs in ~E/6 rows instead of E rows.
+			//   • buffer rows SNAP (displayed = target) and are re-anchored
+			//     every frame to the boundary row's predicted WRITTEN
+			//     shift, so chain values stay grid-aligned with zero
+			//     rounding noise;
+			//   • the seam compensates the boundary row's scaled half-height
+			//     growth h·(s−1)/2;
+			//   • the chain BRIDGES toward legacy settling fields (compares
+			//     the outer row's predicted written shift) instead of
+			//     cliff-dropping to 0;
+			//   • for cardGap=0 layouts (baseGap=0) the step collapses to
+			//     the tolerance — the original 1px taper, still feasible.
+			// Visible pairs keep strict cardGap (solver + headroom); only
+			// OFFSCREEN active pairs may relax (§六.1 contract). Far rows
+			// stay identity and are never written (§九/§十 budget).
 			const taperBoundary = (up: boolean): void => {
-				const edgeIdx = up ? cStart : cEnd;
+				const edgeIdx0 = up ? cStart : cEnd;
 				const edge = up ? results[0] : results[results.length - 1];
 				if (!edge || edge.translateY === 0) return;
-				const edgeMotion = this.cache[edgeIdx]?.motion;
+				const edgeMotion = this.cache[edgeIdx0]?.motion;
 				// Predicted post-step written shift of the boundary row.
 				const predictedShift = edgeMotion
 					? stepToward(
@@ -1184,11 +1173,11 @@ export class MagnificationController {
 				const edgeScale = Math.max(edge.scale, predictedScale);
 				const growth = Math.max(
 					0,
-					((this.heights[edgeIdx] ?? 0) * (edgeScale - 1)) / 2,
+					((this.heights[edgeIdx0] ?? 0) * (edgeScale - 1)) / 2,
 				);
 				// Quantized UP + epsilon margin: keeps the seam within
 				// tolerance even when the boundary write is epsilon-
-				// skipped, and stays on the DPR grid so chain values
+				// skipped, and stays on the DPR grid so buffer values
 				// snap to themselves.
 				const growthQ =
 					Math.ceil((growth + SHIFT_EPSILON) * dpr) / dpr;
@@ -1196,26 +1185,40 @@ export class MagnificationController {
 				shift =
 					Math.round((shift + (up ? -growthQ : growthQ)) * 100) /
 					100;
-				// The chain BRIDGES toward the outer displacement field,
-				// not blindly to 0: rows beyond the slice may still hold
-				// large legacy shifts (settling from a previous pointer
-				// position), and a chain graded to 0 would end in a
-				// 10+px cliff against them (§三 evidence: an 18px seam).
-				// Each row is compared in WRITTEN space — its predicted
-				// settling write (same stepToward + quantizeShift the
-				// write phase applies) vs the chain's grid value. Within
-				// one step → stop, the seam is feasible as written and
-				// the rows beyond stay on their own settling course
-				// (legacy-internal pairs remain feasible by the previous
-				// frames' invariant). Otherwise the row is absorbed into
-				// the chain one whole pixel toward its own field, marching
-				// across the legacy bump until the two fields merge. In
-				// the steady state the outer rows are clean (0) and this
-				// reduces to the plain walk-to-zero taper.
 				let added = 0;
 				while (added < COLLISION_TAPER_MAX_ROWS) {
 					const next = up ? cStart - 1 : cEnd + 1;
 					if (next < 0 || next > rowCount - 1) break;
+					// Per-pair base clearance — the gap this offscreen
+					// pair may compress to absorb the residual push.
+					const curEdge = up ? cStart : cEnd;
+					const spacing = up
+						? this.centers[curEdge] - this.centers[next]
+						: this.centers[next] - this.centers[curEdge];
+					const baseGap = Math.max(
+						0,
+						spacing -
+							(this.heights[curEdge] ?? 0) / 2 -
+							(this.heights[next] ?? 0) / 2,
+					);
+					// Absorbable per row: the base gap (compress to 0) or,
+					// for tight layouts (cardGap=0 → baseGap=0), the
+					// tolerance (1px overlap, the original taper).
+					const absorb = Math.max(baseGap, OVERLAP_TOLERANCE_PX);
+					// Apron: the first rows halve the step so slice-growth
+					// handoffs stay within tolerance once DPR rounding
+					// noise stacks on top (§三: 1.113px overshoot on the
+					// after-scroll handoff with a full-pixel step). Beyond
+					// the apron the step grows to the full absorption so
+					// the buffer stays short when cardGap > 0.
+					const stepBudget =
+						added < COLLISION_TAPER_APRON_ROWS
+							? COLLISION_TAPER_APRON_STEP_PX
+							: absorb;
+					// Bridge: stop when the outer row's predicted settling
+					// write is within one absorption of the chain — the
+					// seam pair is feasible as written and the rows beyond
+					// stay on their own course.
 					const om = this.cache[next]?.motion;
 					const outerWritten = om
 						? quantizeShift(
@@ -1228,12 +1231,13 @@ export class MagnificationController {
 								dpr,
 							)
 						: 0;
-					const stepPx =
-						added < COLLISION_TAPER_APRON_ROWS
-							? COLLISION_TAPER_APRON_STEP_PX
-							: COLLISION_TAPER_STEP_PX;
 					const delta = outerWritten - shift;
-					if (Math.abs(delta) <= stepPx) break;
+					if (Math.abs(delta) <= absorb) break;
+					// Step TOWARD the outer field by the budget, not toward
+					// 0 — the legacy settling field may sit on the opposite
+					// side of 0, and a walk-to-0 chain would cliff against
+					// it (§三: 9px seam at the chain end).
+					const stepPx = Math.min(Math.abs(delta), stepBudget);
 					shift =
 						Math.round(
 							(shift + Math.sign(delta) * stepPx) * 100,
