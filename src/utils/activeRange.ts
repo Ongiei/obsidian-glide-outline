@@ -72,6 +72,34 @@ export interface MotionRangeInput {
 	overscan?: number;
 }
 
+/**
+ * §四 Scale Range — the rows whose box intersects the pointer's magnification
+ * disc (pointerY ± radius) only, plus a single overscan row. This range
+ * answers ONE question: "which rows may have scale > 1?" It must NEVER be
+ * enlarged by collision propagation (§四) — that is the collision range's job.
+ */
+export interface ScaleRangeInput {
+	centers: readonly number[];
+	heights: readonly number[];
+	pointerY: number;
+	/** Magnification falloff radius, px. */
+	radius: number;
+	/** Extra boundary rows on each side; defaults to 1 (scale does not need
+	 * the 3-row motion overscan — scale drops to 1 exactly at the radius). */
+	overscan?: number;
+}
+
+/** The three independent row windows the frame loop uses (§四). */
+export interface MotionRanges {
+	/** Rows that may have scale > 1 (pointerY ± radius + 1). */
+	scaleRange: ActiveMotionRange;
+	/** Rows the collision solver must cover: visible ∪ scale ∪ settling ∪
+	 * guard, then dynamically expanded until both boundaries are safe. */
+	collisionRange: ActiveMotionRange;
+	/** Rows that still need a CSS write / layer hint this frame. */
+	writeRange: ActiveMotionRange;
+}
+
 /** Binary-search + overscan resolution shared by every range query. */
 function resolveRangeIndices(
 	centers: readonly number[],
@@ -108,6 +136,11 @@ export function computeVisibleRange(input: VisibleRangeInput): ActiveMotionRange
  * is deliberately NOT folded in: a stationary pointer in the upper half
  * must not pull 47 rows into the solver / writer. Returns the empty range
  * when the pointer position is unknown (viewport-only motion).
+ *
+ * NOTE (§四): the solver no longer runs over THIS range alone — see
+ * `computeMotionRanges` in the controller, which builds the larger,
+ * dynamically-expanded collision range. `computeMotionRange` here remains
+ * the correct, provably-identity slice used to seed the scale range.
  */
 export function computeMotionRange(input: MotionRangeInput): ActiveMotionRange {
 	if (!Number.isFinite(input.pointerY)) return emptyActiveRange();
@@ -126,6 +159,26 @@ export function computeMotionRange(input: MotionRangeInput): ActiveMotionRange {
 		lo,
 		hi,
 		Math.max(0, input.overscan ?? DEFAULT_OVERSCAN_ROWS),
+	);
+}
+
+/**
+ * §四 Scale Range — which rows may have scale > 1. Driven ONLY by the
+ * pointer's magnification disc (pointerY ± radius) plus a single overscan
+ * row. Deliberately does NOT include the displacement allowance or the
+ * settling rows, so collision propagation can never enlarge the scaled set.
+ */
+export function computeScaleRange(input: ScaleRangeInput): ActiveMotionRange {
+	if (!Number.isFinite(input.pointerY)) return emptyActiveRange();
+	const radius = Math.max(0, input.radius);
+	const lo = input.pointerY - radius;
+	const hi = input.pointerY + radius;
+	return resolveRangeIndices(
+		input.centers,
+		input.heights,
+		lo,
+		hi,
+		Math.max(0, input.overscan ?? 1),
 	);
 }
 
