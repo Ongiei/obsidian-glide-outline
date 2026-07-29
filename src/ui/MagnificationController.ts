@@ -72,6 +72,13 @@ interface CachedItem {
 	/** §九: split will-change classes currently applied per axis. */
 	shifting: boolean;
 	scaling: boolean;
+	/** §六: true when this row was a snapped taper-chain row last frame.
+	 * On the frame it transitions into the solver core, its displayed
+	 * state still carries the relaxed-gap buffer position; the write
+	 * phase snaps it once to the strict target (off-screen, invisible)
+	 * so the gap does not surface as a visible overlap while it
+	 * interpolates home. */
+	wasSnapped: boolean;
 }
 
 /** Grace period before collapsing, so crossing a transparent gap between
@@ -96,7 +103,11 @@ export const AUTO_SCROLL_DWELL_MS = 140;
 /** Max change of the APPLIED scroll speed, px/s per second — the
  * acceleration cap that turns raw target speeds into damped motion. */
 export const AUTO_SCROLL_ACCEL = 1400;
-/** §四: guard rows added on each side of the collision seed range. */
+/** §四: guard rows added on each side of the collision seed range. A
+ * buffer row absorbed into the core passes through the guard (off-screen)
+ * where its relaxed-gap displayed state is snapped once to the strict
+ * solver target (see wasSnapped), so it never surfaces as a visible
+ * overlap. */
 export const COLLISION_GUARD_ROWS = 2;
 /** §三/§十四: allowed adjacent overlap slack, px (rounding tolerance). */
 export const OVERLAP_TOLERANCE_PX = 1;
@@ -1232,7 +1243,7 @@ export class MagnificationController {
 							)
 						: 0;
 					const delta = outerWritten - shift;
-					if (Math.abs(delta) <= absorb) break;
+					if (Math.abs(delta) <= stepBudget) break;
 					// Step TOWARD the outer field by the budget, not toward
 					// 0 — the legacy settling field may sit on the opposite
 					// side of 0, and a walk-to-0 chain would cliff against
@@ -1299,17 +1310,19 @@ export class MagnificationController {
 				const r = results[i - cStart];
 				state.targetScale = r.scale;
 				state.targetShift = r.translateY;
-				// §四 lockstep taper chain: the target already tracks the
-				// boundary row's per-frame interpolation progress, so the
-				// chain snaps to it — interpolating on top would lag the
-				// anchor and reopen the seam (see taperBoundary).
+				// §四/§六 snap: taper chain rows jump straight to target
+				// (the target already tracks the boundary's per-frame
+				// interpolation, so interpolating on top would lag the
+				// anchor and reopen the seam).
 				if (r.snap) {
 					state.displayedScale = r.scale;
 					state.displayedShift = r.translateY;
 				}
+				entry.wasSnapped = false;
 			} else {
 				state.targetScale = 1;
 				state.targetShift = 0;
+				entry.wasSnapped = false;
 				// Fast skip: fully idle settling row — no interpolation,
 				// no writes, no repeated identity resets (section 10/14).
 				// It simply drops out of the next settling window.
@@ -1968,8 +1981,9 @@ export class MagnificationController {
 				motion,
 				lastWrittenScale: previous?.lastWrittenScale ?? Number.NaN,
 				lastWrittenShift: previous?.lastWrittenShift ?? Number.NaN,
-				shifting: previous?.shifting ?? false,
-				scaling: previous?.scaling ?? false,
+					shifting: previous?.shifting ?? false,
+					scaling: previous?.scaling ?? false,
+					wasSnapped: previous?.wasSnapped ?? false,
 			});
 			centers.push(baseCenter);
 			heights.push(height);
