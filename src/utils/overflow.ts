@@ -107,6 +107,7 @@ export type AutoScrollStopReason =
 	| "pressed"
 	| "collapsed"
 	| "window-blur"
+	| "manual-wheel"
 	| "dispose";
 
 /** Resolved zone depths for the current viewport + setting. */
@@ -278,4 +279,84 @@ export function computePointerAutoScrollVelocity(
 	input: PointerAutoScrollInput,
 ): number {
 	return computePointerAutoScroll(input).velocity;
+}
+
+/* --------------------------------------------------------------------------
+   §十三–§十五 Pointer-follow pre-scroll (pure math).
+
+   INDEPENDENT of the edge dwell/latch machinery above: a fast, decisive
+   vertical pointer movement pre-scrolls the list in the SAME direction
+   anywhere inside the viewport band — the headings come to meet the
+   gesture before the pointer ever reaches an edge. No dwell: the gesture
+   itself is the intent signal. A slow or stationary pointer is always 0.
+   -------------------------------------------------------------------------- */
+
+/** Smoothed pointer speed below this (px/s) is browsing, not a flick. */
+export const POINTER_FOLLOW_MIN_VELOCITY = 260;
+/** Scroll px/s produced per pointer px/s ABOVE the threshold. */
+export const POINTER_FOLLOW_GAIN = 0.3;
+/** Follow ceiling as a share of maxSpeed — the edge machinery always
+ * remains the stronger mechanism (§十七 combined result is clamped). */
+export const POINTER_FOLLOW_MAX_SHARE = 0.6;
+
+export interface PointerFollowInput {
+	/** Pointer Y in the same space as viewportTop/viewportBottom. */
+	pointerY: number;
+	/** Smoothed pointer vertical velocity, px/s (+ = moving down). */
+	pointerVelocityY: number;
+	viewportTop: number;
+	viewportBottom: number;
+	/** Peak scroll speed in px/s (shared with the edge mechanism). */
+	maxSpeed: number;
+	/** Current overflow state — 0 toward a dead end. */
+	canScrollUp: boolean;
+	canScrollDown: boolean;
+	/** `pointerFollowEnabled` setting gate. */
+	enabled: boolean;
+}
+
+/**
+ * Target pre-scroll velocity in px/s (negative = up, positive = down).
+ *
+ *   |vy| ≤ threshold                    → 0
+ *   otherwise: sign(vy) × min(cap, (|vy| − threshold) × gain)
+ *   cap = maxSpeed × POINTER_FOLLOW_MAX_SHARE
+ *
+ * Gated by scrollability in the gesture's direction; 0 when disabled,
+ * outside the viewport band, or on any non-finite input — never NaN.
+ */
+export function computePointerFollowVelocity(
+	input: PointerFollowInput,
+): number {
+	if (!input.enabled) return 0;
+	if (
+		!Number.isFinite(input.pointerY) ||
+		!Number.isFinite(input.viewportTop) ||
+		!Number.isFinite(input.viewportBottom) ||
+		!Number.isFinite(input.maxSpeed) ||
+		!Number.isFinite(input.pointerVelocityY)
+	) {
+		return 0;
+	}
+	const maxSpeed = Math.max(0, input.maxSpeed);
+	if (maxSpeed === 0) return 0;
+	if (
+		input.pointerY < input.viewportTop ||
+		input.pointerY > input.viewportBottom ||
+		input.viewportBottom <= input.viewportTop
+	) {
+		return 0;
+	}
+	const vy = input.pointerVelocityY;
+	const speed = Math.abs(vy);
+	if (speed <= POINTER_FOLLOW_MIN_VELOCITY) return 0;
+	const cap = maxSpeed * POINTER_FOLLOW_MAX_SHARE;
+	const magnitude = Math.min(
+		cap,
+		(speed - POINTER_FOLLOW_MIN_VELOCITY) * POINTER_FOLLOW_GAIN,
+	);
+	const target = vy > 0 ? magnitude : -magnitude;
+	if (target < 0 && !input.canScrollUp) return 0;
+	if (target > 0 && !input.canScrollDown) return 0;
+	return target;
 }
