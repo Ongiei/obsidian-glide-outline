@@ -252,8 +252,15 @@ export interface KineticIntentInput {
 	pointerVelocityY: number;
 	viewportTop: number;
 	viewportBottom: number;
-	/** Peak scroll speed in px/s (shared with the edge mechanism). */
+	/** Peak BASE scroll speed in px/s (AUTO_SCROLL_MAX_SPEED, before the
+	 * share/strength factors — this function applies MAX_SHARE × strength
+	 * internally so the cap scales with the Pointer Follow strength
+	 * setting, independent of the Edge auto-scroll speed). */
 	maxSpeed: number;
+	/** §十一 pointerFollowStrength multiplier (0.5–2.5, default 1). Scales
+	 * both the magnitude and the cap so the feel is visibly stronger/weaker
+	 * without depending on the Edge speed setting. */
+	strength: number;
 	/** Current overflow state — 0 toward a dead end. */
 	canScrollUp: boolean;
 	canScrollDown: boolean;
@@ -261,11 +268,11 @@ export interface KineticIntentInput {
 	enabled: boolean;
 }
 
-/** §九 suggested parameters. */
-export const POINTER_FOLLOW_MIN_SPEED = 140;
+/** §九/§十二 suggested parameters. */
+export const POINTER_FOLLOW_MIN_SPEED = 120;
 export const POINTER_FOLLOW_LOOKAHEAD_MS = 80;
-export const POINTER_FOLLOW_GAIN = 0.25;
-export const POINTER_FOLLOW_MAX_SHARE = 0.45;
+export const POINTER_FOLLOW_GAIN = 0.35;
+export const POINTER_FOLLOW_MAX_SHARE = 0.6;
 export const POINTER_FOLLOW_DECAY_TAU_MS = 120;
 
 /**
@@ -307,14 +314,21 @@ export function computeKineticIntentVelocity(
 	const speed = Math.abs(vy);
 	if (speed <= POINTER_FOLLOW_MIN_SPEED) return 0;
 
+	const strength =
+		Number.isFinite(input.strength) && input.strength > 0
+			? input.strength
+			: 1;
 	const center = input.viewportTop + height / 2;
 	const half = height / 2;
 	const norm = half > 0 ? Math.min(1, Math.abs(input.pointerY - center) / half) : 0;
 	const depthFactor = 0.35 + 0.65 * norm;
-	const cap = maxSpeed * POINTER_FOLLOW_MAX_SHARE;
+	const cap = maxSpeed * POINTER_FOLLOW_MAX_SHARE * strength;
 	const magnitude = Math.min(
 		cap,
-		(speed - POINTER_FOLLOW_MIN_SPEED) * POINTER_FOLLOW_GAIN * depthFactor,
+		(speed - POINTER_FOLLOW_MIN_SPEED) *
+			POINTER_FOLLOW_GAIN *
+			depthFactor *
+			strength,
 	);
 	const target = vy > 0 ? magnitude : -magnitude;
 	if (target < 0 && !input.canScrollUp) return 0;

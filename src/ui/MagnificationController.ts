@@ -7,6 +7,7 @@ import {
 	resolveEdgeZones,
 	PointerSampleRing,
 	POINTER_FOLLOW_DECAY_TAU_MS,
+	POINTER_FOLLOW_MAX_SHARE,
 	type EdgeIntentState,
 	type PointerKinematicsState,
 	type ScrollIntegratorState,
@@ -1591,9 +1592,16 @@ export class MagnificationController {
 
 		// P1-3: speed scales max velocity AND acceleration linearly, so the
 		// ramp/damp character is identical at every speed setting.
+		// §十一/§十六: edge and kinetic now have INDEPENDENT speed knobs —
+		// edge uses pointerAutoScrollSpeed, kinetic uses pointerFollowStrength.
 		const speed = settings.pointerAutoScrollSpeed;
+		const followStrength = settings.pointerFollowStrength;
 		const zonePx = settings.pointerAutoScrollZone;
-		const maxSpeed = AUTO_SCROLL_MAX_SPEED * speed;
+		const edgeMaxSpeed = AUTO_SCROLL_MAX_SPEED * speed;
+		const kineticMaxSpeed =
+			AUTO_SCROLL_MAX_SPEED * POINTER_FOLLOW_MAX_SHARE * followStrength;
+		// Combined clamp honours whichever mechanism can run faster.
+		const combinedMaxSpeed = Math.max(edgeMaxSpeed, kineticMaxSpeed);
 		const overflow = this.view.getOverflowState();
 		const perf = this.perf;
 
@@ -1608,8 +1616,8 @@ export class MagnificationController {
 				pointerY: this.lastPointerY,
 				viewportTop: this.viewportTop,
 				viewportBottom: this.viewportBottom,
-				maxSpeed,
-				triggerZonePx: zonePx,
+			maxSpeed: edgeMaxSpeed,
+			triggerZonePx: zonePx,
 				canScrollUp: overflow.canScrollUp,
 				canScrollDown: overflow.canScrollDown,
 				enabled: settings.pointerAutoScroll && overflow.hasOverflow,
@@ -1655,7 +1663,11 @@ export class MagnificationController {
 				pointerVelocityY: kin.velocityY,
 				viewportTop: this.viewportTop,
 				viewportBottom: this.viewportBottom,
-				maxSpeed,
+				// §十一/§十六: pass the BASE max speed; the function applies
+				// MAX_SHARE × strength internally so the kinetic cap is
+				// independent of the edge speed setting.
+				maxSpeed: AUTO_SCROLL_MAX_SPEED,
+				strength: followStrength,
 				canScrollUp: overflow.canScrollUp,
 				canScrollDown: overflow.canScrollDown,
 				enabled: settings.pointerFollowEnabled && overflow.hasOverflow,
@@ -1690,8 +1702,8 @@ export class MagnificationController {
 		integ.edgeIntentVelocity = edgeTarget;
 		integ.kineticIntentVelocity = kineticTarget;
 		const combined = Math.min(
-			maxSpeed,
-			Math.max(-maxSpeed, edgeTarget + kineticTarget),
+			combinedMaxSpeed,
+			Math.max(-combinedMaxSpeed, edgeTarget + kineticTarget),
 		);
 		integ.combinedTargetVelocity = combined;
 
@@ -1716,8 +1728,12 @@ export class MagnificationController {
 		}
 
 		if (dt > 0) {
-			// Acceleration-capped chase → continuous ramps and damping.
-			const maxDelta = AUTO_SCROLL_ACCEL * speed * dt;
+			// §十六 acceleration-capped chase → continuous ramps and damping.
+			// Accel scales with the LARGER of edge speed / follow strength so
+			// a low edge speed never makes a high-strength kinetic feel soggy
+			// (and vice versa).
+			const accelScale = Math.max(speed, followStrength);
+			const maxDelta = AUTO_SCROLL_ACCEL * accelScale * dt;
 			const delta = combined - integ.appliedVelocity;
 			integ.appliedVelocity += Math.min(
 				maxDelta,

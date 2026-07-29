@@ -14,6 +14,7 @@ function input(overrides: Partial<PointerFollowInput> = {}): PointerFollowInput 
 		viewportTop: 100,
 		viewportBottom: 500,
 		maxSpeed: 900,
+		strength: 1,
 		canScrollUp: true,
 		canScrollDown: true,
 		enabled: true,

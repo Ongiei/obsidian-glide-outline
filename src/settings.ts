@@ -63,11 +63,17 @@ export interface GlideOutlineSettings {
 	 * §十八: pre-scroll the outline in the direction of quick vertical
 	 * pointer movement, before the pointer reaches an edge. Independent of
 	 * the edge dwell/latch — fast flicks proactively bring headings toward
-	 * the pointer. Auto-scroll speed scales both mechanisms.
+	 * the pointer. Scaled by `pointerFollowStrength` (not edge speed).
 	 */
 	pointerFollowEnabled: boolean;
 	/**
-	 * Multiplier on the pointer auto-scroll speed/acceleration.
+	 * §十一 strength multiplier for Pointer movement assist. 1 = tuned
+	 * default; 0.5 = gentle; 2.5 = aggressive. Independent of
+	 * `pointerAutoScrollSpeed` so the two mechanisms can be tuned apart.
+	 */
+	pointerFollowStrength: number;
+	/**
+	 * Multiplier on the EDGE auto-scroll speed/acceleration.
 	 * 1 = the tuned default feel; 0.25 = very gentle; 4 = brisk.
 	 * Renamed from the legacy `pointerAutoScrollStrength` field, which
 	 * is migrated on load and then silently ignored.
@@ -121,6 +127,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	edgeFadeSize: 28,
 	pointerAutoScroll: true,
 	pointerFollowEnabled: true,
+	pointerFollowStrength: 1,
 	pointerAutoScrollSpeed: 1,
 	pointerAutoScrollZone: 120,
 	markerStyle: "line",
@@ -140,6 +147,7 @@ export const RANGES = {
 	levelIndent: { min: 0, max: 8 },
 	edgeFadeSize: { min: 12, max: 120 },
 	pointerAutoScrollSpeed: { min: 0.25, max: 4 },
+	pointerFollowStrength: { min: 0.5, max: 2.5 },
 	pointerAutoScrollZone: { min: 40, max: 220 },
 	// 2.25 (P1-1): the collision solver keeps neighbours readable even at
 	// high peaks, so the old 1.75 cap was purely conservative.
@@ -250,6 +258,12 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 		pointerFollowEnabled: bool(
 			data.pointerFollowEnabled,
 			DEFAULT_SETTINGS.pointerFollowEnabled,
+		),
+		pointerFollowStrength: clamp(
+			data.pointerFollowStrength,
+			RANGES.pointerFollowStrength.min,
+			RANGES.pointerFollowStrength.max,
+			DEFAULT_SETTINGS.pointerFollowStrength,
 		),
 		// Current field wins; otherwise migrate the legacy
 		// `pointerAutoScrollStrength` value (same unit and range).
@@ -798,7 +812,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Pointer movement assist")
-			.setDesc("Pre-scroll the list in the direction of quick vertical pointer movement, before the pointer reaches an edge. Auto-scroll speed applies to this too.")
+			.setDesc("Pre-scroll the list in the direction of quick vertical pointer movement, before the pointer reaches an edge. Strength is set independently below.")
 			.addToggle((toggle) =>
 				toggle.setValue(s.pointerFollowEnabled).onChange(async (value) => {
 					s.pointerFollowEnabled = value;
@@ -807,8 +821,8 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Auto-scroll speed")
-			.setDesc("Speed multiplier for pointer edge auto-scroll. 1 is the tuned default; lower is gentler, higher is brisker.")
+			.setName("Edge auto-scroll speed")
+			.setDesc("Speed multiplier for pointer EDGE auto-scroll only. 1 is the tuned default; lower is gentler, higher is brisker. Does not affect Pointer movement assist.")
 			.addSlider((slider) =>
 				slider
 					.setLimits(
@@ -820,6 +834,24 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					.setDynamicTooltip()
 					.onChange((value) => {
 						s.pointerAutoScrollSpeed = value;
+						this.plugin.previewSettings();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Pointer movement assist strength")
+			.setDesc("How strongly quick vertical pointer movements pre-scroll the outline. 1 is the tuned default; 0.5 is gentle; 2.5 is aggressive. Independent of edge auto-scroll speed.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(
+						RANGES.pointerFollowStrength.min,
+						RANGES.pointerFollowStrength.max,
+						0.1,
+					)
+					.setValue(s.pointerFollowStrength)
+					.setDynamicTooltip()
+					.onChange((value) => {
+						s.pointerFollowStrength = value;
 						this.plugin.previewSettings();
 					}),
 			);

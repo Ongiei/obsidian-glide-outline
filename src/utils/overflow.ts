@@ -279,13 +279,14 @@ export function computePointerAutoScrollVelocity(
    itself is the intent signal. A slow or stationary pointer is always 0.
    -------------------------------------------------------------------------- */
 
-/** Smoothed pointer speed below this (px/s) is browsing, not a flick. */
-export const POINTER_FOLLOW_MIN_VELOCITY = 140;
+/** Smoothed pointer speed below this (px/s) is browsing, not a flick.
+ * Re-exported from scrollIntent so there is a single source of truth. */
+export { POINTER_FOLLOW_MIN_SPEED as POINTER_FOLLOW_MIN_VELOCITY } from "./scrollIntent";
 /** Scroll px/s produced per pointer px/s ABOVE the threshold. */
-export const POINTER_FOLLOW_GAIN = 0.25;
+export { POINTER_FOLLOW_GAIN } from "./scrollIntent";
 /** Follow ceiling as a share of maxSpeed — the edge machinery always
  * remains the stronger mechanism (§十七 combined result is clamped). */
-export const POINTER_FOLLOW_MAX_SHARE = 0.45;
+export { POINTER_FOLLOW_MAX_SHARE } from "./scrollIntent";
 
 import { computeKineticIntentVelocity } from "./scrollIntent";
 
@@ -294,6 +295,7 @@ export {
 	computeKineticIntentVelocity,
 	computeEdgeScrollIntent,
 	predictedPointerY,
+	POINTER_FOLLOW_MIN_SPEED,
 	POINTER_FOLLOW_LOOKAHEAD_MS,
 	POINTER_FOLLOW_DECAY_TAU_MS,
 } from "./scrollIntent";
@@ -305,8 +307,10 @@ export interface PointerFollowInput {
 	pointerVelocityY: number;
 	viewportTop: number;
 	viewportBottom: number;
-	/** Peak scroll speed in px/s (shared with the edge mechanism). */
+	/** Peak BASE scroll speed in px/s (before share/strength factors). */
 	maxSpeed: number;
+	/** §十一 pointerFollowStrength multiplier (default 1). */
+	strength: number;
 	/** Current overflow state — 0 toward a dead end. */
 	canScrollUp: boolean;
 	canScrollDown: boolean;
@@ -338,6 +342,7 @@ export function computePointerFollowVelocity(
 		viewportTop: input.viewportTop,
 		viewportBottom: input.viewportBottom,
 		maxSpeed: input.maxSpeed,
+		strength: input.strength,
 		canScrollUp: input.canScrollUp,
 		canScrollDown: input.canScrollDown,
 		enabled: input.enabled,
