@@ -83,9 +83,14 @@ export const STRONG_ZONE_SHARE = 0.45;
 export const STRONG_ZONE_MIN_PX = 20;
 /** Share of maxSpeed reachable in the pre-scroll zone alone. */
 export const PRE_SCROLL_SPEED_SHARE = 0.35;
-/** px/s of scroll per px/s of pointer velocity (before depth scaling). */
+/**
+ * @deprecated §八: the edge mechanism is now purely positional
+ * (`computeEdgeScrollIntent` in scrollIntent.ts). Velocity assist belongs
+ * ONLY to the kinetic (pointer-follow) path. These constants are retained
+ * for one release of migration parity but are no longer read here.
+ */
 export const VELOCITY_ASSIST_GAIN = 0.25;
-/** Assist ceiling as a share of maxSpeed. */
+/** @deprecated see VELOCITY_ASSIST_GAIN. */
 export const VELOCITY_ASSIST_MAX_SHARE = 0.5;
 
 /**
@@ -147,7 +152,12 @@ export function computeAutoScrollZones(
 export interface PointerAutoScrollInput {
 	/** Pointer Y in the same coordinate space as viewportTop/viewportBottom. */
 	pointerY: number;
-	/** Smoothed pointer vertical velocity, px/s (+ = moving down). */
+	/**
+	 * @deprecated §八: the edge mechanism is now purely positional and does
+	 * NOT read pointer velocity. Retained for migration parity only; any
+	 * value passed here is ignored. Velocity-driven scrolling lives in the
+	 * kinetic (pointer-follow) path (`computeKineticIntentVelocity`).
+	 */
 	pointerVelocityY: number;
 	/** Top edge of the outline viewport (client coords). */
 	viewportTop: number;
@@ -173,22 +183,18 @@ export interface PointerAutoScrollResult {
 }
 
 /**
- * Target auto-scroll velocity in px/s (negative = up, positive = down),
- * plus the reason it is 0 when it is.
+ * §八 Position-only edge auto-scroll intent.
  *
- *   base   = maxSpeed × (0.35 × preIntensity² + 0.65 × strongIntensity²)
- *   assist = clamp(pointerVy × 0.25, ±maxSpeed/2) × halfDepth
- *            (only when the pointer is in the matching half AND moving
- *             toward that edge — otherwise 0)
- *   target = clamp(base + assist, ±maxSpeed), gated by scrollability
+ *   base = maxSpeed × (0.35 × preIntensity² + 0.65 × strongIntensity²)
  *
- * Both intensity curves are quadratic, so the zone entrances stay gentle
- * and full speed exists only at the physical edge. `halfDepth` scales the
- * assist from 0 at the viewport center to 1 at an edge, which makes a
- * static hover in the dead zone always 0 and fast flicks progressively
- * more assertive as they approach the edge. Velocity is 0 when disabled,
- * under reduced motion, outside the viewport band, or for any non-finite
- * input — never NaN or ±Infinity.
+ * The velocity field is IGNORED (deprecated): the edge mechanism must not
+ * read pointer velocity — that belongs to the kinetic (pointer-follow)
+ * path (`computeKineticIntentVelocity` in scrollIntent.ts). For the
+ * canonical position-only intent use `computeEdgeScrollIntent`; this
+ * function is kept for migration parity and delegates to the same math.
+ *
+ * Returns 0 when disabled, under reduced motion, outside the viewport
+ * band, in the dead zone, or at a dead end — never NaN/Infinity.
  */
 export function computePointerAutoScroll(
 	input: PointerAutoScrollInput,
@@ -237,7 +243,7 @@ export function computePointerAutoScroll(
 		);
 	};
 
-	// Positional base speed (0 across the whole dead zone).
+	// Positional base speed only (§八: no velocity assist here).
 	let base = 0;
 	if (distanceToTop < preZone) {
 		base = -maxSpeed * ramp(distanceToTop);
@@ -245,33 +251,15 @@ export function computePointerAutoScroll(
 		base = maxSpeed * ramp(distanceToBottom);
 	}
 
-	// Pointer-velocity assist: matching half + matching direction only.
-	const vy = Number.isFinite(input.pointerVelocityY)
-		? input.pointerVelocityY
-		: 0;
-	const center = input.viewportTop + height / 2;
-	const halfDepth = Math.min(
-		1,
-		Math.abs(input.pointerY - center) / (height / 2),
-	);
-	let assist = 0;
-	const assistCap = maxSpeed * VELOCITY_ASSIST_MAX_SHARE;
-	if (vy > 0 && input.pointerY > center) {
-		assist = Math.min(assistCap, vy * VELOCITY_ASSIST_GAIN) * halfDepth;
-	} else if (vy < 0 && input.pointerY < center) {
-		assist = Math.max(-assistCap, vy * VELOCITY_ASSIST_GAIN) * halfDepth;
-	}
-
-	const target = Math.min(maxSpeed, Math.max(-maxSpeed, base + assist));
-	if (target === 0) return { velocity: 0, stopReason: "dead-zone" };
+	if (base === 0) return { velocity: 0, stopReason: "dead-zone" };
 	// Dead-end gating: never push toward an edge that cannot scroll.
-	if (target < 0 && !input.canScrollUp) {
+	if (base < 0 && !input.canScrollUp) {
 		return { velocity: 0, stopReason: "dead-end" };
 	}
-	if (target > 0 && !input.canScrollDown) {
+	if (base > 0 && !input.canScrollDown) {
 		return { velocity: 0, stopReason: "dead-end" };
 	}
-	return { velocity: target, stopReason: null };
+	return { velocity: base, stopReason: null };
 }
 
 /** Velocity-only convenience wrapper (tests / simple callers). */
@@ -292,12 +280,23 @@ export function computePointerAutoScrollVelocity(
    -------------------------------------------------------------------------- */
 
 /** Smoothed pointer speed below this (px/s) is browsing, not a flick. */
-export const POINTER_FOLLOW_MIN_VELOCITY = 260;
+export const POINTER_FOLLOW_MIN_VELOCITY = 140;
 /** Scroll px/s produced per pointer px/s ABOVE the threshold. */
-export const POINTER_FOLLOW_GAIN = 0.3;
+export const POINTER_FOLLOW_GAIN = 0.25;
 /** Follow ceiling as a share of maxSpeed — the edge machinery always
  * remains the stronger mechanism (§十七 combined result is clamped). */
-export const POINTER_FOLLOW_MAX_SHARE = 0.6;
+export const POINTER_FOLLOW_MAX_SHARE = 0.45;
+
+import { computeKineticIntentVelocity } from "./scrollIntent";
+
+export type { PointerSample, PointerSampleRing } from "./scrollIntent";
+export {
+	computeKineticIntentVelocity,
+	computeEdgeScrollIntent,
+	predictedPointerY,
+	POINTER_FOLLOW_LOOKAHEAD_MS,
+	POINTER_FOLLOW_DECAY_TAU_MS,
+} from "./scrollIntent";
 
 export interface PointerFollowInput {
 	/** Pointer Y in the same space as viewportTop/viewportBottom. */
@@ -318,45 +317,29 @@ export interface PointerFollowInput {
 /**
  * Target pre-scroll velocity in px/s (negative = up, positive = down).
  *
- *   |vy| ≤ threshold                    → 0
- *   otherwise: sign(vy) × min(cap, (|vy| − threshold) × gain)
- *   cap = maxSpeed × POINTER_FOLLOW_MAX_SHARE
+ * §九 kinetic (pointer-follow) intent. Velocity comes from the controller's
+ * sample ring; here it is turned into a target with a depth factor so a
+ * mid-viewport flick still registers while the dead-center stays calm:
  *
- * Gated by scrollability in the gesture's direction; 0 when disabled,
- * outside the viewport band, or on any non-finite input — never NaN.
+ *   depthFactor = 0.35 + 0.65 × |pointerY − center| / (height/2)
+ *   kinetic = clamp((|vy| − min) × gain × depthFactor,
+ *                   −maxSpeed×maxShare, +maxSpeed×maxShare)
+ *
+ * Delegates to `computeKineticIntentVelocity` (scrollIntent.ts), the single
+ * canonical implementation. Gated by scrollability; 0 when disabled, outside
+ * the viewport band, or on any non-finite input — never NaN.
  */
 export function computePointerFollowVelocity(
 	input: PointerFollowInput,
 ): number {
-	if (!input.enabled) return 0;
-	if (
-		!Number.isFinite(input.pointerY) ||
-		!Number.isFinite(input.viewportTop) ||
-		!Number.isFinite(input.viewportBottom) ||
-		!Number.isFinite(input.maxSpeed) ||
-		!Number.isFinite(input.pointerVelocityY)
-	) {
-		return 0;
-	}
-	const maxSpeed = Math.max(0, input.maxSpeed);
-	if (maxSpeed === 0) return 0;
-	if (
-		input.pointerY < input.viewportTop ||
-		input.pointerY > input.viewportBottom ||
-		input.viewportBottom <= input.viewportTop
-	) {
-		return 0;
-	}
-	const vy = input.pointerVelocityY;
-	const speed = Math.abs(vy);
-	if (speed <= POINTER_FOLLOW_MIN_VELOCITY) return 0;
-	const cap = maxSpeed * POINTER_FOLLOW_MAX_SHARE;
-	const magnitude = Math.min(
-		cap,
-		(speed - POINTER_FOLLOW_MIN_VELOCITY) * POINTER_FOLLOW_GAIN,
-	);
-	const target = vy > 0 ? magnitude : -magnitude;
-	if (target < 0 && !input.canScrollUp) return 0;
-	if (target > 0 && !input.canScrollDown) return 0;
-	return target;
+	return computeKineticIntentVelocity({
+		pointerY: input.pointerY,
+		pointerVelocityY: input.pointerVelocityY,
+		viewportTop: input.viewportTop,
+		viewportBottom: input.viewportBottom,
+		maxSpeed: input.maxSpeed,
+		canScrollUp: input.canScrollUp,
+		canScrollDown: input.canScrollDown,
+		enabled: input.enabled,
+	});
 }

@@ -149,14 +149,16 @@ describe("computePointerAutoScrollVelocity", () => {
 		expect(computePointerAutoScrollVelocity({ ...BASE, pointerY: 100 })).toBe(-320);
 	});
 
-	it("adds a velocity assist when flicking toward the near edge", () => {
+	it("is position-only: pointer velocity does not change the edge intent", () => {
+		// §八: the edge mechanism must NOT read pointer velocity — any
+		// velocity assist belongs to the kinetic (pointer-follow) path.
 		const idle = computePointerAutoScrollVelocity({ ...BASE, pointerY: 470 });
 		const flick = computePointerAutoScrollVelocity({
 			...BASE,
 			pointerY: 470,
 			pointerVelocityY: 900,
 		});
-		expect(flick).toBeGreaterThan(idle);
+		expect(flick).toBe(idle);
 
 		const idleUp = computePointerAutoScrollVelocity({ ...BASE, pointerY: 130 });
 		const flickUp = computePointerAutoScrollVelocity({
@@ -164,24 +166,25 @@ describe("computePointerAutoScrollVelocity", () => {
 			pointerY: 130,
 			pointerVelocityY: -900,
 		});
-		expect(flickUp).toBeLessThan(idleUp);
+		expect(flickUp).toBe(idleUp);
 	});
 
-	it("lets a fast flick pre-scroll before reaching the positional zones", () => {
-		// pointerY 380 is inside the dead zone (base 0) but in the lower
-		// half — a decisive downward flick should already move the list.
+	it("does not pre-scroll from a dead-zone flick (kinetic path only)", () => {
+		// §八/§九: pointerY 380 is inside the dead zone (base 0). The EDGE
+		// mechanism is position-only, so velocity does NOT move it — the
+		// flick pre-scroll is the kinetic (pointer-follow) path's job.
 		expect(computePointerAutoScrollVelocity({ ...BASE, pointerY: 380 })).toBe(0);
 		const v = computePointerAutoScrollVelocity({
 			...BASE,
 			pointerY: 380,
 			pointerVelocityY: 800,
 		});
-		expect(v).toBeGreaterThan(0);
+		expect(v).toBe(0);
 	});
 
 	it("ignores velocity pointing away from the near edge", () => {
-		// Moving up while hovering in the lower half must not fight the
-		// positional intent.
+		// §八: moving up while hovering in the lower half must not affect
+		// the position-only edge intent.
 		const v = computePointerAutoScrollVelocity({
 			...BASE,
 			pointerY: 380,
