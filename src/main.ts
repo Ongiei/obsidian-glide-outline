@@ -260,6 +260,7 @@ export default class GlideOutlinePlugin extends Plugin {
 				pointerAutoScroll: s.pointerAutoScroll,
 				pointerAutoScrollSpeed: s.pointerAutoScrollSpeed,
 				pointerAutoScrollZone: s.pointerAutoScrollZone,
+				pointerFollowEnabled: s.pointerFollowEnabled,
 				edgeFadeEnabled: s.edgeFadeEnabled,
 				edgeFadeSize: s.edgeFadeSize,
 				showLevels: s.showLevels,

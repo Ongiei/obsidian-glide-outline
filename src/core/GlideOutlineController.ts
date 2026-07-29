@@ -59,14 +59,19 @@ export class GlideOutlineController {
 		private readonly perf: PerfCapture | null = null,
 	) {
 		this.renderComponent.load();
-		this.outlineView = new GlideOutlineView(view.contentEl, getSettings, {
-			// Keyboard activation (Enter / Space, event.detail === 0).
-			onJump: (item) => this.jumpTo(item),
-			renderLabel: (labelEl, item) => this.renderLabel(labelEl, item),
-			// Row geometry re-measured → magnification cache is stale.
-			// Optional chaining: fires before `magnification` exists too.
-			onMetricsChanged: () => this.magnification?.invalidate(),
-		});
+		this.outlineView = new GlideOutlineView(
+			view.contentEl,
+			getSettings,
+			{
+				// Keyboard activation (Enter / Space, event.detail === 0).
+				onJump: (item) => this.jumpTo(item),
+				renderLabel: (labelEl, item) => this.renderLabel(labelEl, item),
+				// Row geometry re-measured → magnification cache is stale.
+				// Optional chaining: fires before `magnification` exists too.
+				onMetricsChanged: () => this.magnification?.invalidate(),
+			},
+			this.perf,
+		);
 		this.magnification = new MagnificationController(
 			this.outlineView,
 			getSettings,
