@@ -117,7 +117,7 @@ describe("PerfCapture", () => {
 		perf.recordFrame(0);
 		perf.recordFrame(16);
 		const report = perf.stop(win)!;
-		expect(report.counters.longTaskCount).toBe(0);
+		expect(report.counters.rendererLongTaskCount).toBe(0);
 	});
 
 	it("start resets all data from a previous capture", () => {
@@ -209,6 +209,60 @@ describe("PerfCapture", () => {
 		expect(report.frames.count).toBe(2); // 16 + 16, no 10000 anywhere
 		expect(report.frames.suspendedGapCount).toBe(0);
 		expect(listeners.size).toBe(0); // stop removed every listener
+	});
+
+	it("reports zeroed pluginPhases for every phase when never sampled (§四.2)", () => {
+		const perf = new PerfCapture();
+		const win = fakeWin();
+		perf.start(win);
+		const report = perf.stop(win)!;
+		for (const phase of [
+			"pluginFrameJs",
+			"read",
+			"styleWrite",
+			"envelopeMotionUpdate",
+			"autoScroll",
+		] as const) {
+			expect(report.pluginPhases[phase]).toEqual({
+				count: 0,
+				avgMs: 0,
+				p95Ms: 0,
+				maxMs: 0,
+			});
+		}
+	});
+
+	it("accumulates plugin phase samples into count/avg/p95/max (§四.2)", () => {
+		const perf = new PerfCapture();
+		const win = fakeWin();
+		perf.start(win);
+		perf.addPhaseSample("pluginFrameJs", 2);
+		perf.addPhaseSample("pluginFrameJs", 4);
+		perf.addPhaseSample("pluginFrameJs", 12);
+		perf.addPhaseSample("styleWrite", 1);
+		// Invalid samples are dropped, never poisoning the stats.
+		perf.addPhaseSample("read", Number.NaN);
+		perf.addPhaseSample("read", -5);
+		const report = perf.stop(win)!;
+		const frame = report.pluginPhases.pluginFrameJs;
+		expect(frame.count).toBe(3);
+		expect(frame.avgMs).toBe(6);
+		expect(frame.maxMs).toBe(12);
+		expect(frame.p95Ms).toBe(12);
+		expect(report.pluginPhases.styleWrite.count).toBe(1);
+		expect(report.pluginPhases.read.count).toBe(0);
+	});
+
+	it("ignores phase samples while inactive and resets them on start", () => {
+		const perf = new PerfCapture();
+		const win = fakeWin();
+		perf.addPhaseSample("pluginFrameJs", 100); // inactive → dropped
+		perf.start(win);
+		perf.addPhaseSample("pluginFrameJs", 3);
+		perf.stop(win);
+		perf.start(win);
+		const report = perf.stop(win)!;
+		expect(report.pluginPhases.pluginFrameJs.count).toBe(0);
 	});
 
 	it("start resets suspended-gap stats from a previous capture", () => {

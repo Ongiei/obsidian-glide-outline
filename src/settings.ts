@@ -60,6 +60,13 @@ export interface GlideOutlineSettings {
 	/** Slowly scroll the list when the pointer dwells near an edge. */
 	pointerAutoScroll: boolean;
 	/**
+	 * §十八: pre-scroll the outline in the direction of quick vertical
+	 * pointer movement, before the pointer reaches an edge. Independent of
+	 * the edge dwell/latch — fast flicks proactively bring headings toward
+	 * the pointer. Auto-scroll speed scales both mechanisms.
+	 */
+	pointerFollowEnabled: boolean;
+	/**
 	 * Multiplier on the pointer auto-scroll speed/acceleration.
 	 * 1 = the tuned default feel; 0.25 = very gentle; 4 = brisk.
 	 * Renamed from the legacy `pointerAutoScrollStrength` field, which
@@ -113,6 +120,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	edgeFadeEnabled: true,
 	edgeFadeSize: 28,
 	pointerAutoScroll: true,
+	pointerFollowEnabled: true,
 	pointerAutoScrollSpeed: 1,
 	pointerAutoScrollZone: 120,
 	markerStyle: "line",
@@ -238,6 +246,10 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 		pointerAutoScroll: bool(
 			data.pointerAutoScroll,
 			DEFAULT_SETTINGS.pointerAutoScroll,
+		),
+		pointerFollowEnabled: bool(
+			data.pointerFollowEnabled,
+			DEFAULT_SETTINGS.pointerFollowEnabled,
 		),
 		// Current field wins; otherwise migrate the legacy
 		// `pointerAutoScrollStrength` value (same unit and range).
@@ -780,6 +792,16 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.addToggle((toggle) =>
 				toggle.setValue(s.pointerAutoScroll).onChange(async (value) => {
 					s.pointerAutoScroll = value;
+					await this.plugin.applySettings();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Pointer movement assist")
+			.setDesc("Pre-scroll the list in the direction of quick vertical pointer movement, before the pointer reaches an edge. Auto-scroll speed applies to this too.")
+			.addToggle((toggle) =>
+				toggle.setValue(s.pointerFollowEnabled).onChange(async (value) => {
+					s.pointerFollowEnabled = value;
 					await this.plugin.applySettings();
 				}),
 			);

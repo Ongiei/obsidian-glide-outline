@@ -6,7 +6,8 @@ import { DEFAULT_SETTINGS } from "../src/settings";
 import { GlideOutlineView } from "../src/ui/GlideOutlineView";
 import {
 	MagnificationController,
-	MOTION_ACTIVE_CLASS,
+	MOTION_SCALE_CLASS,
+	MOTION_SHIFT_CLASS,
 } from "../src/ui/MagnificationController";
 
 function heading(level: number, text: string, line: number): HeadingItem {
@@ -157,12 +158,15 @@ describe("MagnificationController DOM write budget (sections 10/14/15)", () => {
 		const nearScale = near.style.getPropertyValue("--glide-scale");
 		expect(nearScale).not.toBe("");
 		expect(Number.parseFloat(nearScale)).toBeGreaterThan(1);
-		expect(near.classList.contains(MOTION_ACTIVE_CLASS)).toBe(true);
+		// §九: a magnified row holds the SCALE layer hint (its shift hint
+		// depends on displacement and may legitimately be off at rest).
+		expect(near.classList.contains(MOTION_SCALE_CLASS)).toBe(true);
 		// …while a row far below the viewport was never touched.
 		const far = rows[60];
 		expect(far.style.getPropertyValue("--glide-scale")).toBe("");
 		expect(far.style.getPropertyValue("--glide-shift-y")).toBe("");
-		expect(far.classList.contains(MOTION_ACTIVE_CLASS)).toBe(false);
+		expect(far.classList.contains(MOTION_SCALE_CLASS)).toBe(false);
+		expect(far.classList.contains(MOTION_SHIFT_CLASS)).toBe(false);
 	});
 
 	it("stops writing once displayed values converge (no per-frame churn)", () => {
@@ -206,7 +210,8 @@ describe("MagnificationController DOM write budget (sections 10/14/15)", () => {
 		for (const row of rows) {
 			expect(row.style.getPropertyValue("--glide-scale")).toBe("");
 			expect(row.style.getPropertyValue("--glide-shift-y")).toBe("");
-			expect(row.classList.contains(MOTION_ACTIVE_CLASS)).toBe(false);
+			expect(row.classList.contains(MOTION_SCALE_CLASS)).toBe(false);
+			expect(row.classList.contains(MOTION_SHIFT_CLASS)).toBe(false);
 		}
 	});
 
@@ -224,7 +229,8 @@ describe("MagnificationController DOM write budget (sections 10/14/15)", () => {
 		flushFrame();
 		expect(removedRow.style.getPropertyValue("--glide-scale")).toBe("");
 		expect(removedRow.style.getPropertyValue("--glide-shift-y")).toBe("");
-		expect(removedRow.classList.contains(MOTION_ACTIVE_CLASS)).toBe(false);
+		expect(removedRow.classList.contains(MOTION_SCALE_CLASS)).toBe(false);
+		expect(removedRow.classList.contains(MOTION_SHIFT_CLASS)).toBe(false);
 	});
 
 	it("scales to 1000 rows without touching rows outside the active range", () => {
@@ -259,7 +265,10 @@ describe("MagnificationController DOM write budget (sections 10/14/15)", () => {
 		for (const i of [200, 500, 999]) {
 			expect(bigRows[i].style.getPropertyValue("--glide-scale")).toBe("");
 			expect(
-				bigRows[i].classList.contains(MOTION_ACTIVE_CLASS),
+				bigRows[i].classList.contains(MOTION_SCALE_CLASS),
+			).toBe(false);
+			expect(
+				bigRows[i].classList.contains(MOTION_SHIFT_CLASS),
 			).toBe(false);
 		}
 	});

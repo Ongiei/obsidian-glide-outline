@@ -216,16 +216,24 @@
 	height: 100%;
 	/* Continuous displacement is RAF-interpolated in TS (section 11) —
 	   NO CSS transition here, or the two systems would fight over the
-	   same transform. translate3d keeps the row on a compositable path. */
-	transform: translate3d(0, var(--glide-shift-y, 0px), 0);
+	   same transform. §九.4: translateY (not translate3d) — the layer
+	   promotion is decided by the split will-change classes below, so a
+	   resting row rasterizes on the crisp non-composited path (Windows
+	   1080p text clarity). */
+	transform: translateY(var(--glide-shift-y, 0px));
 	pointer-events: none;
 }
 
-/* GPU layer hints ONLY for rows inside the active motion range
-   (section 15). The controller adds/removes this class; a converged or
-   out-of-range row never holds a standing layer. */
-.glide-outline-row--motion-active .glide-outline-motion,
-.glide-outline-row--motion-active .glide-outline-card {
+/* §九.1/§九.2: GPU layer hints are SPLIT by what actually moves. A row
+   that only shifts must not promote its card (text!) to a layer, and a
+   row that only scales must not promote the whole motion span. The
+   controller adds/removes these classes with epsilon thresholds and
+   strips them at identity — a converged or out-of-range row never holds
+   a standing layer, so its text re-rasterizes crisply. */
+.glide-outline-row--is-shifting .glide-outline-motion {
+	will-change: transform;
+}
+.glide-outline-row--is-scaling .glide-outline-card {
 	will-change: transform;
 }
 
