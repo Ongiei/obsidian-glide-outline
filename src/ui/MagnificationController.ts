@@ -1201,32 +1201,30 @@ export class MagnificationController {
 				while (added < COLLISION_TAPER_MAX_ROWS) {
 					const next = up ? cStart - 1 : cEnd + 1;
 					if (next < 0 || next > rowCount - 1) break;
-					// Per-pair base clearance — the gap this offscreen
-					// pair may compress to absorb the residual push.
-					const curEdge = up ? cStart : cEnd;
-					const spacing = up
-						? this.centers[curEdge] - this.centers[next]
-						: this.centers[next] - this.centers[curEdge];
-					const baseGap = Math.max(
-						0,
-						spacing -
-							(this.heights[curEdge] ?? 0) / 2 -
-							(this.heights[next] ?? 0) / 2,
-					);
-					// Absorbable per row: the base gap (compress to 0) or,
-					// for tight layouts (cardGap=0 → baseGap=0), the
-					// tolerance (1px overlap, the original taper).
-					const absorb = Math.max(baseGap, OVERLAP_TOLERANCE_PX);
-					// Apron: the first rows halve the step so slice-growth
-					// handoffs stay within tolerance once DPR rounding
-					// noise stacks on top (§三: 1.113px overshoot on the
-					// after-scroll handoff with a full-pixel step). Beyond
-					// the apron the step grows to the full absorption so
-					// the buffer stays short when cardGap > 0.
+					// §六: the per-row step. The buffer may compress each
+					// offscreen pair's gap from its base clearance down to 0
+					// to absorb the push locally — BUT only once the apron
+					// (first rows, half-pixel) has put enough rows between
+					// the relaxation and the visible boundary. The apron
+					// rows close by only 0.5px (within tolerance even if
+					// they scroll into view before converging); the full
+					// gap relaxation beyond them is far enough off-screen to
+					// converge first.
+					// §六 CORRECTNESS GUARD: gap relaxation creates buffer
+					// rows whose DISPLAYED gap is below cardGap. During fast
+					// kinetic scroll (strong pointer-follow) those rows enter
+					// the visible range before the displayed state converges
+					// back to the strict solver target, surfacing as visible
+					// overlap (3.27px = h·(s−1)/2, the scaled boundary
+					// growth). Until sparse-write / scroll-offset work lets
+					// us shrink the range WITHOUT relaxing gaps, the far
+					// zone uses the 1px tolerance taper (same as v1, 0
+					// overlaps) — the perf cost is accepted per §四 priority
+					// #1 (visibleOverlapViolationCount = 0).
 					const stepBudget =
 						added < COLLISION_TAPER_APRON_ROWS
 							? COLLISION_TAPER_APRON_STEP_PX
-							: absorb;
+							: OVERLAP_TOLERANCE_PX;
 					// Bridge: stop when the outer row's predicted settling
 					// write is within one absorption of the chain — the
 					// seam pair is feasible as written and the rows beyond
