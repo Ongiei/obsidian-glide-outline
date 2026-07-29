@@ -304,6 +304,11 @@ export class MagnificationController {
 	private activeRange: ActiveMotionRange = emptyActiveRange();
 	// --- Scroll-delta geometry (section 8) ------------------------------
 	private lastKnownScrollTop = 0;
+	/** §九 pending scroll delta — accumulated by the O(1) scroll handler
+	 * and applied ONCE per frame (not per scroll event). During fast
+	 * auto-scroll multiple scroll events can fire between frames; batching
+	 * avoids redundant O(n) center rewrites. */
+	private pendingScrollDelta = 0;
 	// --- Pointer edge auto-scroll state (coordinated in the same RAF as
 	// magnification, so the two never fight over frames).
 	/** Viewport bounds cached alongside the item cache — no per-frame rect. */
@@ -427,7 +432,10 @@ export class MagnificationController {
 					delta !== 0 &&
 					this.cache.length > 0
 				) {
-					this.applyScrollDelta(delta);
+					// §九: batch the delta — the O(n) center rewrite and
+					// anchor refresh happen ONCE per frame in applyPendingScroll,
+					// not per scroll event.
+					this.pendingScrollDelta += delta;
 				}
 				// User is scrolling the outline — pause active-heading follow.
 				this.view.setFollowEnabled(false);
@@ -994,6 +1002,14 @@ export class MagnificationController {
 			}
 			this.endFrame();
 			return;
+		}
+		// §九: apply the batched scroll delta ONCE per frame (not per
+		// scroll event). Multiple scroll events between frames coalesce
+		// into a single O(n) center rewrite + anchor refresh.
+		if (this.pendingScrollDelta !== 0) {
+			const d = this.pendingScrollDelta;
+			this.pendingScrollDelta = 0;
+			this.applyScrollDelta(d);
 		}
 		const settings = this.getSettings();
 		// Envelope/compat window from cached numbers (pure, O(log n)).
@@ -1897,20 +1913,54 @@ export class MagnificationController {
 		if (!Number.isFinite(this.lastPointerY)) return;
 		if (!this.pointer.overElement && !this.pointer.insideEnvelope) return;
 		const prev = this.pointerAnchorEl;
+		const py = this.lastPointerY;
+		const n = this.cache.length;
+		if (n === 0) return;
+
+		// §十: local check first — the pointer usually stays on (or near)
+		// the same row after a scroll. Check the previous anchor index ± 3.
+		const prevIdx = prev
+			? this.cacheIndexByEl.get(prev) ?? -1
+			: -1;
+		const boxContains = (i: number): boolean => {
+			const e = this.cache[i];
+			if (!e) return false;
+			const half = (e.height * e.motion.displayedScale) / 2;
+			return py >= e.visualCenter - half && py <= e.visualCenter + half;
+		};
+		if (prevIdx >= 0) {
+			for (let d = 0; d <= 3; d++) {
+				for (const i of d === 0 ? [prevIdx] : [prevIdx + d, prevIdx - d]) {
+					if (i >= 0 && i < n && boxContains(i)) {
+						this.pendingAnchorTarget = null;
+						this.anchorDirty = false;
+						this.pointerAnchorEl = this.cache[i].el;
+						this.perf?.markCachedAnchorResolve();
+						if (prev !== this.pointerAnchorEl) this.perf?.markStaleAnchorReset();
+						return;
+					}
+				}
+			}
+		}
+
+		// §十: binary search on visualCenter (sorted ascending — shifts
+		// are small relative to row spacing, so order is preserved).
+		let lo = 0;
+		let hi = n - 1;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (this.cache[mid].visualCenter < py) lo = mid + 1;
+			else hi = mid;
+		}
+		// Check lo-1, lo, lo+1 (binary search lands on the first center ≥ py,
+		// but the containing box might be the row below or above).
 		let found = -1;
-		for (let i = 0; i < this.cache.length; i++) {
-			const entry = this.cache[i];
-			const half = (entry.height * entry.motion.displayedScale) / 2;
-			if (
-				this.lastPointerY >= entry.visualCenter - half &&
-				this.lastPointerY <= entry.visualCenter + half
-			) {
+		for (const i of [lo - 1, lo, lo + 1]) {
+			if (i >= 0 && i < n && boxContains(i)) {
 				found = i;
 				break;
 			}
 		}
-		// The cached resolution is authoritative — drop any pending DOM
-		// target (it predates the scroll and is equally stale).
 		this.pendingAnchorTarget = null;
 		this.anchorDirty = false;
 		if (found >= 0) {
