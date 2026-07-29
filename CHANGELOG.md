@@ -2,6 +2,18 @@
 
 All notable changes to Glide Outline will be documented in this file.
 
+## 0.1.3
+
+Collision continuity hotfix + pointer movement assist strength.
+
+- fix: P0 collision regression — magnified neighbours no longer overlap at the motion-range boundary, and the "Newton's cradle" propagation under wheel scroll is eliminated. A three-range frame loop (Scale / Collision / Write) solves once per frame over Visible ∪ Scale + guard, and a lockstep taper chain walks the residual boundary push to zero across off-screen rows (snapped, re-anchored each frame, bridging legacy settling fields, half-pixel handoff apron).
+- fix: solver per-pair gaps clamped to the base layout's own clearance + 1px DPR snap headroom on actively spread pairs.
+- fix: scroll anchor refresh after scroll — stale anchors no longer cause overlap on the first post-scroll frame.
+- feat: **Pointer movement assist strength** — a new independent setting (0.5–2.5, default 1) that scales the kinetic pre-scroll magnitude and cap. The Edge auto-scroll speed (renamed from "Auto-scroll speed") now only affects edge dwell scrolling; the two can be tuned completely independently. Base kinetic params retuned for a noticeably stronger default feel (min speed 140→120, gain 0.25→0.35, max share 0.45→0.60).
+- feat: unified scroll-intent coordinator — edge auto-scroll (position-only, dwell + hysteresis latch) and pointer-follow (velocity-driven kinetic intent, no dwell) feed one shared acceleration-capped integrator. Manual wheel pauses both.
+- perf: extended performance capture — solver/range/expansion samples, overlap diagnostics, renderer long-task stats, per-phase plugin RAF timings.
+- test: 17-test collision-continuity regression suite (pointer sweeps + boundary cases, dpr 1/2, mixed heights).
+
 ## 0.1.2
 
 Performance pipeline, wheel routing and pointer-follow pre-scroll.
