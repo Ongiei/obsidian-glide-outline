@@ -8,6 +8,7 @@ import { computeOverflowState } from "../utils/overflow";
 import type { OverflowState } from "../utils/overflow";
 import { bridgeRectFor } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
+import type { PerfCapture } from "../core/PerfCapture";
 
 /** Copy the four edges out of a DOMRect-like object into our Rect shape. */
 function rectFrom(r: { left: number; top: number; right: number; bottom: number }): Rect {
@@ -63,6 +64,13 @@ export interface ItemRecord {
 	a11yLabelEl: HTMLElement;
 	/** Unscaled card height from the last measurement pass. */
 	baseCardHeight: number;
+	/**
+	 * §八: the row height actually written to `--glide-row-height` last
+	 * time (px). Unchanged heights skip the style write entirely — style
+	 * writes on ~50 rows per measure pass were pure Recalculate Style
+	 * fuel on Windows even when nothing moved.
+	 */
+	lastWrittenRowHeight: number;
 	/** What the label currently displays (text or rendered source). */
 	renderedContent: string;
 	renderedRich: boolean;
@@ -113,10 +121,15 @@ export class GlideOutlineView {
 		this.updateOverflowState();
 	};
 
+	/** §八: last written `--glide-viewport-pad` value (px); NaN = never. */
+	private lastWrittenViewportPad = Number.NaN;
+
 	constructor(
 		private readonly hostEl: HTMLElement,
 		private readonly getSettings: () => GlideOutlineSettings,
 		private readonly handlers: GlideOutlineViewHandlers,
+		/** On-demand perf capture (§八 measureRows counters). */
+		private readonly perf: PerfCapture | null = null,
 	) {
 		this.doc = hostEl.ownerDocument;
 		hostEl.classList.add(HOST_CLASS);
@@ -498,13 +511,21 @@ export class GlideOutlineView {
 		if (this.disposed) return;
 		const s = this.getSettings();
 		const records = [...this.itemRecords.values()];
+		this.perf?.count("measureRowsRunCount");
 
-		// Read phase.
+		// Read phase — a single batched offsetHeight sweep (§八.1). No
+		// writes may interleave here or every read forces a re-layout.
 		const heights = records.map((record) => record.cardEl.offsetHeight);
+		this.perf?.count("measureRowsReadCount", records.length);
 
-		// Write phase.
+		// Write phase — §八.2: only rows whose effective row height
+		// actually changed get a style write. On a steady list this loop
+		// writes NOTHING, so a redundant measure pass costs one layout
+		// read sweep and zero invalidation.
 		let maxCardHeight = 0;
 		let changed = false;
+		let writes = 0;
+		let skipped = 0;
 		for (let i = 0; i < records.length; i++) {
 			const record = records[i];
 			const cardHeight = heights[i];
@@ -515,10 +536,24 @@ export class GlideOutlineView {
 			maxCardHeight = Math.max(maxCardHeight, cardHeight);
 			const rowHeight =
 				Math.max(MARKER_MIN_HIT_HEIGHT, cardHeight) + s.cardGap;
-			record.rowEl.style.setProperty("--glide-row-height", `${rowHeight}px`);
+			if (record.lastWrittenRowHeight !== rowHeight) {
+				record.rowEl.style.setProperty(
+					"--glide-row-height",
+					`${rowHeight}px`,
+				);
+				record.lastWrittenRowHeight = rowHeight;
+				writes++;
+			} else {
+				skipped++;
+			}
+		}
+		if (writes > 0) this.perf?.count("measureRowsWriteCount", writes);
+		if (skipped > 0) {
+			this.perf?.count("measureRowsSkippedWriteCount", skipped);
 		}
 
-		// Vertical painting space so edge cards can magnify without clipping.
+		// Vertical painting space so edge cards can magnify without
+		// clipping — same skip-if-unchanged rule (§八.2).
 		const pad = computeVerticalSafeSpace({
 			maxBaseCardHeight: maxCardHeight,
 			maxScale: s.maxScale,
@@ -526,10 +561,16 @@ export class GlideOutlineView {
 			cardGap: s.cardGap,
 			shadowAllowance: this.shadowAllowance(),
 		});
-		this.rootEl.style.setProperty("--glide-viewport-pad", `${pad}px`);
-
-		// Row heights define scrollHeight — fades depend on the fresh value.
-		this.updateOverflowState();
+		if (pad !== this.lastWrittenViewportPad) {
+			this.rootEl.style.setProperty("--glide-viewport-pad", `${pad}px`);
+			this.lastWrittenViewportPad = pad;
+			// Row heights / pad define scrollHeight — refresh the fades
+			// only when the geometry could actually have moved (§八.2:
+			// class toggles are cheap but not free on Windows).
+			this.updateOverflowState();
+		} else if (writes > 0) {
+			this.updateOverflowState();
+		}
 
 		if (changed) this.handlers.onMetricsChanged?.();
 	}
@@ -614,6 +655,7 @@ export class GlideOutlineView {
 			labelEl: label,
 			a11yLabelEl: a11yLabel,
 			baseCardHeight: 0,
+			lastWrittenRowHeight: Number.NaN,
 			renderedContent: "",
 			renderedRich: false,
 		};
