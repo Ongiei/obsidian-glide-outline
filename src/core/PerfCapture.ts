@@ -39,8 +39,30 @@ export interface PerfCounters {
 	autoScrollFrameCount: number;
 	autoScrollStartCount: number;
 	autoScrollStopCount: number;
-	longTaskCount: number;
-	longTaskTotalMs: number;
+	/** §十九: frames where the EDGE mechanism contributed velocity. */
+	autoScrollEdgeFrameCount: number;
+	/** §十九: frames where pointer-follow pre-scroll contributed. */
+	pointerFollowFrameCount: number;
+	/**
+	 * §四.1: renderer long tasks (PerformanceObserver "longtask"). The
+	 * "renderer" prefix is deliberate — these are whole-renderer stalls
+	 * (any plugin, Obsidian itself, GC), NOT necessarily ours; the plugin
+	 * phase stats below are what isolates OUR share of a frame.
+	 */
+	rendererLongTaskCount: number;
+	rendererLongTaskTotalMs: number;
+	rendererLongTaskMaxMs: number;
+	/** §八: measureRows dedup effectiveness. */
+	measureRowsRunCount: number;
+	measureRowsReadCount: number;
+	measureRowsWriteCount: number;
+	measureRowsSkippedWriteCount: number;
+	/** §十一: wheel routing outcome histogram. */
+	wheelEventCount: number;
+	wheelOutlineCount: number;
+	wheelEditorHandoffCount: number;
+	wheelIgnoredCount: number;
+	wheelCooldownStartCount: number;
 }
 
 function zeroCounters(): PerfCounters {
@@ -60,9 +82,83 @@ function zeroCounters(): PerfCounters {
 		autoScrollFrameCount: 0,
 		autoScrollStartCount: 0,
 		autoScrollStopCount: 0,
-		longTaskCount: 0,
-		longTaskTotalMs: 0,
+		autoScrollEdgeFrameCount: 0,
+		pointerFollowFrameCount: 0,
+		rendererLongTaskCount: 0,
+		rendererLongTaskTotalMs: 0,
+		rendererLongTaskMaxMs: 0,
+		measureRowsRunCount: 0,
+		measureRowsReadCount: 0,
+		measureRowsWriteCount: 0,
+		measureRowsSkippedWriteCount: 0,
+		wheelEventCount: 0,
+		wheelOutlineCount: 0,
+		wheelEditorHandoffCount: 0,
+		wheelIgnoredCount: 0,
+		wheelCooldownStartCount: 0,
 	};
+}
+
+/**
+ * §四.2 plugin RAF phase names. Every duration is measured INSIDE our own
+ * frame callback with performance.now() pairs, so — unlike the renderer
+ * long tasks — these are unambiguously the plugin's own JS cost.
+ */
+export type PluginPhase =
+	| "pluginFrameJs"
+	| "read"
+	| "styleWrite"
+	| "envelopeMotionUpdate"
+	| "autoScroll";
+
+const PLUGIN_PHASES: readonly PluginPhase[] = [
+	"pluginFrameJs",
+	"read",
+	"styleWrite",
+	"envelopeMotionUpdate",
+	"autoScroll",
+];
+
+/** Per-phase ring capacity (~17 s of frames at 60 fps — enough for p95). */
+const PHASE_RING_CAPACITY = 1024;
+
+export interface PhaseStats {
+	count: number;
+	avgMs: number;
+	p95Ms: number;
+	maxMs: number;
+}
+
+class PhaseAccumulator {
+	count = 0;
+	totalMs = 0;
+	maxMs = 0;
+	private readonly ring = new Float64Array(PHASE_RING_CAPACITY);
+	private ringLength = 0;
+	private ringNext = 0;
+
+	add(ms: number): void {
+		this.count++;
+		this.totalMs += ms;
+		if (ms > this.maxMs) this.maxMs = ms;
+		this.ring[this.ringNext] = ms;
+		this.ringNext = (this.ringNext + 1) % PHASE_RING_CAPACITY;
+		if (this.ringLength < PHASE_RING_CAPACITY) this.ringLength++;
+	}
+
+	stats(): PhaseStats {
+		const n = this.ringLength;
+		const sorted = new Float64Array(n);
+		for (let i = 0; i < n; i++) sorted[i] = this.ring[i];
+		sorted.sort();
+		const p95 = n > 0 ? sorted[Math.min(n - 1, Math.floor(n * 0.95))] : 0;
+		return {
+			count: this.count,
+			avgMs: round2(this.count > 0 ? this.totalMs / this.count : 0),
+			p95Ms: round2(p95),
+			maxMs: round2(this.maxMs),
+		};
+	}
 }
 
 /** Config echo captured with the auto-scroll samples (§十八). */
@@ -106,6 +202,8 @@ export interface PerfReport {
 	};
 	/** §十五: why full geometry rebuilds ran. */
 	geometryRebuildReasons: Record<string, number>;
+	/** §四.2: plugin RAF phase durations (count/avg/p95/max per phase). */
+	pluginPhases: Record<PluginPhase, PhaseStats>;
 }
 
 interface LongTaskEntryLike {
@@ -136,6 +234,8 @@ export class PerfCapture {
 	private autoScrollAppliedSum = 0;
 	private autoScrollSampleCount = 0;
 	private autoScrollConfig: AutoScrollConfigEcho | null = null;
+	/** §四.2: per-phase duration accumulators (allocated on start). */
+	private phases = new Map<PluginPhase, PhaseAccumulator>();
 
 	/** Begin a capture; resets all previous data. Idempotent. */
 	start(win: Window & typeof globalThis): void {
@@ -153,6 +253,7 @@ export class PerfCapture {
 		this.autoScrollAppliedSum = 0;
 		this.autoScrollSampleCount = 0;
 		this.autoScrollConfig = null;
+		this.phases = new Map();
 		this.startedAt = win.performance.now();
 		this.active = true;
 		this.observeLongTasks(win);
@@ -252,6 +353,18 @@ export class PerfCapture {
 		this.autoScrollConfig = config;
 	}
 
+	/** §四.2: one plugin phase duration sample (ms). Ring-buffered. */
+	addPhaseSample(phase: PluginPhase, durationMs: number): void {
+		if (!this.active) return;
+		if (!Number.isFinite(durationMs) || durationMs < 0) return;
+		let acc = this.phases.get(phase);
+		if (!acc) {
+			acc = new PhaseAccumulator();
+			this.phases.set(phase, acc);
+		}
+		acc.add(durationMs);
+	}
+
 	/**
 	 * Break the frame chain the moment the window hides or loses focus, so
 	 * the (possibly enormous) wall-clock gap never reaches the interval
@@ -291,8 +404,11 @@ export class PerfCapture {
 		try {
 			const observer = new PO((list) => {
 				for (const entry of list.getEntries()) {
-					this.counters.longTaskCount++;
-					this.counters.longTaskTotalMs += entry.duration;
+					this.counters.rendererLongTaskCount++;
+					this.counters.rendererLongTaskTotalMs += entry.duration;
+					if (entry.duration > this.counters.rendererLongTaskMaxMs) {
+						this.counters.rendererLongTaskMaxMs = entry.duration;
+					}
 				}
 			});
 			observer.observe({ entryTypes: ["longtask"] });
@@ -368,7 +484,19 @@ export class PerfCapture {
 				config: this.autoScrollConfig ? { ...this.autoScrollConfig } : null,
 			},
 			geometryRebuildReasons: { ...this.geometryRebuildReasons },
+			pluginPhases: this.buildPhaseStats(),
 		};
+	}
+
+	/** §四.2: stats for every known phase (zeroes when never sampled). */
+	private buildPhaseStats(): Record<PluginPhase, PhaseStats> {
+		const empty: PhaseStats = { count: 0, avgMs: 0, p95Ms: 0, maxMs: 0 };
+		const out = {} as Record<PluginPhase, PhaseStats>;
+		for (const phase of PLUGIN_PHASES) {
+			const acc = this.phases.get(phase);
+			out[phase] = acc ? acc.stats() : { ...empty };
+		}
+		return out;
 	}
 }
 
