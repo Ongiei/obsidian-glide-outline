@@ -14,6 +14,7 @@ function input(overrides: Partial<PointerFollowInput> = {}): PointerFollowInput 
 		viewportTop: 100,
 		viewportBottom: 500,
 		maxSpeed: 900,
+		strength: 1,
 		canScrollUp: true,
 		canScrollDown: true,
 		enabled: true,
@@ -33,21 +34,52 @@ describe("computePointerFollowVelocity (§十三–§十五)", () => {
 			),
 		).toBe(0);
 		expect(
-			computePointerFollowVelocity(input({ pointerVelocityY: -150 })),
+			computePointerFollowVelocity(
+				input({ pointerVelocityY: -POINTER_FOLLOW_MIN_VELOCITY }),
+			),
 		).toBe(0);
 	});
 
-	it("a fast downward gesture pre-scrolls DOWN with the documented gain", () => {
+	it("a fast downward gesture pre-scrolls DOWN with the documented gain (at edge)", () => {
+		// AT the viewport edge the depth factor is exactly 1, so the
+		// magnitude is exactly (|vy| − min) × gain × 1.
 		const vy = POINTER_FOLLOW_MIN_VELOCITY + 400;
-		const v = computePointerFollowVelocity(input({ pointerVelocityY: vy }));
+		const v = computePointerFollowVelocity(
+			input({ pointerVelocityY: vy, pointerY: 500 }),
+		);
 		expect(v).toBeCloseTo(400 * POINTER_FOLLOW_GAIN, 10);
 		expect(v).toBeGreaterThan(0);
 	});
 
 	it("a fast upward gesture pre-scrolls UP (sign follows the gesture)", () => {
 		const vy = -(POINTER_FOLLOW_MIN_VELOCITY + 400);
-		const v = computePointerFollowVelocity(input({ pointerVelocityY: vy }));
+		const v = computePointerFollowVelocity(
+			input({ pointerVelocityY: vy, pointerY: 100 }),
+		);
 		expect(v).toBeCloseTo(-400 * POINTER_FOLLOW_GAIN, 10);
+	});
+
+	it("scales with the depth factor: an edge flick beats a center flick", () => {
+		// Same velocity at the dead-center (depthFactor 0.35) must produce
+		// a smaller target than at the edge (depthFactor ~1).
+		const vy = POINTER_FOLLOW_MIN_VELOCITY + 1000;
+		const center = computePointerFollowVelocity(
+			input({ pointerVelocityY: vy, pointerY: 300 }),
+		);
+		const edge = computePointerFollowVelocity(
+			input({ pointerVelocityY: vy, pointerY: 499 }),
+		);
+		expect(center).toBeGreaterThan(0);
+		expect(edge).toBeGreaterThan(center);
+	});
+
+	it("a fast flick in the dead-center still pre-scrolls (depthFactor > 0)", () => {
+		// §九: the center is not a hard dead zone for the kinetic path —
+		// depthFactor is 0.35 there, so a decisive flick still moves.
+		const v = computePointerFollowVelocity(
+			input({ pointerVelocityY: 5000, pointerY: 300 }),
+		);
+		expect(v).toBeGreaterThan(0);
 	});
 
 	it("magnitude is capped at maxSpeed × POINTER_FOLLOW_MAX_SHARE", () => {

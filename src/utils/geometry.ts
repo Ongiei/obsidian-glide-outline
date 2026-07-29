@@ -185,6 +185,17 @@ export function mapVisualPointerToBase(
 }
 
 /**
+ * DPR snap headroom (§三): written shifts are pixel-aligned per row, so two
+ * adjacent rows whose RAW shifts differ by ε can straddle a rounding
+ * boundary and end up a full device pixel closer after snapping. Pairs that
+ * the magnification actively spreads (either side scaled > 1) get this much
+ * extra clearance so the WRITTEN geometry keeps the published invariant.
+ * Uniformly-shifted pairs snap identically (no relative error), and taper
+ * pairs differ by whole pixels (snap commutes) — neither needs headroom.
+ */
+export const COLLISION_SNAP_HEADROOM_PX = 1;
+
+/**
  * Collision-free dock magnification (pure function).
  *
  * 1. Every item gets a cosine-falloff scale from its distance to the pointer.
@@ -240,17 +251,48 @@ export function computeCollisionFreeMagnification(
 		scaledHeights[i] = Math.max(0, items[i].height) * scale;
 	}
 
+	// Per-pair minimum gap: never demand MORE clearance than the base
+	// layout provides at identity (§四). If the DOM stacks rows tighter
+	// than `minimumGap`, that spacing is the renderer's business — the
+	// solver must not "fix" it by spreading untouched rows apart, which
+	// would push an unbounded displacement across the whole list.
+	const pairGaps = new Array<number>(Math.max(0, n - 1));
+	for (let i = 0; i + 1 < n; i++) {
+		const baseGap =
+			items[i + 1].center -
+			items[i].center -
+			Math.max(0, items[i].height) / 2 -
+			Math.max(0, items[i + 1].height) / 2;
+		let pg = Math.min(gap, Math.max(0, baseGap));
+		// §三 DPR snap headroom: the controller writes `--glide-shift-y`
+		// pixel-aligned (`Math.round(shift·dpr)/dpr`), so two adjacent rows
+		// whose RAW targets differ by ε can straddle a rounding boundary and
+		// end up ~1 device pixel CLOSER after snapping — that can violate
+		// the published gap invariant by up to OVERLAP_TOLERANCE_PX. Pairs
+		// the magnification ACTIVELY spreads (either side scaled > 1) get
+		// this much extra clearance so the WRITTEN geometry keeps the
+		// invariant. Uniformly-shifted pairs snap identically (no relative
+		// error) and taper pairs differ by whole pixels (snap commutes) —
+		// neither needs headroom, so we only widen active pairs.
+		if (scales[i] > 1 || scales[i + 1] > 1) {
+			pg += COLLISION_SNAP_HEADROOM_PX;
+		}
+		pairGaps[i] = pg;
+	}
+
 	// 2. Anchored solve: `anchor` keeps its original center; constraints
 	// propagate outward without ever pulling items toward the anchor.
 	const solve = (anchor: number): number[] => {
 		const centers = new Array<number>(n);
 		centers[anchor] = items[anchor].center;
 		for (let i = anchor - 1; i >= 0; i--) {
-			const required = scaledHeights[i] / 2 + scaledHeights[i + 1] / 2 + gap;
+			const required =
+				scaledHeights[i] / 2 + scaledHeights[i + 1] / 2 + pairGaps[i];
 			centers[i] = Math.min(items[i].center, centers[i + 1] - required);
 		}
 		for (let i = anchor + 1; i < n; i++) {
-			const required = scaledHeights[i - 1] / 2 + scaledHeights[i] / 2 + gap;
+			const required =
+				scaledHeights[i - 1] / 2 + scaledHeights[i] / 2 + pairGaps[i - 1];
 			centers[i] = Math.max(items[i].center, centers[i - 1] + required);
 		}
 		return centers;

@@ -1,10 +1,17 @@
 import { computeCollisionFreeMagnification } from "../utils/geometry";
+import { type AutoScrollStopReason } from "../utils/overflow";
 import {
-	computeAutoScrollZones,
-	computePointerAutoScroll,
-	computePointerFollowVelocity,
-} from "../utils/overflow";
-import type { AutoScrollStopReason } from "../utils/overflow";
+	computeEdgeScrollIntent,
+	computeKineticIntentVelocity,
+	predictedPointerY,
+	resolveEdgeZones,
+	PointerSampleRing,
+	POINTER_FOLLOW_DECAY_TAU_MS,
+	POINTER_FOLLOW_MAX_SHARE,
+	type EdgeIntentState,
+	type PointerKinematicsState,
+	type ScrollIntegratorState,
+} from "../utils/scrollIntent";
 import {
 	MANUAL_WHEEL_COOLDOWN_MS,
 	resolveWheelRoute,
@@ -19,7 +26,8 @@ import {
 import type { PointerEnvelope, Rect } from "../utils/envelope";
 import {
 	computeActiveMotionRange,
-	computeMotionRange,
+	computeScaleRange,
+	computeVisibleRange,
 	emptyActiveRange,
 	isEmptyActiveRange,
 } from "../utils/activeRange";
@@ -29,6 +37,7 @@ import {
 	motionAlpha,
 	motionStateConverged,
 	stepMotionState,
+	stepToward,
 	SCALE_EPSILON,
 	SHIFT_EPSILON,
 } from "../utils/motionInterp";
@@ -64,6 +73,13 @@ interface CachedItem {
 	/** §九: split will-change classes currently applied per axis. */
 	shifting: boolean;
 	scaling: boolean;
+	/** §六: true when this row was a snapped taper-chain row last frame.
+	 * On the frame it transitions into the solver core, its displayed
+	 * state still carries the relaxed-gap buffer position; the write
+	 * phase snaps it once to the strict target (off-screen, invisible)
+	 * so the gap does not surface as a visible overlap while it
+	 * interpolates home. */
+	wasSnapped: boolean;
 }
 
 /** Grace period before collapsing, so crossing a transparent gap between
@@ -82,14 +98,34 @@ export const AUTO_SCROLL_MAX_SPEED = 320;
  * ends with "zone-exit" — small jitter never re-arms the dwell gate. */
 export const AUTO_SCROLL_EXIT_HYSTERESIS_PX = 12;
 /** Dwell before the list starts moving, so brushing an edge does not
- * immediately yank the heading the user was about to click. */
+ * immediately yank the heading the user was about to click. EDGE only —
+ * the kinetic (pointer-follow) intent has NO dwell (§九). */
 export const AUTO_SCROLL_DWELL_MS = 140;
-/** Low-pass filter factor for pointer velocity (per pointermove sample).
- * Higher = snappier response, lower = smoother. */
-export const POINTER_VELOCITY_SMOOTHING = 0.3;
 /** Max change of the APPLIED scroll speed, px/s per second — the
  * acceleration cap that turns raw target speeds into damped motion. */
 export const AUTO_SCROLL_ACCEL = 1400;
+/** §四: guard rows added on each side of the collision seed range. A
+ * buffer row absorbed into the core passes through the guard (off-screen)
+ * where its relaxed-gap displayed state is snapped once to the strict
+ * solver target (see wasSnapped), so it never surfaces as a visible
+ * overlap. */
+export const COLLISION_GUARD_ROWS = 2;
+/** §三/§十四: allowed adjacent overlap slack, px (rounding tolerance). */
+export const OVERLAP_TOLERANCE_PX = 1;
+/** §四/§六 handoff apron: when a layout has NO offscreen gap to relax
+ * (cardGap=0 → baseGap=0), the buffer collapses to the 1px tolerance
+ * taper. The first rows then use a HALF-pixel step so that when the
+ * collision slice later absorbs them, the inherited pair closure (plus
+ * DPR rounding noise) stays within tolerance (§三: 1.113px overshoot on
+ * the after-scroll handoff with a full-pixel step). Only the near rows
+ * need this; far rows never hand off while far. */
+export const COLLISION_TAPER_APRON_ROWS = 8;
+export const COLLISION_TAPER_APRON_STEP_PX = 0.5;
+/** §四/§六: hard cap on taper rows per side (write-budget guard). The
+ * buffer normally stops on its own once the boundary shift is absorbed
+ * by offscreen gap relaxation; the cap bounds pathological shifts so
+ * rows far outside the viewport stay at identity (never written). */
+export const COLLISION_TAPER_MAX_ROWS = 160;
 
 /** Horizontal / vertical slack (px) added to each heading's bridge rect so
  * the hover envelope stays comfortable without growing to the longest title. */
@@ -273,25 +309,47 @@ export class MagnificationController {
 	/** Viewport bounds cached alongside the item cache — no per-frame rect. */
 	private viewportTop = 0;
 	private viewportBottom = 0;
-	/** Dwell gate: velocity only applies after the pointer lingered. */
-	private dwellTimer = 0;
-	private dwellPassed = false;
 	/** §八 four-field pointer interaction state (replaces `pointerInside`). */
 	private pointer: PointerInteractionState = idlePointerState();
-	/** Timestamp of the previous frame for time-based scroll deltas. */
-	private lastFrameTime = Number.NaN;
 	/** Timestamp base for the motion interpolation step (section 11). */
 	private lastMotionTime = Number.NaN;
-	// --- Pointer-follow state (velocity-assisted auto-scroll).
-	/** Smoothed pointer vertical velocity, px/s (+ = down). */
-	private pointerVelocityY = 0;
-	/** Timestamp of the previous pointermove sample. */
-	private lastMoveTime = Number.NaN;
-	/** Currently APPLIED scroll speed after accel-cap damping, px/s. */
-	private appliedVelocity = 0;
-	/** §十.5: until this timestamp BOTH scroll mechanisms stay paused —
-	 * the user's hand is on the wheel; the outline must not fight it. */
-	private manualWheelUntil = 0;
+	// --- §四 three independent row windows (recomputed each frame) -----
+	/** Rows that may have scale > 1 (pointerY ± radius + 1). */
+	private scaleRange: ActiveMotionRange = emptyActiveRange();
+	/** Rows the collision solver must cover (visible ∪ scale ∪ settling ∪
+	 * guard, then dynamically expanded until both boundaries are safe). */
+	private collisionRange: ActiveMotionRange = emptyActiveRange();
+	// --- §七 Scroll-intent coordinator state -------------------------
+	/** Edge (positional) intent state, fully independent from kinetic. */
+	private edgeIntent: EdgeIntentState = {
+		dwellTimer: 0,
+		dwellPassed: false,
+		latched: false,
+		direction: 0,
+		lastStopReason: null,
+	};
+	/** Kinetic (pointer-follow) state: the velocity sample ring. */
+	private kinematics: PointerKinematicsState = {
+		samples: new PointerSampleRing(6, 90),
+		velocityY: 0,
+		predictedY: Number.NaN,
+		lastSampleTime: Number.NaN,
+		active: false,
+	};
+	/** §十 event dedup key (pointerId:timeStamp) so an element+window
+	 * double-dispatch of the same move is sampled only once. */
+	private lastSampleEventId = "";
+	/** §十四: a kinetic session is live (nonzero target last frame). */
+	private kineticActive = false;
+	/** Shared integrator that combines the two intents. */
+	private integrator: ScrollIntegratorState = {
+		edgeIntentVelocity: 0,
+		kineticIntentVelocity: 0,
+		combinedTargetVelocity: 0,
+		appliedVelocity: 0,
+		lastFrameTime: Number.NaN,
+		manualWheelCooldownUntil: 0,
+	};
 	// --- Settling range (§五/§六) -------------------------------------
 	/** Inclusive index window of rows that may still be off identity
 	 * (mid-interpolation or carrying written vars / layer classes). The
@@ -441,7 +499,7 @@ export class MagnificationController {
 		this.cancelFrame();
 		this.cancelCollapse();
 		this.clearPressed();
-		this.stopAutoScroll("dispose");
+		this.resetAllScrollIntent("dispose");
 		this.clearMagnification();
 		this.disposables.dispose();
 	}
@@ -478,8 +536,10 @@ export class MagnificationController {
 		this.pendingAnchorTarget = event.target;
 		this.anchorDirty = true;
 		// Fresh gesture: no carried-over velocity from a previous visit.
-		this.pointerVelocityY = 0;
-		this.lastMoveTime = event.timeStamp;
+		this.kinematics.samples.clear();
+		this.kinematics.velocityY = 0;
+		this.kinematics.active = false;
+		this.lastSampleEventId = "";
 		this.syncExpanded();
 		this.schedule();
 	};
@@ -535,8 +595,10 @@ export class MagnificationController {
 			this.pointer.insideEnvelope = true;
 			this.pointerAnchorEl = null;
 			this.anchorDirty = false;
-			if (!this.pointer.autoScrollLatched) {
-				this.stopAutoScroll("pointer-left");
+			// §十/§十二: a gap crossing keeps the KINETIC intent alive (the
+			// gesture continues); only an unlatched EDGE session stops.
+			if (!this.edgeIntent.latched) {
+				this.stopEdgeIntent("pointer-left");
 			}
 			this.cancelCollapse();
 			return;
@@ -545,7 +607,7 @@ export class MagnificationController {
 		this.pointer.insideEnvelope = false;
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
-		this.stopAutoScroll("pointer-left");
+		this.resetAllScrollIntent("pointer-left");
 		this.armCollapse();
 	};
 
@@ -627,17 +689,22 @@ export class MagnificationController {
 		this.startManualWheelCooldown();
 	};
 
-	/** §十.5: (re)start the 160 ms cooldown that pauses edge auto-scroll
-	 * AND pointer-follow. Counted once per cooldown WINDOW (consecutive
-	 * wheel ticks extend the window, they do not re-count). The outline
+	/** §十.5/§十一: (re)start the 160 ms cooldown that pauses edge
+	 * auto-scroll AND pointer-follow. Counted once per cooldown WINDOW
+	 * (consecutive wheel ticks extend the window, they do not re-count).
+	 * NOT a pointer exit: intents stop with "manual-wheel", the applied
+	 * velocity is smoothly zeroed by the integrator, and the outline
 	 * never collapses on wheel. */
 	private startManualWheelCooldown(): void {
 		const now = this.win.performance.now();
-		if (now >= this.manualWheelUntil) {
+		if (now >= this.integrator.manualWheelCooldownUntil) {
 			this.perf?.count("wheelCooldownStartCount");
+			this.perf?.count("manualWheelCooldownCount");
 		}
-		this.manualWheelUntil = now + MANUAL_WHEEL_COOLDOWN_MS;
-		this.stopAutoScroll("manual-wheel");
+		this.integrator.manualWheelCooldownUntil =
+			now + MANUAL_WHEEL_COOLDOWN_MS;
+		this.stopEdgeIntent("manual-wheel");
+		this.stopKineticIntent("manual-wheel");
 		this.schedule();
 	}
 
@@ -667,7 +734,7 @@ export class MagnificationController {
 		this.pointer.insideEnvelope = false;
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
-		this.stopAutoScroll("pointer-left");
+		this.resetAllScrollIntent("pointer-left");
 		this.armCollapse();
 	}
 
@@ -707,25 +774,26 @@ export class MagnificationController {
 	}
 
 	/**
-	 * Low-pass filtered pointer velocity (px/s, + = down). The filter
-	 * absorbs pointermove jitter so the assist reacts to the gesture, not
-	 * to single-event noise; the frame loop decays it between events.
-	 * Pure math on event fields — allowed in the input-only handler.
+	 * §九/§十 Feed the kinetic velocity ring from a pointer move. Element and
+	 * window listeners both call this; the (pointerId:timeStamp) key dedups
+	 * the same physical event so it is sampled only once. Pure math on event
+	 * fields — allowed in the input-only handler. The ring computes a
+	 * smoothed, direction-stable velocity that the frame loop decays between
+	 * events (a stopped pointer stops assisting within a few frames).
 	 */
 	private trackPointerVelocity(event: PointerEvent): void {
 		const now = event.timeStamp;
-		const dtMs = now - this.lastMoveTime;
-		if (Number.isFinite(dtMs) && dtMs > 0 && dtMs < 200) {
-			const instant = ((event.clientY - this.lastPointerY) / dtMs) * 1000;
-			if (Number.isFinite(instant)) {
-				this.pointerVelocityY +=
-					(instant - this.pointerVelocityY) * POINTER_VELOCITY_SMOOTHING;
-			}
-		} else {
-			// Gap too long (or clock oddity) — treat as a new gesture.
-			this.pointerVelocityY = 0;
-		}
-		this.lastMoveTime = now;
+		const id = `${event.pointerId}:${now}`;
+		if (id === this.lastSampleEventId) return; // dedup double dispatch
+		this.lastSampleEventId = id;
+		this.kinematics.samples.push(event.clientY, now);
+		this.kinematics.lastSampleTime = now;
+		this.kinematics.velocityY = this.kinematics.samples.velocityY(now);
+		this.kinematics.active = this.kinematics.samples.active;
+		this.kinematics.predictedY = predictedPointerY(
+			this.lastPointerY,
+			this.kinematics.velocityY,
+		);
 	}
 
 	private onRootPointerDown = (event: PointerEvent): void => {
@@ -752,9 +820,9 @@ export class MagnificationController {
 			},
 			captured: null,
 		};
-		// Stop pointer edge auto-scroll while the target is held.
+		// Stop ALL scroll intents while the target is held (§十一).
 		this.pressed = pressed;
-		this.stopAutoScroll("pressed");
+		this.resetAllScrollIntent("pressed");
 		// Section 12: freezing is structural — the frame loop is suspended
 		// while pressed (schedule() refuses, frame() early-returns), and no
 		// CSS transition remains on the continuous transforms, so BOTH the
@@ -827,7 +895,7 @@ export class MagnificationController {
 
 	private onWindowBlur = (): void => {
 		this.clearPressed();
-		this.stopAutoScroll("window-blur");
+		this.resetAllScrollIntent("window-blur");
 		this.pointer.overElement = false;
 		this.pointer.insideEnvelope = false;
 		this.pointerAnchorEl = null;
@@ -867,7 +935,7 @@ export class MagnificationController {
 		this.view.setFollowEnabled(!expanded);
 		if (!expanded) {
 			this.cancelFrame();
-			this.stopAutoScroll("collapsed");
+			this.resetAllScrollIntent("collapsed");
 			this.clearMagnification();
 			this.envelope = { railRect: emptyRect(), items: [] };
 			this.envelopeMotionShift.clear();
@@ -981,32 +1049,71 @@ export class MagnificationController {
 		const alpha = motionAlpha(dtMs);
 		const dpr = this.win.devicePixelRatio || 1;
 
-		// §五.2 Motion Influence Range: ONLY the rows the pointer's
-		// magnification disc (± displacement allowance ± overscan) can
-		// touch — a stationary pointer never pulls the whole viewport
-		// into the solver/writer again (§三 root cause).
-		const motionRange = computeMotionRange({
+		// ---------------- §四 three independent ranges ----------------
+		// 1) SCALE range: pointerY ± radius (+1 overscan). Answers "which
+		//    rows may have scale > 1" and is NEVER enlarged by collision
+		//    propagation (the solver's radius falloff enforces this).
+		this.scaleRange = computeScaleRange({
 			centers: this.centers,
 			heights: this.heights,
 			pointerY: this.lastPointerY,
 			radius: settings.radius,
-			maxScale: settings.maxScale,
 		});
-		const mStart = motionRange.start;
-		const mEnd = motionRange.end;
-		const motionEmpty = isEmptyActiveRange(motionRange);
+		// 2) COLLISION range seed = Visible ∪ Scale + guard. §五 safe
+		//    fallback: the visible window is ALWAYS included, so every
+		//    on-screen adjacent pair is covered by the solver — the §三
+		//    regression (boundary rows colliding with untouched outside
+		//    rows) cannot re-enter through a too-small slice. Settling rows
+		//    are deliberately NOT folded into the seed: they only need
+		//    identity targets (handled by the iteration window below), and
+		//    seeding them would let the range creep outward frame over
+		//    frame as freshly written rows re-enter the seed.
+		const visibleRange = computeVisibleRange({
+			centers: this.centers,
+			heights: this.heights,
+			viewportTop: this.viewportTop,
+			viewportBottom: this.viewportBottom,
+		});
+		const rowCount = this.cache.length;
+		const settleEmpty = this.settleEnd < this.settleStart;
+		let cStart = Number.MAX_SAFE_INTEGER;
+		let cEnd = -1;
+		// Seed = Visible ∪ Scale only. Settling rows are deliberately NOT
+		// folded into the seed: taper rows written outside the slice carry
+		// pairwise deltas of ≤ COLLISION_TAPER_STEP_PX and interpolate home
+		// with a shared alpha, so their pairs stay feasible without being
+		// re-solved. Seeding them would let the range creep outward frame
+		// over frame as freshly written taper rows re-enter the seed
+		// (§九/§十 write-budget violation).
+		for (const range of [visibleRange, this.scaleRange]) {
+			if (!isEmptyActiveRange(range)) {
+				cStart = Math.min(cStart, range.start);
+				cEnd = Math.max(cEnd, range.end);
+			}
+		}
+		const collisionEmpty = cEnd < cStart;
+		if (!collisionEmpty) {
+			cStart = Math.max(0, cStart - COLLISION_GUARD_ROWS);
+			cEnd = Math.min(rowCount - 1, cEnd + COLLISION_GUARD_ROWS);
+		}
 
-		// Solver over the MOTION range only (section 10/§五). Rows outside
-		// it are provably identity (the range includes the displacement
-		// allowance), so slicing cannot create boundary jumps.
-		let results: { scale: number; translateY: number }[] = [];
-		if (!motionEmpty) {
-			const activeLayout = this.layout.slice(mStart, mEnd + 1);
-			const activeShifts = this.shifts.slice(mStart, mEnd + 1);
+		// 3) Solve ONCE over the core slice (Visible ∪ Scale ∪ Settling +
+		//    guard). The anchored solver keeps every pair inside the slice
+		//    feasible; the boundary rows may carry a residual push that
+		//    would collide with the identity rows just outside.
+		let results: {
+			scale: number;
+			translateY: number;
+			/** Taper row: displayed follows target directly (no interp). */
+			snap?: boolean;
+		}[] = [];
+		if (!collisionEmpty) {
 			const anchorIndex = this.resolveAnchorIndex();
+			const activeLayout = this.layout.slice(cStart, cEnd + 1);
+			const activeShifts = this.shifts.slice(cStart, cEnd + 1);
 			const anchorInSlice =
-				anchorIndex >= mStart && anchorIndex <= mEnd
-					? anchorIndex - mStart
+				anchorIndex >= cStart && anchorIndex <= cEnd
+					? anchorIndex - cStart
 					: -1;
 			const solverStart = measure ? this.win.performance.now() : 0;
 			results = computeCollisionFreeMagnification(
@@ -1027,27 +1134,166 @@ export class MagnificationController {
 					activeLayout.length,
 				);
 			}
+			// §四/§六 boundary buffer — LOCKSTEP SNAP with OFFSCREEN GAP
+			// RELAXATION. The solved boundary row carries a residual push
+			// that identity rows just outside would overlap. Instead of a
+			// fixed 1px/row taper (which needs |shift| rows and inflated
+			// the collision range to ~78 rows avg, §三 perf regression),
+			// each offscreen buffer pair may COMPRESS its gap from the
+			// base clearance down to 0 (and one tolerance unit into
+			// overlap) to absorb the push locally. The per-row step is
+			// therefore max(baseGap, tolerance) — for a real cardGap of
+			// 6 the push absorbs in ~E/6 rows instead of E rows.
+			//   • buffer rows SNAP (displayed = target) and are re-anchored
+			//     every frame to the boundary row's predicted WRITTEN
+			//     shift, so chain values stay grid-aligned with zero
+			//     rounding noise;
+			//   • the seam compensates the boundary row's scaled half-height
+			//     growth h·(s−1)/2;
+			//   • the chain BRIDGES toward legacy settling fields (compares
+			//     the outer row's predicted written shift) instead of
+			//     cliff-dropping to 0;
+			//   • for cardGap=0 layouts (baseGap=0) the step collapses to
+			//     the tolerance — the original 1px taper, still feasible.
+			// Visible pairs keep strict cardGap (solver + headroom); only
+			// OFFSCREEN active pairs may relax (§六.1 contract). Far rows
+			// stay identity and are never written (§九/§十 budget).
+			const taperBoundary = (up: boolean): void => {
+				const edgeIdx0 = up ? cStart : cEnd;
+				const edge = up ? results[0] : results[results.length - 1];
+				if (!edge || edge.translateY === 0) return;
+				const edgeMotion = this.cache[edgeIdx0]?.motion;
+				// Predicted post-step written shift of the boundary row.
+				const predictedShift = edgeMotion
+					? stepToward(
+							edgeMotion.displayedShift,
+							edge.translateY,
+							alpha,
+							SHIFT_EPSILON,
+						)
+					: edge.translateY;
+				// Predicted on-screen scale this frame (max of target and
+				// post-step displayed — covers growth AND settling decay).
+				const predictedScale = edgeMotion
+					? stepToward(
+							edgeMotion.displayedScale,
+							edge.scale,
+							alpha,
+							SCALE_EPSILON,
+						)
+					: edge.scale;
+				const edgeScale = Math.max(edge.scale, predictedScale);
+				const growth = Math.max(
+					0,
+					((this.heights[edgeIdx0] ?? 0) * (edgeScale - 1)) / 2,
+				);
+				// Quantized UP + epsilon margin: keeps the seam within
+				// tolerance even when the boundary write is epsilon-
+				// skipped, and stays on the DPR grid so buffer values
+				// snap to themselves.
+				const growthQ =
+					Math.ceil((growth + SHIFT_EPSILON) * dpr) / dpr;
+				let shift = quantizeShift(predictedShift, dpr);
+				shift =
+					Math.round((shift + (up ? -growthQ : growthQ)) * 100) /
+					100;
+				let added = 0;
+				while (added < COLLISION_TAPER_MAX_ROWS) {
+					const next = up ? cStart - 1 : cEnd + 1;
+					if (next < 0 || next > rowCount - 1) break;
+					// §六: the per-row step. The buffer may compress each
+					// offscreen pair's gap from its base clearance down to 0
+					// to absorb the push locally — BUT only once the apron
+					// (first rows, half-pixel) has put enough rows between
+					// the relaxation and the visible boundary. The apron
+					// rows close by only 0.5px (within tolerance even if
+					// they scroll into view before converging); the full
+					// gap relaxation beyond them is far enough off-screen to
+					// converge first.
+					// §六 CORRECTNESS GUARD: gap relaxation creates buffer
+					// rows whose DISPLAYED gap is below cardGap. During fast
+					// kinetic scroll (strong pointer-follow) those rows enter
+					// the visible range before the displayed state converges
+					// back to the strict solver target, surfacing as visible
+					// overlap (3.27px = h·(s−1)/2, the scaled boundary
+					// growth). Until sparse-write / scroll-offset work lets
+					// us shrink the range WITHOUT relaxing gaps, the far
+					// zone uses the 1px tolerance taper (same as v1, 0
+					// overlaps) — the perf cost is accepted per §四 priority
+					// #1 (visibleOverlapViolationCount = 0).
+					const stepBudget =
+						added < COLLISION_TAPER_APRON_ROWS
+							? COLLISION_TAPER_APRON_STEP_PX
+							: OVERLAP_TOLERANCE_PX;
+					// Bridge: stop when the outer row's predicted settling
+					// write is within one absorption of the chain — the
+					// seam pair is feasible as written and the rows beyond
+					// stay on their own course.
+					const om = this.cache[next]?.motion;
+					const outerWritten = om
+						? quantizeShift(
+								stepToward(
+									om.displayedShift,
+									0,
+									alpha,
+									SHIFT_EPSILON,
+								),
+								dpr,
+							)
+						: 0;
+					const delta = outerWritten - shift;
+					if (Math.abs(delta) <= stepBudget) break;
+					// Step TOWARD the outer field by the budget, not toward
+					// 0 — the legacy settling field may sit on the opposite
+					// side of 0, and a walk-to-0 chain would cliff against
+					// it (§三: 9px seam at the chain end).
+					const stepPx = Math.min(Math.abs(delta), stepBudget);
+					shift =
+						Math.round(
+							(shift + Math.sign(delta) * stepPx) * 100,
+						) / 100;
+					const r = {
+						scale: 1,
+						translateY: shift,
+						snap: true,
+					};
+					if (up) {
+						results.unshift(r);
+						cStart = next;
+					} else {
+						results.push(r);
+						cEnd = next;
+					}
+					added++;
+				}
+				if (measure && perf && added > 0) {
+					perf.addCollisionExpansionSample(added);
+					perf.count("boundarySafetyRetryCount");
+				}
+			};
+			taperBoundary(true);
+			taperBoundary(false);
 		}
+		this.collisionRange = collisionEmpty
+			? emptyActiveRange()
+			: { start: cStart, end: cEnd };
 
-		// §五/§六 per-frame iteration window = Motion ∪ Settling. Rows
-		// outside BOTH are clean by invariant (identity, no written vars,
-		// no layer classes) and are never visited — the frame cost tracks
-		// the pointer's neighbourhood, not the visible row count.
-		const settleEmpty = this.settleEnd < this.settleStart;
-		let iterStart = 0;
+		// §五/§六 per-frame iteration window = Collision ∪ Settling.
+		// Settling rows OUTSIDE the collision range get identity targets
+		// and interpolate home; rows outside both are clean by invariant
+		// and never visited.
+		let iterStart = Number.MAX_SAFE_INTEGER;
 		let iterEnd = -1;
-		if (!motionEmpty && !settleEmpty) {
-			iterStart = Math.min(mStart, this.settleStart);
-			iterEnd = Math.max(mEnd, this.settleEnd);
-		} else if (!motionEmpty) {
-			iterStart = mStart;
-			iterEnd = mEnd;
-		} else if (!settleEmpty) {
-			iterStart = this.settleStart;
-			iterEnd = this.settleEnd;
+		if (!collisionEmpty) {
+			iterStart = cStart;
+			iterEnd = cEnd;
+		}
+		if (!settleEmpty) {
+			iterStart = Math.min(iterStart, this.settleStart);
+			iterEnd = Math.max(iterEnd, this.settleEnd);
 		}
 		iterStart = Math.max(0, iterStart);
-		iterEnd = Math.min(this.cache.length - 1, iterEnd);
+		iterEnd = Math.min(rowCount - 1, iterEnd);
 
 		// ---------------- WRITE PHASE (styles only) ----------------
 		const writeStart = measure ? this.win.performance.now() : 0;
@@ -1058,14 +1304,24 @@ export class MagnificationController {
 		for (let i = iterStart; i <= iterEnd; i++) {
 			const entry = this.cache[i];
 			const state = entry.motion;
-			const inMotion = !motionEmpty && i >= mStart && i <= mEnd;
+			const inMotion = !collisionEmpty && i >= cStart && i <= cEnd;
 			if (inMotion) {
-				const r = results[i - mStart];
+				const r = results[i - cStart];
 				state.targetScale = r.scale;
 				state.targetShift = r.translateY;
+				// §四/§六 snap: taper chain rows jump straight to target
+				// (the target already tracks the boundary's per-frame
+				// interpolation, so interpolating on top would lag the
+				// anchor and reopen the seam).
+				if (r.snap) {
+					state.displayedScale = r.scale;
+					state.displayedShift = r.translateY;
+				}
+				entry.wasSnapped = false;
 			} else {
 				state.targetScale = 1;
 				state.targetShift = 0;
+				entry.wasSnapped = false;
 				// Fast skip: fully idle settling row — no interpolation,
 				// no writes, no repeated identity resets (section 10/14).
 				// It simply drops out of the next settling window.
@@ -1144,6 +1400,36 @@ export class MagnificationController {
 				"styleWrite",
 				this.win.performance.now() - writeStart,
 			);
+			// §十四 range statistics. WRITE range = rows still dirty
+			// (unconverged / carrying vars or layer classes) — exactly
+			// the settling window published above.
+			const scaleRows = isEmptyActiveRange(this.scaleRange)
+				? 0
+				: this.scaleRange.end - this.scaleRange.start + 1;
+			const collisionRows = collisionEmpty ? 0 : cEnd - cStart + 1;
+			const writeRows =
+				nextSettleEnd >= 0 ? nextSettleEnd - nextSettleStart + 1 : 0;
+			perf.addRangeSample(scaleRows, collisionRows, writeRows);
+			// §十四 correctness diagnostic (capture-only, never a standing
+			// hot path): displayed visual boxes of adjacent VISIBLE rows
+			// must keep cardGap within tolerance.
+			for (let i = visibleRange.start; i < visibleRange.end; i++) {
+				const a = this.cache[i];
+				const b = this.cache[i + 1];
+				if (!a || !b) break;
+				const aBottom =
+					this.centers[i] +
+					a.motion.displayedShift +
+					(this.heights[i] * a.motion.displayedScale) / 2;
+				const bTop =
+					this.centers[i + 1] +
+					b.motion.displayedShift -
+					(this.heights[i + 1] * b.motion.displayedScale) / 2;
+				perf.recordOverlap(
+					aBottom + settings.cardGap - bTop,
+					OVERLAP_TOLERANCE_PX,
+				);
+			}
 		}
 		if (writes > 0) {
 			perf?.count("cssVarWriteCount", writes);
@@ -1242,96 +1528,162 @@ export class MagnificationController {
 	}
 
 	/**
-	 * One auto-scroll step inside the coordinated RAF loop, combining the
-	 * TWO INDEPENDENT mechanisms (§十三):
+	 * §七 ScrollIntentCoordinator — one step inside the coordinated RAF.
 	 *
-	 *   1. EDGE auto-scroll — positional, dwell-gated, latched with
-	 *      hysteresis (§八~§十一 state machine, unchanged):
+	 * Two INDEPENDENT intents feed one shared integrator (§十三: they only
+	 * ever change scrollTop; magnification reacts through the scroll
+	 * handler's delta path):
+	 *
+	 *   1. EDGE intent — POSITION-ONLY (§八), dwell-gated, latched with
+	 *      hysteresis:
 	 *        idle ──(edge target≠0, dwell passes)──▶ latched
 	 *        latched ──(gap crossing / jitter / <12 px retreat)──▶ latched
 	 *        latched ──(explicit stop reason)──▶ idle, reason recorded
-	 *   2. POINTER-FOLLOW pre-scroll — velocity-driven, NO dwell (§十四):
-	 *      a fast decisive gesture pre-scrolls in its own direction from
-	 *      anywhere in the band; the gesture itself is the intent signal.
+	 *   2. KINETIC intent — velocity-driven pointer-follow (§九), NO
+	 *      dwell, NO latch: the gesture itself is the intent signal; a
+	 *      slow pointer never triggers; mid-viewport flicks work (depth
+	 *      factor), and it stays alive through gap crossings (§十二 —
+	 *      eligibility is insideEnvelope, independent from the edge
+	 *      latch).
 	 *
-	 * The combined target is clamped to ±maxSpeed (§十七) and fed through
-	 * the shared acceleration-capped damping. A manual wheel pauses BOTH
-	 * mechanisms for MANUAL_WHEEL_COOLDOWN_MS (§十.5).
+	 * combinedTarget = clamp(edge + kinetic, −maxSpeed, +maxSpeed), fed
+	 * through the shared acceleration-capped damping. A manual wheel
+	 * pauses BOTH for MANUAL_WHEEL_COOLDOWN_MS (§十一, not a pointer exit).
 	 */
 	private stepAutoScroll(settings: GlideOutlineSettings): void {
 		const pointer = this.pointer;
-		// Focus-only expansion never auto-scrolls; a held pointer locks the
-		// list so the click target cannot slide away mid-click. A latched
-		// session survives gap crossings (overElement false) as long as the
-		// pointer stays inside the envelope's stable band (§十二).
-		const engaged =
-			pointer.overElement ||
-			(pointer.autoScrollLatched && pointer.insideEnvelope);
-		if (!this.pointerExpanded || this.pressed || !engaged) {
-			this.stopAutoScroll(this.pressed ? "pressed" : "pointer-left");
+		const integ = this.integrator;
+		if (!this.pointerExpanded || this.pressed) {
+			this.resetAllScrollIntent(this.pressed ? "pressed" : "collapsed");
 			return;
 		}
 		const now = this.win.performance.now();
 
-		// §十.5 manual-wheel cooldown: the user's hand is on the wheel —
+		// §十一 manual-wheel cooldown: the user's hand is on the wheel —
 		// both mechanisms stay paused; the damped velocity restarts from 0
 		// when the cooldown expires (the loop stays alive to resume).
-		if (now < this.manualWheelUntil) {
-			this.appliedVelocity = 0;
-			this.lastFrameTime = Number.NaN;
+		if (now < integ.manualWheelCooldownUntil) {
+			integ.edgeIntentVelocity = 0;
+			integ.kineticIntentVelocity = 0;
+			integ.combinedTargetVelocity = 0;
+			integ.appliedVelocity = 0;
+			integ.lastFrameTime = Number.NaN;
 			this.schedule();
 			return;
 		}
 
-		const dt = Number.isNaN(this.lastFrameTime)
+		const dt = Number.isNaN(integ.lastFrameTime)
 			? 0
-			: Math.min(0.05, (now - this.lastFrameTime) / 1000);
-		this.lastFrameTime = now;
+			: Math.min(0.05, (now - integ.lastFrameTime) / 1000);
+		integ.lastFrameTime = now;
 
-		// Between pointermove events the smoothed pointer velocity decays,
-		// so a stopped pointer stops assisting within a few frames.
-		if (dt > 0) {
-			this.pointerVelocityY *= Math.max(0, 1 - dt * 6);
-			if (Math.abs(this.pointerVelocityY) < 1) this.pointerVelocityY = 0;
+		// §九 decay: between pointermove events the ring velocity decays
+		// exponentially (τ = POINTER_FOLLOW_DECAY_TAU_MS), so a stopped
+		// pointer stops assisting within a few frames.
+		const kin = this.kinematics;
+		if (dt > 0 && kin.velocityY !== 0) {
+			kin.velocityY *= Math.exp(
+				(-dt * 1000) / POINTER_FOLLOW_DECAY_TAU_MS,
+			);
+			if (Math.abs(kin.velocityY) < 1) kin.velocityY = 0;
 		}
 
 		// P1-3: speed scales max velocity AND acceleration linearly, so the
 		// ramp/damp character is identical at every speed setting.
+		// §十一/§十六: edge and kinetic now have INDEPENDENT speed knobs —
+		// edge uses pointerAutoScrollSpeed, kinetic uses pointerFollowStrength.
 		const speed = settings.pointerAutoScrollSpeed;
+		const followStrength = settings.pointerFollowStrength;
 		const zonePx = settings.pointerAutoScrollZone;
-		const maxSpeed = AUTO_SCROLL_MAX_SPEED * speed;
+		const edgeMaxSpeed = AUTO_SCROLL_MAX_SPEED * speed;
+		const kineticMaxSpeed =
+			AUTO_SCROLL_MAX_SPEED * POINTER_FOLLOW_MAX_SHARE * followStrength;
+		// Combined clamp honours whichever mechanism can run faster.
+		const combinedMaxSpeed = Math.max(edgeMaxSpeed, kineticMaxSpeed);
 		const overflow = this.view.getOverflowState();
-		const edgeResult = computePointerAutoScroll({
-			pointerY: this.lastPointerY,
-			pointerVelocityY: this.pointerVelocityY,
-			viewportTop: this.viewportTop,
-			viewportBottom: this.viewportBottom,
-			maxSpeed,
-			triggerZonePx: zonePx,
-			canScrollUp: overflow.canScrollUp,
-			canScrollDown: overflow.canScrollDown,
-			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
-			reducedMotion: false,
-		});
-		const edgeTarget = edgeResult.velocity;
-		// §十四: pointer-follow pre-scroll — independent gate
-		// (`pointerFollowEnabled`), no dwell, no latch.
-		const followTarget = computePointerFollowVelocity({
-			pointerY: this.lastPointerY,
-			pointerVelocityY: this.pointerVelocityY,
-			viewportTop: this.viewportTop,
-			viewportBottom: this.viewportBottom,
-			maxSpeed,
-			canScrollUp: overflow.canScrollUp,
-			canScrollDown: overflow.canScrollDown,
-			enabled: settings.pointerFollowEnabled && overflow.hasOverflow,
-		});
-
-		// §十八 config echo — only while a capture is running (zero cost
-		// otherwise; `active` is a plain boolean read).
 		const perf = this.perf;
+
+		// ---- EDGE intent (§八: position-only; §十二: own eligibility) ----
+		const edge = this.edgeIntent;
+		const edgeEligible =
+			pointer.overElement || (edge.latched && pointer.insideEnvelope);
+		let edgeTarget = 0;
+		let edgeStopReason: string | null = null;
+		if (edgeEligible) {
+			const result = computeEdgeScrollIntent({
+				pointerY: this.lastPointerY,
+				viewportTop: this.viewportTop,
+				viewportBottom: this.viewportBottom,
+			maxSpeed: edgeMaxSpeed,
+			triggerZonePx: zonePx,
+				canScrollUp: overflow.canScrollUp,
+				canScrollDown: overflow.canScrollDown,
+				enabled: settings.pointerAutoScroll && overflow.hasOverflow,
+			});
+			edgeTarget = result.velocity;
+			edgeStopReason = result.stopReason;
+			// Dwell gate — EDGE only (§九: kinetic has no dwell). Brushing
+			// an edge never yanks the intended click target.
+			if (edgeTarget !== 0 && !edge.dwellPassed) {
+				if (edge.dwellTimer === 0) {
+					edge.dwellTimer = this.win.setTimeout(() => {
+						edge.dwellTimer = 0;
+						edge.dwellPassed = true;
+						integ.lastFrameTime = Number.NaN;
+						this.schedule();
+					}, AUTO_SCROLL_DWELL_MS);
+				}
+				edgeTarget = 0;
+			}
+			if (edgeTarget !== 0 && !edge.latched) {
+				edge.latched = true;
+				pointer.autoScrollLatched = true;
+				pointer.lastStopReason = null;
+				perf?.count("autoScrollStartCount");
+				perf?.count("edgeIntentActivationCount");
+			}
+			edge.direction = edgeTarget < 0 ? -1 : edgeTarget > 0 ? 1 : 0;
+		} else if (
+			edge.latched ||
+			edge.dwellPassed ||
+			edge.dwellTimer !== 0
+		) {
+			this.stopEdgeIntent("pointer-left");
+		}
+
+		// ---- KINETIC intent (§九/§十二: independent eligibility) --------
+		const kineticEligible =
+			pointer.overElement || pointer.insideEnvelope;
+		let kineticTarget = 0;
+		if (kineticEligible) {
+			kineticTarget = computeKineticIntentVelocity({
+				pointerY: this.lastPointerY,
+				pointerVelocityY: kin.velocityY,
+				viewportTop: this.viewportTop,
+				viewportBottom: this.viewportBottom,
+				// §十一/§十六: pass the BASE max speed; the function applies
+				// MAX_SHARE × strength internally so the kinetic cap is
+				// independent of the edge speed setting.
+				maxSpeed: AUTO_SCROLL_MAX_SPEED,
+				strength: followStrength,
+				canScrollUp: overflow.canScrollUp,
+				canScrollDown: overflow.canScrollDown,
+				enabled: settings.pointerFollowEnabled && overflow.hasOverflow,
+			});
+			if (kineticTarget !== 0 && !this.kineticActive) {
+				this.kineticActive = true;
+				perf?.count("kineticIntentActivationCount");
+			} else if (kineticTarget === 0 && this.kineticActive) {
+				this.kineticActive = false;
+				perf?.countKineticStopReason("decayed");
+			}
+		} else if (this.kineticActive || kin.velocityY !== 0) {
+			this.stopKineticIntent("pointer-left");
+		}
+
+		// §十八 config echo — only while a capture is running.
 		if (perf?.active === true) {
-			const zones = computeAutoScrollZones(
+			const zones = resolveEdgeZones(
 				this.viewportBottom - this.viewportTop,
 				zonePx,
 			);
@@ -1344,79 +1696,68 @@ export class MagnificationController {
 			});
 		}
 
-		if (
-			edgeTarget === 0 &&
-			followTarget === 0 &&
-			this.appliedVelocity === 0
-		) {
-			// §十一 hysteresis: a latched session in the dead zone survives
-			// while the pointer is within 12 px of the trigger boundary —
-			// re-entering resumes instantly without a second dwell.
-			if (
-				pointer.autoScrollLatched &&
-				edgeResult.stopReason === "dead-zone" &&
-				this.withinZoneHysteresis(zonePx)
-			) {
-				return; // latch held; next pointermove reschedules
-			}
-			this.stopAutoScroll(edgeResult.stopReason ?? "dead-zone");
-			return;
-		}
-
-		// Dwell gate — EDGE mechanism only (§十四: follow has no dwell).
-		// Brushing an edge never yanks the intended click target; a fast
-		// flick through the middle acts immediately.
-		let edgeApplied = edgeTarget;
-		if (edgeTarget !== 0 && !this.dwellPassed) {
-			if (this.dwellTimer === 0) {
-				this.dwellTimer = this.win.setTimeout(() => {
-					this.dwellTimer = 0;
-					this.dwellPassed = true;
-					this.lastFrameTime = Number.NaN;
-					this.schedule();
-				}, AUTO_SCROLL_DWELL_MS);
-			}
-			edgeApplied = 0;
-		}
-
-		// §九: an edge session is live — latch it (idempotent; counted once).
-		if (edgeApplied !== 0 && !pointer.autoScrollLatched) {
-			pointer.autoScrollLatched = true;
-			pointer.lastStopReason = null;
-			perf?.count("autoScrollStartCount");
-		}
-
-		// §十七: combine, then clamp — the edge machinery stays dominant
-		// (follow is capped at 0.6 × maxSpeed) and the sum can never
-		// exceed the configured peak speed.
-		const target = Math.min(
-			maxSpeed,
-			Math.max(-maxSpeed, edgeApplied + followTarget),
+		// ---- Shared integrator (§七): combine, clamp, damp --------------
+		integ.edgeIntentVelocity = edgeTarget;
+		integ.kineticIntentVelocity = kineticTarget;
+		const combined = Math.min(
+			combinedMaxSpeed,
+			Math.max(-combinedMaxSpeed, edgeTarget + kineticTarget),
 		);
+		integ.combinedTargetVelocity = combined;
 
-		if (target === 0 && this.appliedVelocity === 0) {
-			return; // edge dwell pending — the dwell timer reschedules
+		if (combined === 0 && integ.appliedVelocity === 0) {
+			// §十一 hysteresis: a latched edge session in the dead zone
+			// survives while the pointer is within 12 px of the trigger
+			// boundary — re-entering resumes instantly without a second
+			// dwell. Any other terminal stop reason releases the latch.
+			if (edge.latched) {
+				if (
+					edgeStopReason === "dead-zone" &&
+					this.withinZoneHysteresis(zonePx)
+				) {
+					return; // latch held; next pointermove reschedules
+				}
+				this.stopEdgeIntent(
+					(edgeStopReason as AutoScrollStopReason | null) ??
+						"dead-zone",
+				);
+			}
+			return; // dwell pending — its timer reschedules
 		}
 
 		if (dt > 0) {
-			// Acceleration-capped chase → continuous ramps and damping.
-			const maxDelta = AUTO_SCROLL_ACCEL * speed * dt;
-			const delta = target - this.appliedVelocity;
-			this.appliedVelocity +=
-				Math.min(maxDelta, Math.max(-maxDelta, delta));
-			if (target === 0 && Math.abs(this.appliedVelocity) < 4) {
-				this.appliedVelocity = 0;
+			// §十六 acceleration-capped chase → continuous ramps and damping.
+			// Accel scales with the LARGER of edge speed / follow strength so
+			// a low edge speed never makes a high-strength kinetic feel soggy
+			// (and vice versa).
+			const accelScale = Math.max(speed, followStrength);
+			const maxDelta = AUTO_SCROLL_ACCEL * accelScale * dt;
+			const delta = combined - integ.appliedVelocity;
+			integ.appliedVelocity += Math.min(
+				maxDelta,
+				Math.max(-maxDelta, delta),
+			);
+			if (combined === 0 && Math.abs(integ.appliedVelocity) < 4) {
+				integ.appliedVelocity = 0;
 			}
-			if (this.appliedVelocity !== 0) {
-				this.view.viewportEl.scrollTop += this.appliedVelocity * dt;
+			if (integ.appliedVelocity !== 0) {
+				// §十三: scroll intents ONLY move scrollTop — geometry and
+				// magnification react through the scroll handler's delta.
+				this.view.viewportEl.scrollTop += integ.appliedVelocity * dt;
 				perf?.count("autoScrollFrameCount");
-				perf?.addAutoScrollSample(target, this.appliedVelocity);
-				// §十九: which mechanism(s) contributed this frame.
-				if (edgeApplied !== 0) {
+				perf?.addAutoScrollSample(combined, integ.appliedVelocity);
+				perf?.addCombinedIntentSample(combined);
+				perf?.addAppliedVelocitySample(integ.appliedVelocity);
+				// §十四/§十九: which mechanism(s) contributed this frame.
+				if (edgeTarget !== 0) {
 					perf?.count("autoScrollEdgeFrameCount");
+					perf?.count("edgeIntentFrameCount");
+					perf?.addEdgeIntentSample(edgeTarget);
 				}
-				if (followTarget !== 0) {
+				if (kineticTarget !== 0) {
 					perf?.count("pointerFollowFrameCount");
+					perf?.count("kineticIntentFrameCount");
+					perf?.addKineticIntentSample(kineticTarget);
 				}
 			}
 		}
@@ -1428,7 +1769,7 @@ export class MagnificationController {
 	private withinZoneHysteresis(zonePx: number): boolean {
 		const height = this.viewportBottom - this.viewportTop;
 		if (!(height > 0) || !Number.isFinite(this.lastPointerY)) return false;
-		const { preZone } = computeAutoScrollZones(height, zonePx);
+		const { preZone } = resolveEdgeZones(height, zonePx);
 		const distTop = this.lastPointerY - this.viewportTop;
 		const distBottom = this.viewportBottom - this.lastPointerY;
 		const nearest = Math.min(distTop, distBottom);
@@ -1436,30 +1777,66 @@ export class MagnificationController {
 	}
 
 	/**
-	 * Cancel the dwell gate, damping state and time base (velocity → 0),
-	 * release the latch and record WHY the session ended (§九/§十八).
-	 * No-op sessions (nothing armed, nothing latched) record nothing.
+	 * §十一 Stop the EDGE intent only: cancel the dwell gate, release the
+	 * latch, zero the edge target and record WHY. The kinetic intent and
+	 * the shared integrator's applied velocity are NOT touched (the
+	 * damping smoothly zeroes when both targets are 0).
 	 */
-	private stopAutoScroll(reason: AutoScrollStopReason): void {
+	private stopEdgeIntent(reason: AutoScrollStopReason): void {
+		const edge = this.edgeIntent;
 		const hadSession =
-			this.pointer.autoScrollLatched ||
-			this.dwellPassed ||
-			this.dwellTimer !== 0 ||
-			this.appliedVelocity !== 0;
-		if (this.dwellTimer !== 0) {
-			this.win.clearTimeout(this.dwellTimer);
-			this.dwellTimer = 0;
+			edge.latched || edge.dwellPassed || edge.dwellTimer !== 0;
+		if (edge.dwellTimer !== 0) {
+			this.win.clearTimeout(edge.dwellTimer);
+			edge.dwellTimer = 0;
 		}
-		this.dwellPassed = false;
-		this.lastFrameTime = Number.NaN;
-		this.appliedVelocity = 0;
-		this.pointerVelocityY = 0;
+		edge.dwellPassed = false;
+		edge.direction = 0;
+		this.integrator.edgeIntentVelocity = 0;
 		if (hadSession) {
+			edge.lastStopReason = reason;
 			this.pointer.lastStopReason = reason;
 			this.perf?.count("autoScrollStopCount");
 			this.perf?.countStopReason(reason);
+			this.perf?.countEdgeStopReason(reason);
 		}
+		edge.latched = false;
 		this.pointer.autoScrollLatched = false;
+	}
+
+	/**
+	 * §十一 Stop the KINETIC intent only: clear the sample ring, velocity
+	 * and prediction. The edge latch/dwell are NOT touched.
+	 */
+	private stopKineticIntent(reason: AutoScrollStopReason): void {
+		const kin = this.kinematics;
+		const hadSession =
+			this.kineticActive || kin.velocityY !== 0 || kin.samples.active;
+		kin.samples.clear();
+		kin.velocityY = 0;
+		kin.predictedY = Number.NaN;
+		kin.lastSampleTime = Number.NaN;
+		kin.active = false;
+		this.lastSampleEventId = "";
+		this.integrator.kineticIntentVelocity = 0;
+		if (hadSession) {
+			this.perf?.countKineticStopReason(reason);
+		}
+		this.kineticActive = false;
+	}
+
+	/**
+	 * §十一 Full reset — pointerdown / pointercancel / window blur /
+	 * collapse / dispose / feature-off. Stops BOTH intents and zeroes the
+	 * shared integrator immediately (no smooth-out: these are hard exits).
+	 */
+	private resetAllScrollIntent(reason: AutoScrollStopReason): void {
+		this.stopEdgeIntent(reason);
+		this.stopKineticIntent(reason);
+		const integ = this.integrator;
+		integ.combinedTargetVelocity = 0;
+		integ.appliedVelocity = 0;
+		integ.lastFrameTime = Number.NaN;
 	}
 
 	/** Map the DOM-hit anchor element to its cache index (-1 = blank).
@@ -1500,6 +1877,52 @@ export class MagnificationController {
 			this.layout[i].center -= delta;
 		}
 		shiftEnvelopeItems(this.envelope, delta);
+		// §六: rows moved under a stationary pointer — the DOM-hit anchor
+		// is now stale. Refresh it from cached visual geometry.
+		this.refreshPointerAnchorAfterScroll();
+	}
+
+	/**
+	 * §六 Stale-anchor refresh: after ANY outline scroll (wheel, edge
+	 * auto-scroll, pointer-follow) the pointer hovers a DIFFERENT row than
+	 * the one that produced `pointerAnchorEl`. Re-resolve the anchor from
+	 * the CACHED visual boxes (visualCenter ± scaled half-height) — zero
+	 * getBoundingClientRect, zero elementFromPoint. A pointer over a gap
+	 * resolves to NO anchor: the solver falls back to continuous
+	 * visual-center interpolation, so the magnification center keeps
+	 * moving smoothly instead of jumping row to row (§六.3).
+	 */
+	private refreshPointerAnchorAfterScroll(): void {
+		if (!this.isExpanded()) return;
+		if (!Number.isFinite(this.lastPointerY)) return;
+		if (!this.pointer.overElement && !this.pointer.insideEnvelope) return;
+		const prev = this.pointerAnchorEl;
+		let found = -1;
+		for (let i = 0; i < this.cache.length; i++) {
+			const entry = this.cache[i];
+			const half = (entry.height * entry.motion.displayedScale) / 2;
+			if (
+				this.lastPointerY >= entry.visualCenter - half &&
+				this.lastPointerY <= entry.visualCenter + half
+			) {
+				found = i;
+				break;
+			}
+		}
+		// The cached resolution is authoritative — drop any pending DOM
+		// target (it predates the scroll and is equally stale).
+		this.pendingAnchorTarget = null;
+		this.anchorDirty = false;
+		if (found >= 0) {
+			this.pointerAnchorEl = this.cache[found].el;
+			this.perf?.markCachedAnchorResolve();
+		} else {
+			this.pointerAnchorEl = null;
+			this.perf?.markGapAnchorResolve();
+		}
+		if (prev !== this.pointerAnchorEl) {
+			this.perf?.markStaleAnchorReset();
+		}
 	}
 
 	/**
@@ -1572,8 +1995,9 @@ export class MagnificationController {
 				motion,
 				lastWrittenScale: previous?.lastWrittenScale ?? Number.NaN,
 				lastWrittenShift: previous?.lastWrittenShift ?? Number.NaN,
-				shifting: previous?.shifting ?? false,
-				scaling: previous?.scaling ?? false,
+					shifting: previous?.shifting ?? false,
+					scaling: previous?.scaling ?? false,
+					wasSnapped: previous?.wasSnapped ?? false,
 			});
 			centers.push(baseCenter);
 			heights.push(height);

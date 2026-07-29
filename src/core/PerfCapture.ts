@@ -63,6 +63,25 @@ export interface PerfCounters {
 	wheelEditorHandoffCount: number;
 	wheelIgnoredCount: number;
 	wheelCooldownStartCount: number;
+	// --- §四/§十四 Range statistics (collision continuity hotfix) ---
+	scaleRangeRows: number;
+	collisionRangeRows: number;
+	writeRangeRows: number;
+	collisionRangeExpansionCount: number;
+	collisionRangeExpansionRows: number;
+	boundarySafetyRetryCount: number;
+	// --- §六/§十四 Correctness diagnostics ---
+	visibleOverlapViolationCount: number;
+	maxVisibleOverlapPx: number;
+	staleAnchorResetCount: number;
+	cachedAnchorResolveCount: number;
+	gapAnchorResolveCount: number;
+	// --- §七–§十二 Scroll-intent split statistics ---
+	edgeIntentFrameCount: number;
+	edgeIntentActivationCount: number;
+	kineticIntentFrameCount: number;
+	kineticIntentActivationCount: number;
+	manualWheelCooldownCount: number;
 }
 
 function zeroCounters(): PerfCounters {
@@ -96,6 +115,22 @@ function zeroCounters(): PerfCounters {
 		wheelEditorHandoffCount: 0,
 		wheelIgnoredCount: 0,
 		wheelCooldownStartCount: 0,
+		scaleRangeRows: 0,
+		collisionRangeRows: 0,
+		writeRangeRows: 0,
+		collisionRangeExpansionCount: 0,
+		collisionRangeExpansionRows: 0,
+		boundarySafetyRetryCount: 0,
+		visibleOverlapViolationCount: 0,
+		maxVisibleOverlapPx: 0,
+		staleAnchorResetCount: 0,
+		cachedAnchorResolveCount: 0,
+		gapAnchorResolveCount: 0,
+		edgeIntentFrameCount: 0,
+		edgeIntentActivationCount: 0,
+		kineticIntentFrameCount: 0,
+		kineticIntentActivationCount: 0,
+		manualWheelCooldownCount: 0,
 	};
 }
 
@@ -204,6 +239,42 @@ export interface PerfReport {
 	geometryRebuildReasons: Record<string, number>;
 	/** §四.2: plugin RAF phase durations (count/avg/p95/max per phase). */
 	pluginPhases: Record<PluginPhase, PhaseStats>;
+	/** §四/§十四: row-range windows used by the collision solver. */
+	ranges: {
+		avgScaleRangeRows: number;
+		maxScaleRangeRows: number;
+		avgCollisionRangeRows: number;
+		maxCollisionRangeRows: number;
+		avgWriteRangeRows: number;
+		maxWriteRangeRows: number;
+		collisionRangeExpansionCount: number;
+		collisionRangeExpansionRows: number;
+		boundarySafetyRetryCount: number;
+	};
+	/** §六/§十四: overlap + scroll-anchor correctness diagnostics. */
+	correctness: {
+		visibleOverlapViolationCount: number;
+		maxVisibleOverlapPx: number;
+		staleAnchorResetCount: number;
+		cachedAnchorResolveCount: number;
+		gapAnchorResolveCount: number;
+	};
+	/** §七–§十二: edge vs kinetic scroll-intent split statistics. */
+	scrollIntent: {
+		edgeFrameCount: number;
+		edgeActivationCount: number;
+		edgeStopReasons: Record<string, number>;
+		avgEdgeIntentVelocity: number;
+		maxEdgeIntentVelocity: number;
+		kineticFrameCount: number;
+		kineticActivationCount: number;
+		kineticStopReasons: Record<string, number>;
+		avgKineticIntentVelocity: number;
+		maxKineticIntentVelocity: number;
+		combinedIntentVelocityAvg: number;
+		appliedVelocityAvg: number;
+		manualWheelCooldownCount: number;
+	};
 }
 
 interface LongTaskEntryLike {
@@ -253,6 +324,24 @@ export class PerfCapture {
 		this.autoScrollAppliedSum = 0;
 		this.autoScrollSampleCount = 0;
 		this.autoScrollConfig = null;
+		this.rangeSampleCount = 0;
+		this.maxScaleRangeRows = 0;
+		this.maxCollisionRangeRows = 0;
+		this.maxWriteRangeRows = 0;
+		this.edgeStopReasons = {};
+		this.kineticStopReasons = {};
+		this.edgeSampleSum = 0;
+		this.edgeSampleMax = 0;
+		this.edgeSampleCount = 0;
+		this.kineticSampleSum = 0;
+		this.kineticSampleMax = 0;
+		this.kineticSampleCount = 0;
+		this.combinedSampleSum = 0;
+		this.combinedSampleMax = 0;
+		this.combinedSampleCount = 0;
+		this.appliedSampleSum = 0;
+		this.appliedSampleMax = 0;
+		this.appliedSampleCount = 0;
 		this.phases = new Map();
 		this.startedAt = win.performance.now();
 		this.active = true;
@@ -351,6 +440,128 @@ export class PerfCapture {
 	setAutoScrollConfig(config: AutoScrollConfigEcho): void {
 		if (!this.active) return;
 		this.autoScrollConfig = config;
+	}
+
+	// --- §四/§十四 range sampling ------------------------------------
+	private rangeSampleCount = 0;
+	private maxScaleRangeRows = 0;
+	private maxCollisionRangeRows = 0;
+	private maxWriteRangeRows = 0;
+
+	/** §十四: per-frame row counts of the three ranges. */
+	addRangeSample(
+		scaleRows: number,
+		collisionRows: number,
+		writeRows: number,
+	): void {
+		if (!this.active) return;
+		this.counters.scaleRangeRows += scaleRows;
+		this.counters.collisionRangeRows += collisionRows;
+		this.counters.writeRangeRows += writeRows;
+		this.maxScaleRangeRows = Math.max(this.maxScaleRangeRows, scaleRows);
+		this.maxCollisionRangeRows = Math.max(
+			this.maxCollisionRangeRows,
+			collisionRows,
+		);
+		this.maxWriteRangeRows = Math.max(this.maxWriteRangeRows, writeRows);
+		this.rangeSampleCount++;
+	}
+
+	/** §四: one dynamic collision-boundary expansion (extra rows pulled in). */
+	addCollisionExpansionSample(extraRows: number): void {
+		if (!this.active) return;
+		this.counters.collisionRangeExpansionCount++;
+		this.counters.collisionRangeExpansionRows += extraRows;
+	}
+
+	// --- §七–§十二 scroll-intent split sampling + histograms ----------
+	private edgeStopReasons: Record<string, number> = {};
+	private kineticStopReasons: Record<string, number> = {};
+	private edgeSampleSum = 0;
+	private edgeSampleMax = 0;
+	private edgeSampleCount = 0;
+	private kineticSampleSum = 0;
+	private kineticSampleMax = 0;
+	private kineticSampleCount = 0;
+	private combinedSampleSum = 0;
+	private combinedSampleMax = 0;
+	private combinedSampleCount = 0;
+	private appliedSampleSum = 0;
+	private appliedSampleMax = 0;
+	private appliedSampleCount = 0;
+
+	/** §十四: one edge-intent velocity sample (magnitude, px/s). */
+	addEdgeIntentSample(velocity: number): void {
+		if (!this.active) return;
+		this.edgeSampleSum += Math.abs(velocity);
+		this.edgeSampleMax = Math.max(this.edgeSampleMax, Math.abs(velocity));
+		this.edgeSampleCount++;
+	}
+
+	/** §十四: one kinetic-intent velocity sample (magnitude, px/s). */
+	addKineticIntentSample(velocity: number): void {
+		if (!this.active) return;
+		this.kineticSampleSum += Math.abs(velocity);
+		this.kineticSampleMax = Math.max(this.kineticSampleMax, Math.abs(velocity));
+		this.kineticSampleCount++;
+	}
+
+	/** §十四: combined (clamped) intent velocity sample. */
+	addCombinedIntentSample(velocity: number): void {
+		if (!this.active) return;
+		this.combinedSampleSum += Math.abs(velocity);
+		this.combinedSampleMax = Math.max(this.combinedSampleMax, Math.abs(velocity));
+		this.combinedSampleCount++;
+	}
+
+	/** §十四: applied (damped) scroll velocity sample. */
+	addAppliedVelocitySample(velocity: number): void {
+		if (!this.active) return;
+		this.appliedSampleSum += Math.abs(velocity);
+		this.appliedSampleMax = Math.max(this.appliedSampleMax, Math.abs(velocity));
+		this.appliedSampleCount++;
+	}
+
+	/** §十二: histogram of why an EDGE session ended. */
+	countEdgeStopReason(reason: string): void {
+		if (!this.active) return;
+		this.edgeStopReasons[reason] = (this.edgeStopReasons[reason] ?? 0) + 1;
+	}
+
+	/** §十二: histogram of why a KINETIC session ended. */
+	countKineticStopReason(reason: string): void {
+		if (!this.active) return;
+		this.kineticStopReasons[reason] = (this.kineticStopReasons[reason] ?? 0) + 1;
+	}
+
+	/**
+	 * §六/§十四: record a visible-adjacent overlap (px) when it exceeds the
+	 * allowed tolerance. Only ever called from a diagnostic pass, never a
+	 * standing hot path. Tracks the worst overlap seen.
+	 */
+	recordOverlap(px: number, tolerance: number): void {
+		if (!this.active) return;
+		if (Number.isFinite(px) && px > tolerance) {
+			this.counters.visibleOverlapViolationCount++;
+			if (px > this.counters.maxVisibleOverlapPx) {
+				this.counters.maxVisibleOverlapPx = px;
+			}
+		}
+	}
+
+	/** §六: the cached scroll anchor was invalidated by an outline scroll. */
+	markStaleAnchorReset(): void {
+		this.count("staleAnchorResetCount");
+	}
+
+	/** §六: a scroll anchor was re-resolved from cached visual geometry. */
+	markCachedAnchorResolve(): void {
+		this.count("cachedAnchorResolveCount");
+	}
+
+	/** §六: the pointer was over a gap → no anchor, continuous interpolation. */
+	markGapAnchorResolve(): void {
+		this.count("gapAnchorResolveCount");
 	}
 
 	/** §四.2: one plugin phase duration sample (ms). Ring-buffered. */
@@ -485,6 +696,67 @@ export class PerfCapture {
 			},
 			geometryRebuildReasons: { ...this.geometryRebuildReasons },
 			pluginPhases: this.buildPhaseStats(),
+			ranges: {
+				avgScaleRangeRows: round2(
+					this.rangeSampleCount > 0
+						? c.scaleRangeRows / this.rangeSampleCount
+						: 0,
+				),
+				maxScaleRangeRows: this.maxScaleRangeRows,
+				avgCollisionRangeRows: round2(
+					this.rangeSampleCount > 0
+						? c.collisionRangeRows / this.rangeSampleCount
+						: 0,
+				),
+				maxCollisionRangeRows: this.maxCollisionRangeRows,
+				avgWriteRangeRows: round2(
+					this.rangeSampleCount > 0
+						? c.writeRangeRows / this.rangeSampleCount
+						: 0,
+				),
+				maxWriteRangeRows: this.maxWriteRangeRows,
+				collisionRangeExpansionCount: c.collisionRangeExpansionCount,
+				collisionRangeExpansionRows: c.collisionRangeExpansionRows,
+				boundarySafetyRetryCount: c.boundarySafetyRetryCount,
+			},
+			correctness: {
+				visibleOverlapViolationCount: c.visibleOverlapViolationCount,
+				maxVisibleOverlapPx: round2(c.maxVisibleOverlapPx),
+				staleAnchorResetCount: c.staleAnchorResetCount,
+				cachedAnchorResolveCount: c.cachedAnchorResolveCount,
+				gapAnchorResolveCount: c.gapAnchorResolveCount,
+			},
+			scrollIntent: {
+				edgeFrameCount: c.edgeIntentFrameCount,
+				edgeActivationCount: c.edgeIntentActivationCount,
+				edgeStopReasons: { ...this.edgeStopReasons },
+				avgEdgeIntentVelocity: round2(
+					this.edgeSampleCount > 0
+						? this.edgeSampleSum / this.edgeSampleCount
+						: 0,
+				),
+				maxEdgeIntentVelocity: round2(this.edgeSampleMax),
+				kineticFrameCount: c.kineticIntentFrameCount,
+				kineticActivationCount: c.kineticIntentActivationCount,
+				kineticStopReasons: { ...this.kineticStopReasons },
+				avgKineticIntentVelocity: round2(
+					this.kineticSampleCount > 0
+						? this.kineticSampleSum / this.kineticSampleCount
+						: 0,
+				),
+				maxKineticIntentVelocity: round2(this.kineticSampleMax),
+				combinedIntentVelocityAvg: round2(
+					this.combinedSampleCount > 0
+						? this.combinedSampleSum / this.combinedSampleCount
+						: 0,
+				),
+				appliedVelocityAvg: round2(
+					this.appliedSampleCount > 0
+						? this.appliedSampleSum / this.appliedSampleCount
+						: 0,
+				),
+				manualWheelCooldownCount: c.manualWheelCooldownCount,
+			},
 		};
 	}
 
