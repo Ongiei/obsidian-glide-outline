@@ -4,7 +4,7 @@ import type { HeadingItem } from "../src/model/HeadingItem";
 import type { GlideOutlineSettings } from "../src/settings";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import { GlideOutlineView } from "../src/ui/GlideOutlineView";
-import { shiftEnvelopeItems } from "../src/utils/envelope";
+import { translateEnvelopeItemsY } from "../src/utils/envelope";
 import type { PointerEnvelope } from "../src/utils/envelope";
 
 function heading(level: number, text: string, line: number): HeadingItem {
@@ -98,7 +98,7 @@ describe("collectEnvelope active range (section 6)", () => {
 	});
 });
 
-describe("shiftEnvelopeItems (scroll-delta geometry, section 8)", () => {
+describe("translateEnvelopeItemsY (§七 client↔content conversion)", () => {
 	function makeEnvelope(): PointerEnvelope {
 		return {
 			railRect: { left: 0, top: 100, right: 30, bottom: 500 },
@@ -113,30 +113,39 @@ describe("shiftEnvelopeItems (scroll-delta geometry, section 8)", () => {
 		};
 	}
 
-	it("moves item rects opposite to the scroll delta; rail stays fixed", () => {
+	it("translates item rects by +delta; the rail stays viewport-fixed", () => {
 		const env = makeEnvelope();
-		shiftEnvelopeItems(env, 50); // scrolled down 50 → content moves up
+		// Client → content for a scroller at client top 100, scrollTop 50.
+		translateEnvelopeItemsY(env, 50 - 100);
 		expect(env.items[0].markerRect.top).toBe(60);
 		expect(env.items[0].markerRect.bottom).toBe(90);
 		expect(env.items[0].cardRect.top).toBe(65);
 		expect(env.items[0].bridgeRect.top).toBe(55);
 		// Horizontal edges untouched.
 		expect(env.items[0].cardRect.left).toBe(30);
-		// The rail hit zone is viewport-fixed.
+		// The rail hit zone is viewport-fixed and must NOT be converted.
 		expect(env.railRect.top).toBe(100);
 		expect(env.railRect.bottom).toBe(500);
 	});
 
-	it("negative delta (scroll up) moves rects down", () => {
+	it("positive delta moves rects down", () => {
 		const env = makeEnvelope();
-		shiftEnvelopeItems(env, -20);
+		translateEnvelopeItemsY(env, 20);
 		expect(env.items[0].markerRect.top).toBe(130);
 	});
 
 	it("zero or non-finite deltas are no-ops", () => {
 		const env = makeEnvelope();
-		shiftEnvelopeItems(env, 0);
-		shiftEnvelopeItems(env, Number.NaN);
+		translateEnvelopeItemsY(env, 0);
+		translateEnvelopeItemsY(env, Number.NaN);
 		expect(env.items[0].markerRect.top).toBe(110);
+	});
+
+	it("round-trips: content→client→content is the identity", () => {
+		const env = makeEnvelope();
+		const before = env.items[0].cardRect.top;
+		translateEnvelopeItemsY(env, -137.5);
+		translateEnvelopeItemsY(env, 137.5);
+		expect(env.items[0].cardRect.top).toBeCloseTo(before, 10);
 	});
 });

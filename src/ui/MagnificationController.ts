@@ -21,9 +21,14 @@ import {
 	bridgeRectFor,
 	emptyRect,
 	pointInEnvelope,
-	shiftEnvelopeItems,
+	translateEnvelopeItemsY,
 } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
+import {
+	clientYToContentY,
+	contentRangeForViewport,
+} from "../utils/contentCoords";
+import type { ContentRange, ScrollViewportFrame } from "../utils/contentCoords";
 import {
 	computeActiveMotionRange,
 	computeScaleRange,
@@ -55,14 +60,20 @@ interface CachedItem {
 	 * motion updates can re-derive envelope rects mathematically (§十四). */
 	key: string;
 	/**
-	 * Base vertical center in viewport client coordinates — where the row
-	 * is LAID OUT. Rows themselves never transform (`--glide-shift-y`
-	 * moves the motion element inside), so the row rect is transform-free.
-	 * Updated by scroll DELTAS between full rebuilds (section 8).
+	 * §六 Base vertical center in CONTENT coordinates — measured from the
+	 * top of the scrollable content, NOT from the viewport. Rows themselves
+	 * never transform (`--glide-shift-y` moves the motion element inside),
+	 * so the row rect is transform-free and this is the pure layout center.
+	 *
+	 * Content coordinates are scroll-INDEPENDENT: an outline scroll changes
+	 * only `currentScrollTop` (O(1)) and every cached center stays valid.
+	 * The client-space value, when one is actually needed, is derived on
+	 * demand with `contentYToClientY`.
 	 */
-	baseCenter: number;
-	/** baseCenter + displayed shift — where the card/marker visually is. */
-	visualCenter: number;
+	contentCenter: number;
+	/** contentCenter + displayed shift — where the card/marker visually is
+	 * (still content space). */
+	contentVisualCenter: number;
 	/** Unscaled card height (measured by the view, cached here). */
 	height: number;
 	/** Continuous target/displayed interpolation state (section 11). */
@@ -126,6 +137,12 @@ export const COLLISION_TAPER_APRON_STEP_PX = 0.5;
  * by offscreen gap relaxation; the cap bounds pathological shifts so
  * rows far outside the viewport stay at identity (never written). */
 export const COLLISION_TAPER_MAX_ROWS = 160;
+
+/** §八 Pointer-anchor resolve: rows probed around the previous anchor
+ * before falling back to the binary search. A stationary pointer over a
+ * scrolling list moves at most a row or two per frame, so the local probe
+ * answers almost every resolve in O(1). */
+export const ANCHOR_LOCAL_PROBE_RADIUS = 3;
 
 /** Horizontal / vertical slack (px) added to each heading's bridge rect so
  * the hover envelope stays comfortable without growing to the longest title. */
@@ -271,9 +288,9 @@ export class MagnificationController {
 	private envelopeMotionScale = new Map<string, number>();
 	/** Why the next full geometry rebuild runs (PerfCapture, §十五). */
 	private cacheDirtyReason: GeometryRebuildReason = "initial";
-	/** Solver input view over `cache` (rebuilt with it, delta-shifted). */
+	/** §六 Solver input view over `cache`, in CONTENT coordinates. */
 	private layout: { center: number; height: number }[] = [];
-	/** Cached base centers / heights for the active-range binary search. */
+	/** §六 Cached CONTENT centers / heights for the range binary searches. */
 	private centers: number[] = [];
 	private heights: number[] = [];
 	/** Per-item DISPLAYED shifts fed back into the solver (visual→base). */
@@ -285,6 +302,13 @@ export class MagnificationController {
 	private pointerAnchorEl: HTMLElement | null = null;
 	private pendingAnchorTarget: EventTarget | null = null;
 	private anchorDirty = false;
+	/** §八 Last resolved anchor row — the seed for the local probe. */
+	private lastAnchorIndex = -1;
+	/** §六 An outline scroll moved the rows under a (possibly stationary)
+	 * pointer; the cached anchor must be re-resolved. Set by the scroll
+	 * handler (O(1)) and consumed once per frame, so a burst of scroll
+	 * events costs one resolve, not one per event. */
+	private anchorScrollStale = false;
 	private cacheDirty = true;
 	private pointerExpanded = false;
 	private focusExpanded = false;
@@ -302,8 +326,11 @@ export class MagnificationController {
 	private windowCheckPending = false;
 	/** Active row window (sections 6/10); recomputed each frame. */
 	private activeRange: ActiveMotionRange = emptyActiveRange();
-	// --- Scroll-delta geometry (section 8) ------------------------------
-	private lastKnownScrollTop = 0;
+	// --- §六 Content-coordinate geometry --------------------------------
+	/** The outline viewport's scrollTop as of the last scroll event. This
+	 * is the ONLY value an outline scroll has to update: every cached row
+	 * center and envelope item rect lives in content space. */
+	private currentScrollTop = 0;
 	// --- Pointer edge auto-scroll state (coordinated in the same RAF as
 	// magnification, so the two never fight over frames).
 	/** Viewport bounds cached alongside the item cache — no per-frame rect. */
@@ -411,23 +438,31 @@ export class MagnificationController {
 			passive: false,
 		});
 
-		// Outline scroll: update cached geometry by DELTA (section 8) —
-		// pure cache math, no rect reads, no full rebuild. Full rebuilds
-		// stay reserved for discrete events (invalidate / resize).
+		// §六 Outline scroll: O(1). Cached geometry lives in CONTENT
+		// coordinates, so a scroll only moves the viewport window over it —
+		// no per-row rewrite, no rect reads, no full rebuild. The stale
+		// pointer anchor is re-resolved once in the next frame (§八), not
+		// once per scroll event.
 		this.disposables.listen(
 			viewportEl,
 			"scroll",
 			() => {
 				const scrollTop = viewportEl.scrollTop;
-				const delta = scrollTop - this.lastKnownScrollTop;
-				this.lastKnownScrollTop = scrollTop;
+				const delta = scrollTop - this.currentScrollTop;
+				this.currentScrollTop = scrollTop;
+				const perf = this.perf;
+				if (perf?.active === true) {
+					perf.count("scrollEventCount");
+					if (delta === 0) perf.count("zeroDeltaScrollEventCount");
+					perf.addScrollDeltaSample(delta);
+				}
 				if (
 					!this.cacheDirty &&
 					Number.isFinite(delta) &&
 					delta !== 0 &&
 					this.cache.length > 0
 				) {
-					this.applyScrollDelta(delta);
+					this.anchorScrollStale = true;
 				}
 				// User is scrolling the outline — pause active-heading follow.
 				this.view.setFollowEnabled(false);
@@ -586,7 +621,14 @@ export class MagnificationController {
 			this.activeRange = this.computeRange();
 			this.rebuildEnvelope();
 		}
-		if (pointInEnvelope(this.envelope, event.clientX, event.clientY)) {
+		if (
+			pointInEnvelope(
+				this.envelope,
+				event.clientX,
+				event.clientY,
+				this.clientYToContentY(event.clientY),
+			)
+		) {
 			// Inside a transparent gap — keep expanded and, when a latched
 			// auto-scroll session is running, keep it running too (§十二:
 			// the horizontal band between marker and card is stable ground;
@@ -722,7 +764,14 @@ export class MagnificationController {
 		// detached/zero-size outline): never base a collapse decision on a
 		// zero rect. Trust element-level enter/move/leave state instead.
 		if (!this.envelopeIsMeasurable()) return;
-		if (pointInEnvelope(this.envelope, this.lastPointerX, this.lastPointerY)) {
+		if (
+			pointInEnvelope(
+				this.envelope,
+				this.lastPointerX,
+				this.lastPointerY,
+				this.clientYToContentY(this.lastPointerY),
+			)
+		) {
 			// §十二: a window-level move that lands inside the envelope is a
 			// gap crossing, not an exit — the latch (if any) survives.
 			this.pointer.insideEnvelope = true;
@@ -1027,6 +1076,13 @@ export class MagnificationController {
 		}
 
 		// ---------------- PURE CALC PHASE ----------------
+		// §六/§八: an outline scroll since the last frame moved the rows
+		// under the pointer. Re-resolve the anchor ONCE here from cached
+		// content-space geometry (the scroll handler itself stays O(1)).
+		if (this.anchorScrollStale) {
+			this.anchorScrollStale = false;
+			this.refreshPointerAnchorAfterScroll();
+		}
 		// Resolve the magnification anchor from the last pointer target.
 		// `closest` is an ancestor-tree walk (no layout access).
 		if (this.anchorDirty) {
@@ -1036,6 +1092,7 @@ export class MagnificationController {
 				(target?.closest?.(".glide-outline-row") as HTMLElement | null) ??
 				null;
 			this.pendingAnchorTarget = null;
+			this.resolveAnchorIndex(); // refresh the §八 local-probe seed
 		}
 
 		// Motion policy is always FULL — the user-facing setting was
@@ -1049,6 +1106,12 @@ export class MagnificationController {
 		const alpha = motionAlpha(dtMs);
 		const dpr = this.win.devicePixelRatio || 1;
 
+		// §六: the cache is content-space, so the two moving inputs (the
+		// pointer and the visible window) are converted ONCE per frame —
+		// two subtractions instead of a per-row rewrite on every scroll.
+		const pointerContentY = this.clientYToContentY(this.lastPointerY);
+		const contentWindow = this.contentRangeForViewport();
+
 		// ---------------- §四 three independent ranges ----------------
 		// 1) SCALE range: pointerY ± radius (+1 overscan). Answers "which
 		//    rows may have scale > 1" and is NEVER enlarged by collision
@@ -1056,7 +1119,7 @@ export class MagnificationController {
 		this.scaleRange = computeScaleRange({
 			centers: this.centers,
 			heights: this.heights,
-			pointerY: this.lastPointerY,
+			pointerY: pointerContentY,
 			radius: settings.radius,
 		});
 		// 2) COLLISION range seed = Visible ∪ Scale + guard. §五 safe
@@ -1071,8 +1134,8 @@ export class MagnificationController {
 		const visibleRange = computeVisibleRange({
 			centers: this.centers,
 			heights: this.heights,
-			viewportTop: this.viewportTop,
-			viewportBottom: this.viewportBottom,
+			viewportTop: contentWindow.top,
+			viewportBottom: contentWindow.bottom,
 		});
 		const rowCount = this.cache.length;
 		const settleEmpty = this.settleEnd < this.settleStart;
@@ -1117,7 +1180,7 @@ export class MagnificationController {
 					: -1;
 			const solverStart = measure ? this.win.performance.now() : 0;
 			results = computeCollisionFreeMagnification(
-				this.lastPointerY,
+				pointerContentY,
 				activeLayout,
 				settings.maxScale,
 				settings.radius,
@@ -1339,7 +1402,7 @@ export class MagnificationController {
 						entry.el.classList.remove(MOTION_SCALE_CLASS);
 						entry.scaling = false;
 					}
-					entry.visualCenter = entry.baseCenter;
+					entry.contentVisualCenter = entry.contentCenter;
 					this.shifts[i] = 0;
 					continue;
 				}
@@ -1373,7 +1436,8 @@ export class MagnificationController {
 				entry.scaling = scaling;
 			}
 			// Keep the visual model in lockstep with what is on screen.
-			entry.visualCenter = entry.baseCenter + state.displayedShift;
+			entry.contentVisualCenter =
+				entry.contentCenter + state.displayedShift;
 			this.shifts[i] = state.displayedShift;
 			// §六: a row stays inside the settling window until it is
 			// completely clean — identity, vars removed, classes off.
@@ -1840,81 +1904,140 @@ export class MagnificationController {
 	}
 
 	/** Map the DOM-hit anchor element to its cache index (-1 = blank).
-	 * O(1) via the element→index map (section 9). */
+	 * O(1) via the element→index map (section 9). Doubles as the seed
+	 * update for §八's local probe. */
 	private resolveAnchorIndex(): number {
 		const el = this.pointerAnchorEl;
 		if (!el) return -1;
-		return this.cacheIndexByEl.get(el) ?? -1;
+		const index = this.cacheIndexByEl.get(el) ?? -1;
+		if (index >= 0) this.lastAnchorIndex = index;
+		return index;
+	}
+
+	// --- §六 Coordinate-space conversions (O(1), pure arithmetic) -------
+
+	/** The cached scroll frame the conversions run against. */
+	private scrollFrame(): ScrollViewportFrame {
+		return {
+			viewportTop: this.viewportTop,
+			viewportBottom: this.viewportBottom,
+			scrollTop: this.currentScrollTop,
+		};
+	}
+
+	/** Viewport CLIENT y → CONTENT y (see `utils/contentCoords`). */
+	private clientYToContentY(clientY: number): number {
+		return clientYToContentY(this.scrollFrame(), clientY);
+	}
+
+	/** The visible window expressed in CONTENT coordinates. */
+	private contentRangeForViewport(): ContentRange {
+		return contentRangeForViewport(this.scrollFrame());
 	}
 
 	/** Active row window from cached numbers only (sections 6/10). */
 	private computeRange(): ActiveMotionRange {
 		if (this.cache.length === 0) return emptyActiveRange();
 		const settings = this.getSettings();
+		const window = this.contentRangeForViewport();
 		return computeActiveMotionRange({
 			centers: this.centers,
 			heights: this.heights,
-			viewportTop: this.viewportTop,
-			viewportBottom: this.viewportBottom,
-			pointerY: this.lastPointerY,
+			viewportTop: window.top,
+			viewportBottom: window.bottom,
+			pointerY: this.clientYToContentY(this.lastPointerY),
 			radius: settings.radius,
 			maxScale: settings.maxScale,
 		});
 	}
 
 	/**
-	 * Shift all cached geometry by an outline scroll delta (section 8):
-	 * row centers, solver layout, active-range inputs and the cached
-	 * envelope item rects all move together — zero DOM reads. The rail
-	 * hit zone and viewport bounds are viewport-fixed and stay put.
+	 * §八 Resolve the row whose displayed visual box contains a CONTENT y —
+	 * local probe first, binary search second, never a full scan.
+	 *
+	 *   1. LOCAL: the ±3 rows around the previous anchor. A stationary
+	 *      pointer over a scrolling list crosses one row boundary at a
+	 *      time, so this answers the overwhelming majority of resolves in
+	 *      O(1) with perfect cache locality.
+	 *   2. BINARY: visual boxes are monotonic (the collision solver keeps
+	 *      every adjacent pair separated), so a standard binary search over
+	 *      `contentVisualCenter ± scaled half-height` finds the row in
+	 *      O(log n) — this replaces the old O(n) linear scan that ran on
+	 *      every single scroll event.
+	 *   3. Neither → the pointer is over a transparent GAP between two
+	 *      displaced rows. That resolves to NO anchor on purpose: the
+	 *      solver then interpolates continuously from the pointer position
+	 *      instead of snapping row to row (§六.3).
 	 */
-	private applyScrollDelta(delta: number): void {
-		for (let i = 0; i < this.cache.length; i++) {
+	private resolveAnchorFromContentY(contentY: number): number {
+		const n = this.cache.length;
+		if (n === 0 || !Number.isFinite(contentY)) return -1;
+		const containsAt = (i: number): boolean => {
 			const entry = this.cache[i];
-			entry.baseCenter -= delta;
-			entry.visualCenter -= delta;
-			this.centers[i] -= delta;
-			this.layout[i].center -= delta;
+			const half = (entry.height * entry.motion.displayedScale) / 2;
+			return (
+				contentY >= entry.contentVisualCenter - half &&
+				contentY <= entry.contentVisualCenter + half
+			);
+		};
+		// 1) Local probe around the previous anchor.
+		const seed = this.lastAnchorIndex;
+		if (seed >= 0 && seed < n) {
+			const lo = Math.max(0, seed - ANCHOR_LOCAL_PROBE_RADIUS);
+			const hi = Math.min(n - 1, seed + ANCHOR_LOCAL_PROBE_RADIUS);
+			for (let i = lo; i <= hi; i++) {
+				if (containsAt(i)) {
+					this.perf?.addAnchorResolveSample("local", hi - lo + 1);
+					return i;
+				}
+			}
 		}
-		shiftEnvelopeItems(this.envelope, delta);
-		// §六: rows moved under a stationary pointer — the DOM-hit anchor
-		// is now stale. Refresh it from cached visual geometry.
-		this.refreshPointerAnchorAfterScroll();
+		// 2) Binary search over the monotonic visual boxes.
+		let lo = 0;
+		let hi = n - 1;
+		let probes = 0;
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1;
+			probes++;
+			const entry = this.cache[mid];
+			const half = (entry.height * entry.motion.displayedScale) / 2;
+			if (contentY < entry.contentVisualCenter - half) {
+				hi = mid - 1;
+			} else if (contentY > entry.contentVisualCenter + half) {
+				lo = mid + 1;
+			} else {
+				this.perf?.addAnchorResolveSample("binary", probes);
+				return mid;
+			}
+		}
+		// 3) Between two rows — a transparent gap, no anchor.
+		this.perf?.addAnchorResolveSample("gap", probes);
+		return -1;
 	}
 
 	/**
-	 * §六 Stale-anchor refresh: after ANY outline scroll (wheel, edge
+	 * §六/§八 Stale-anchor refresh: after ANY outline scroll (wheel, edge
 	 * auto-scroll, pointer-follow) the pointer hovers a DIFFERENT row than
 	 * the one that produced `pointerAnchorEl`. Re-resolve the anchor from
-	 * the CACHED visual boxes (visualCenter ± scaled half-height) — zero
-	 * getBoundingClientRect, zero elementFromPoint. A pointer over a gap
-	 * resolves to NO anchor: the solver falls back to continuous
-	 * visual-center interpolation, so the magnification center keeps
-	 * moving smoothly instead of jumping row to row (§六.3).
+	 * the CACHED content-space visual boxes — zero getBoundingClientRect,
+	 * zero elementFromPoint, O(1)/O(log n) instead of O(n). Runs at most
+	 * once per frame, not once per scroll event.
 	 */
 	private refreshPointerAnchorAfterScroll(): void {
 		if (!this.isExpanded()) return;
 		if (!Number.isFinite(this.lastPointerY)) return;
 		if (!this.pointer.overElement && !this.pointer.insideEnvelope) return;
 		const prev = this.pointerAnchorEl;
-		let found = -1;
-		for (let i = 0; i < this.cache.length; i++) {
-			const entry = this.cache[i];
-			const half = (entry.height * entry.motion.displayedScale) / 2;
-			if (
-				this.lastPointerY >= entry.visualCenter - half &&
-				this.lastPointerY <= entry.visualCenter + half
-			) {
-				found = i;
-				break;
-			}
-		}
+		const found = this.resolveAnchorFromContentY(
+			this.clientYToContentY(this.lastPointerY),
+		);
 		// The cached resolution is authoritative — drop any pending DOM
 		// target (it predates the scroll and is equally stale).
 		this.pendingAnchorTarget = null;
 		this.anchorDirty = false;
 		if (found >= 0) {
 			this.pointerAnchorEl = this.cache[found].el;
+			this.lastAnchorIndex = found;
 			this.perf?.markCachedAnchorResolve();
 		} else {
 			this.pointerAnchorEl = null;
@@ -1939,7 +2062,7 @@ export class MagnificationController {
 		const viewportRect = this.view.viewportEl.getBoundingClientRect();
 		this.viewportTop = viewportRect.top;
 		this.viewportBottom = viewportRect.bottom;
-		this.lastKnownScrollTop = this.view.viewportEl.scrollTop;
+		this.currentScrollTop = this.view.viewportEl.scrollTop;
 		const children = this.view.listEl.children;
 		// Carry map: previous entries by element (single pass, O(n)).
 		const prevByEl = new Map<HTMLElement, CachedItem>();
@@ -1971,7 +2094,11 @@ export class MagnificationController {
 			const previous = prevByEl.get(el);
 			if (previous) prevByEl.delete(el);
 			const motion = previous?.motion ?? identityMotionState();
-			const baseCenter = rect.top + rect.height / 2;
+			// §六: store the layout center in CONTENT space so no scroll
+			// ever has to touch it again.
+			const contentCenter = this.clientYToContentY(
+				rect.top + rect.height / 2,
+			);
 			const height = measured > 0 ? measured : rect.height;
 			const index = next.length;
 			// §五/§六: rows that carry residual motion across the rebuild
@@ -1989,8 +2116,8 @@ export class MagnificationController {
 			next.push({
 				el,
 				key,
-				baseCenter,
-				visualCenter: baseCenter + motion.displayedShift,
+				contentCenter,
+				contentVisualCenter: contentCenter + motion.displayedShift,
 				height,
 				motion,
 				lastWrittenScale: previous?.lastWrittenScale ?? Number.NaN,
@@ -1999,9 +2126,9 @@ export class MagnificationController {
 					scaling: previous?.scaling ?? false,
 					wasSnapped: previous?.wasSnapped ?? false,
 			});
-			centers.push(baseCenter);
+			centers.push(contentCenter);
 			heights.push(height);
-			layout.push({ center: baseCenter, height });
+			layout.push({ center: contentCenter, height });
 			shifts.push(motion.displayedShift);
 		}
 		// Whatever is left in the carry map dropped out of the list —
@@ -2033,6 +2160,12 @@ export class MagnificationController {
 		if (this.pointerAnchorEl && !nextIndex.has(this.pointerAnchorEl)) {
 			this.pointerAnchorEl = null;
 		}
+		// §八: indices moved with the rebuild — invalidate the probe seed
+		// (a stale seed would only cost one wasted local probe, but a
+		// wrong-row hit is worse than a binary search).
+		this.lastAnchorIndex = this.pointerAnchorEl
+			? (nextIndex.get(this.pointerAnchorEl) ?? -1)
+			: -1;
 	}
 
 	/**
@@ -2054,6 +2187,14 @@ export class MagnificationController {
 			ENVELOPE_V_TOLERANCE,
 			start,
 			end,
+		);
+		// §七: the view measures client rects; convert the ITEM rects into
+		// content space once, here. From now on an outline scroll leaves
+		// the whole envelope untouched (the rail stays client-space — it
+		// is viewport-fixed and does not scroll with the content).
+		translateEnvelopeItemsY(
+			this.envelope,
+			this.currentScrollTop - this.viewportTop,
 		);
 		// §十四: snapshot the motion state each item was collected AT, so
 		// later frames can move the rects mathematically by the delta.
@@ -2122,7 +2263,7 @@ export class MagnificationController {
 			entry.lastWrittenShift = Number.NaN;
 			entry.shifting = false;
 			entry.scaling = false;
-			entry.visualCenter = entry.baseCenter;
+			entry.contentVisualCenter = entry.contentCenter;
 		}
 		this.shifts.fill(0);
 		// Everything snapped to identity — the settling window is empty.
