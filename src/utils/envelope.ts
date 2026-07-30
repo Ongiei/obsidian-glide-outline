@@ -80,43 +80,56 @@ export function bridgeRectFor(
 	};
 }
 
-/** Shift one rect vertically in place (scroll-delta geometry, section 8). */
-export function shiftRect(rect: Rect, deltaY: number): void {
-	rect.top -= deltaY;
-	rect.bottom -= deltaY;
+/** Translate one rect vertically in place by +deltaY. */
+export function translateRectY(rect: Rect, deltaY: number): void {
+	rect.top += deltaY;
+	rect.bottom += deltaY;
 }
 
 /**
- * Apply an outline-internal scroll delta to the cached envelope IN PLACE:
- * item rects move with the scrolled content; the rail hit zone is fixed
- * to the viewport and stays put. This replaces a full geometry rebuild
- * for pure vertical scrolling (user wheel AND pointer edge auto-scroll).
+ * §七 Translate the ITEM rects vertically in place by +deltaY. The rail hit
+ * zone is deliberately untouched: it is viewport-fixed, while item rects are
+ * stored in CONTENT coordinates (scroll-independent) so an outline scroll
+ * costs nothing at all — no per-scroll rewrite of the cached envelope.
+ *
+ * Used exactly once per envelope rebuild, to convert the freshly measured
+ * client rects into content space.
  */
-export function shiftEnvelopeItems(
+export function translateEnvelopeItemsY(
 	envelope: PointerEnvelope,
 	deltaY: number,
 ): void {
 	if (!Number.isFinite(deltaY) || deltaY === 0) return;
 	for (const item of envelope.items) {
-		shiftRect(item.markerRect, deltaY);
-		shiftRect(item.cardRect, deltaY);
-		shiftRect(item.bridgeRect, deltaY);
+		translateRectY(item.markerRect, deltaY);
+		translateRectY(item.cardRect, deltaY);
+		translateRectY(item.bridgeRect, deltaY);
 	}
 }
 
 /**
- * True when (x, y) lies inside the rail hit zone OR any visible item's
+ * True when the point lies inside the rail hit zone OR any visible item's
  * marker / card / bridge rectangle. The envelope is the UNION of these
  * regions — it is explicitly NOT a single bounding rectangle of them all,
  * so a long title cannot enlarge the hover range of a short neighbour.
+ *
+ * §七 two vertical coordinates: `railY` is the pointer in CLIENT space (the
+ * rail is viewport-fixed) and `itemY` is the same pointer in the item rects'
+ * space. Callers holding a content-space envelope pass the content Y for
+ * `itemY`; callers with a plain client-space envelope omit it.
  */
-export function pointInEnvelope(envelope: PointerEnvelope, x: number, y: number): boolean {
-	if (pointInRect(envelope.railRect, x, y)) return true;
+export function pointInEnvelope(
+	envelope: PointerEnvelope,
+	x: number,
+	railY: number,
+	itemY: number = railY,
+): boolean {
+	if (pointInRect(envelope.railRect, x, railY)) return true;
 	for (const item of envelope.items) {
 		if (
-			pointInRect(item.markerRect, x, y) ||
-			pointInRect(item.cardRect, x, y) ||
-			pointInRect(item.bridgeRect, x, y)
+			pointInRect(item.markerRect, x, itemY) ||
+			pointInRect(item.cardRect, x, itemY) ||
+			pointInRect(item.bridgeRect, x, itemY)
 		) {
 			return true;
 		}

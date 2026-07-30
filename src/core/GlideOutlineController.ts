@@ -13,6 +13,8 @@ import { sameHeadingKeys } from "../utils/headingIdentity";
 import { matchPreviewHeadings } from "../utils/previewHeadings";
 import { FULL_MOTION_STATE } from "../utils/motion";
 import { ScrollCorrector } from "./ScrollCorrector";
+import type { JumpLandingEvaluation } from "./ScrollCorrector";
+import { evaluateJumpLanding } from "./jumpLanding";
 import type { Diagnostics } from "./Diagnostics";
 import type { PerfCapture } from "./PerfCapture";
 
@@ -28,7 +30,21 @@ const JUMP_SETTLE_TIMEOUT_MS = 700;
 /** Minimal CM surface for jump scrolling (accessed defensively). */
 interface CmView {
 	scrollDOM: HTMLElement;
+	/**
+	 * §五: the content origin. Needed to convert document space
+	 * (`lineBlockAt`) into scroll space; Obsidian puts the inline title and
+	 * the properties block between the two origins.
+	 */
+	contentDOM?: HTMLElement;
 	lineBlockAt(pos: number): { top: number; height: number };
+	/**
+	 * §五: authoritative client coordinates of a rendered position. This
+	 * is what makes a landing verdict trustworthy — everything else is an
+	 * estimate. Optional: absent in stripped-down/mocked CM surfaces.
+	 */
+	coordsAtPos?(
+		pos: number,
+	): { top: number; bottom: number; left: number; right: number } | null;
 	dispatch(spec: { effects: StateEffect<unknown> }): void;
 }
 
@@ -301,42 +317,45 @@ export class GlideOutlineController {
 			cm.dispatch({ effects: this.scrollEffect(offset) });
 			return;
 		}
+		const evaluate = (): JumpLandingEvaluation =>
+			this.evaluateEditorLanding(cm, scroller, offset);
+
 		if (smooth) {
 			// Animate toward the current estimate; the corrector waits for
 			// the animation to settle before dispatching the exact effect,
-			// so the animation is never cancelled mid-flight.
-			const top = Math.max(0, cm.lineBlockAt(offset).top - JUMP_Y_MARGIN);
-			scroller.scrollTo({ top, behavior: "smooth" });
+			// so the animation is never cancelled mid-flight. The estimate
+			// goes through the same landing math as the corrections — the
+			// old inline `lineBlockAt().top - margin` was the source of the
+			// coordinate-space error (§五).
+			const { result } = evaluate();
+			if (result.strategy !== "none") {
+				scroller.scrollTo({
+					top: result.desiredScrollTop,
+					behavior: "smooth",
+				});
+			}
 		}
 		const corrector = new ScrollCorrector({
-			tolerance: JUMP_TOLERANCE_PX,
 			maxCorrections: JUMP_MAX_CORRECTIONS,
 			timeoutMs: JUMP_SETTLE_TIMEOUT_MS,
-			// Signed landing error, clamped to the reachable scroll range so
-			// a heading near the document bottom is not a false failure.
-			measureError: () => {
-				try {
-					const desired = Math.max(
-						0,
-						Math.min(
-							cm.lineBlockAt(offset).top - JUMP_Y_MARGIN,
-							scroller.scrollHeight - scroller.clientHeight,
-						),
-					);
-					return scroller.scrollTop - desired;
-				} catch {
-					return 0; // view detached — report "landed"
-				}
-			},
-			apply: () => {
+			evaluate,
+			apply: (result) => {
 				if (this.disposed) return;
 				try {
-					cm.dispatch({ effects: this.scrollEffect(offset) });
+					if (result.strategy === "coords") {
+						// The target is rendered, so the desired position is
+						// exact in client space — write it directly.
+						scroller.scrollTop = result.desiredScrollTop;
+					} else {
+						// Not rendered: CM's own effect can measure its way
+						// there, which a raw scrollTop write cannot.
+						cm.dispatch({ effects: this.scrollEffect(offset) });
+					}
 				} catch {
 					// View detached mid-scroll — nothing left to correct.
 				}
 			},
-			done: (finalErrorPx, correctionCount) => {
+			done: (summary) => {
 				if (this.corrector === corrector) this.corrector = null;
 				this.diagnostics?.recordJump({
 					headingKey: item.key,
@@ -344,8 +363,16 @@ export class GlideOutlineController {
 					expectedLine: item.line,
 					mode: "editor",
 					behavior: smooth ? "smooth" : "auto",
-					finalErrorPx,
-					correctionCount,
+					finalErrorPx: summary.finalErrorPx,
+					correctionCount: summary.correctionCount,
+					attempts: summary.attempts,
+					settledBy: summary.settledBy,
+					targetRenderedAtFinish: summary.targetRenderedAtFinish,
+					reachedScrollBoundary: summary.reachedScrollBoundary,
+					acceptedAsVisibleBoundaryLanding:
+						summary.acceptedAsVisibleBoundaryLanding,
+					finalViewportErrorPx:
+						summary.finalViewportErrorPx ?? undefined,
 				});
 			},
 			win,
@@ -354,6 +381,86 @@ export class GlideOutlineController {
 		});
 		this.corrector = corrector;
 		corrector.start();
+	}
+
+	/**
+	 * §五: read the CURRENT landing of `offset` in client space.
+	 *
+	 * `coordsAtPos` is the authority — it reports where the line actually
+	 * rendered. When the target sits outside the rendered range CM returns
+	 * null, and we fall back to document space, but only after converting
+	 * it into scroll space with the real content origin (the conversion
+	 * 0.1.3 omitted). Never throws: a detached view reports "settled" so
+	 * the corrector stops instead of spinning.
+	 */
+	private evaluateEditorLanding(
+		cm: CmView,
+		scroller: HTMLElement,
+		offset: number,
+	): JumpLandingEvaluation {
+		let scrollTop = 0;
+		try {
+			scrollTop = scroller.scrollTop;
+			const scrollerRect = scroller.getBoundingClientRect();
+
+			let targetClientTop: number | null = null;
+			let targetClientBottom: number | null = null;
+			if (typeof cm.coordsAtPos === "function") {
+				const coords = cm.coordsAtPos(offset);
+				if (coords && Number.isFinite(coords.top)) {
+					targetClientTop = coords.top;
+					targetClientBottom = Number.isFinite(coords.bottom)
+						? coords.bottom
+						: coords.top;
+				}
+			}
+
+			let documentTop: number | null = null;
+			try {
+				documentTop = cm.lineBlockAt(offset).top;
+			} catch {
+				documentTop = null;
+			}
+
+			let contentOriginOffset: number | null = null;
+			const contentDOM = cm.contentDOM;
+			if (typeof contentDOM?.getBoundingClientRect === "function") {
+				contentOriginOffset =
+					contentDOM.getBoundingClientRect().top -
+					scrollerRect.top +
+					scrollTop;
+			}
+
+			return {
+				scrollTop,
+				result: evaluateJumpLanding({
+					targetClientTop,
+					targetClientBottom,
+					scrollerClientTop: scrollerRect.top,
+					scrollerClientHeight: scroller.clientHeight,
+					scrollTop,
+					scrollHeight: scroller.scrollHeight,
+					documentTop,
+					contentOriginOffset,
+					marginPx: JUMP_Y_MARGIN,
+					tolerancePx: JUMP_TOLERANCE_PX,
+				}),
+			};
+		} catch {
+			return {
+				scrollTop,
+				result: {
+					strategy: "none",
+					targetRendered: false,
+					viewportErrorPx: null,
+					desiredScrollTop: scrollTop,
+					clampedAtBoundary: false,
+					deltaPx: 0,
+					settled: true,
+					acceptedAsVisibleBoundaryLanding: false,
+				},
+			};
+		}
 	}
 
 	/**

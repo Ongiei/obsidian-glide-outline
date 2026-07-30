@@ -82,6 +82,46 @@ export interface PerfCounters {
 	kineticIntentFrameCount: number;
 	kineticIntentActivationCount: number;
 	manualWheelCooldownCount: number;
+	// --- §四.2 Scroll pipeline mode + mutation statistics ---
+	/** Frames where ONLY the edge mechanism produced velocity. */
+	edgeOnlyFrameCount: number;
+	/** Frames where ONLY pointer-follow (kinetic) produced velocity. */
+	kineticOnlyFrameCount: number;
+	/** Frames where both mechanisms contributed (clamped together). */
+	combinedIntentFrameCount: number;
+	/** Times we actually wrote scroller.scrollTop. */
+	scrollTopMutationCount: number;
+	/** "scroll" events observed on the outline scroller. */
+	scrollEventCount: number;
+	/** Scroll events that fired while we were still inside our own write. */
+	scrollEventReentrantCount: number;
+	/** Scroll events whose delta rounded to zero (pure noise). */
+	zeroDeltaScrollEventCount: number;
+	/** Writes clamped by the scroll range (top/bottom boundary reached). */
+	scrollBoundaryClampCount: number;
+	/** Scroll-delta sampling (avg = total / sampleCount). */
+	scrollDeltaSampleCount: number;
+	scrollDeltaTotalPx: number;
+	maxScrollDeltaPx: number;
+	// --- §八 Pointer-anchor resolve strategy statistics ---
+	/** Anchor found within ±LOCAL_WINDOW of the previous index. */
+	anchorLocalHitCount: number;
+	/** Anchor found by binary search over sorted content centers. */
+	anchorBinaryHitCount: number;
+	/** Pointer sat in a transparent gap — no owning row. */
+	anchorGapCount: number;
+	/** Anchor required the O(n) linear fallback scan. MUST reach 0. */
+	anchorFallbackScanCount: number;
+	/** Rows actually examined during resolves (avg = /resolve count). */
+	anchorResolveCandidateRows: number;
+	// --- §九 Sparse dirty-row statistics ---
+	dirtyRowsSampleCount: number;
+	dirtyRowsTotal: number;
+	maxDirtyRows: number;
+	/** Rows skipped because their transform was already identity. */
+	identityRowsSkipped: number;
+	dirtyRowsAdded: number;
+	dirtyRowsRemoved: number;
 }
 
 function zeroCounters(): PerfCounters {
@@ -131,6 +171,28 @@ function zeroCounters(): PerfCounters {
 		kineticIntentFrameCount: 0,
 		kineticIntentActivationCount: 0,
 		manualWheelCooldownCount: 0,
+		edgeOnlyFrameCount: 0,
+		kineticOnlyFrameCount: 0,
+		combinedIntentFrameCount: 0,
+		scrollTopMutationCount: 0,
+		scrollEventCount: 0,
+		scrollEventReentrantCount: 0,
+		zeroDeltaScrollEventCount: 0,
+		scrollBoundaryClampCount: 0,
+		scrollDeltaSampleCount: 0,
+		scrollDeltaTotalPx: 0,
+		maxScrollDeltaPx: 0,
+		anchorLocalHitCount: 0,
+		anchorBinaryHitCount: 0,
+		anchorGapCount: 0,
+		anchorFallbackScanCount: 0,
+		anchorResolveCandidateRows: 0,
+		dirtyRowsSampleCount: 0,
+		dirtyRowsTotal: 0,
+		maxDirtyRows: 0,
+		identityRowsSkipped: 0,
+		dirtyRowsAdded: 0,
+		dirtyRowsRemoved: 0,
 	};
 }
 
@@ -144,7 +206,35 @@ export type PluginPhase =
 	| "read"
 	| "styleWrite"
 	| "envelopeMotionUpdate"
-	| "autoScroll";
+	/**
+	 * Aggregate of the whole auto-scroll step. KEPT for one version so a
+	 * 0.1.3 capture can still be compared against a 0.1.4 capture; the
+	 * sub-phases below are what actually localise the cost.
+	 */
+	| "autoScroll"
+	// --- §四.1 auto-scroll sub-phases ---
+	/** Deciding whether this frame is allowed to auto-scroll at all. */
+	| "scrollEligibility"
+	/** Edge-zone intent velocity math. */
+	| "edgeIntentMath"
+	/** Pointer-follow (kinetic) intent velocity math. */
+	| "kineticIntentMath"
+	/** Damping/clamping the intent into an applied velocity. */
+	| "scrollIntegrator"
+	/** The scrollTop write itself. */
+	| "scrollTopWrite"
+	/** Scroll events dispatched synchronously by that write. */
+	| "synchronousScrollDispatch"
+	/** Our own "scroll" listener body. */
+	| "scrollEventHandler"
+	/** Applying the scroll delta to the cached content offset. */
+	| "scrollOffsetUpdate"
+	/** Re-resolving the pointer anchor after the offset moved. */
+	| "scrollAnchorResolve"
+	/** Envelope geometry update caused by the scroll. */
+	| "scrollEnvelopeUpdate"
+	/** Scheduling the next frame from inside the scroll path. */
+	| "scrollFrameReschedule";
 
 const PLUGIN_PHASES: readonly PluginPhase[] = [
 	"pluginFrameJs",
@@ -152,6 +242,17 @@ const PLUGIN_PHASES: readonly PluginPhase[] = [
 	"styleWrite",
 	"envelopeMotionUpdate",
 	"autoScroll",
+	"scrollEligibility",
+	"edgeIntentMath",
+	"kineticIntentMath",
+	"scrollIntegrator",
+	"scrollTopWrite",
+	"synchronousScrollDispatch",
+	"scrollEventHandler",
+	"scrollOffsetUpdate",
+	"scrollAnchorResolve",
+	"scrollEnvelopeUpdate",
+	"scrollFrameReschedule",
 ];
 
 /** Per-phase ring capacity (~17 s of frames at 60 fps — enough for p95). */
@@ -203,6 +304,22 @@ export interface AutoScrollConfigEcho {
 	computedPreZone: number;
 	computedStrongZone: number;
 	hysteresisPx: number;
+}
+
+/**
+ * §十.1: pointer-follow gauges. Unlike counters these are *last observed
+ * values*, not sums — they answer "what was the tuning and what was the
+ * pointer actually doing" when a capture is read back from a machine we
+ * cannot debug interactively.
+ */
+export interface PointerFollowEcho {
+	pointerFollowStrength: number;
+	edgeMaxSpeed: number;
+	kineticMaxSpeed: number;
+	combinedMaxSpeed: number;
+	currentPointerVelocityY: number;
+	predictedPointerY: number;
+	pointerSampleCount: number;
 }
 
 export interface PerfReport {
@@ -275,6 +392,37 @@ export interface PerfReport {
 		appliedVelocityAvg: number;
 		manualWheelCooldownCount: number;
 	};
+	/** §四.2: scroll-pipeline mode split + scrollTop mutation behaviour. */
+	scrollPipeline: {
+		edgeOnlyFrameCount: number;
+		kineticOnlyFrameCount: number;
+		combinedIntentFrameCount: number;
+		scrollTopMutationCount: number;
+		scrollEventCount: number;
+		scrollEventReentrantCount: number;
+		zeroDeltaScrollEventCount: number;
+		scrollBoundaryClampCount: number;
+		avgScrollDeltaPx: number;
+		maxScrollDeltaPx: number;
+	};
+	/** §八: how pointer anchors were resolved (fallbackScanCount must be 0). */
+	anchorResolve: {
+		localHitCount: number;
+		binaryHitCount: number;
+		gapCount: number;
+		fallbackScanCount: number;
+		avgCandidateRows: number;
+	};
+	/** §九: sparse dirty-row write set behaviour. */
+	dirtyRows: {
+		avgDirtyRows: number;
+		maxDirtyRows: number;
+		identityRowsSkipped: number;
+		dirtyRowsAdded: number;
+		dirtyRowsRemoved: number;
+	};
+	/** §十.1: pointer-follow tuning + live pointer gauges (null if unused). */
+	pointerFollow: PointerFollowEcho | null;
 }
 
 interface LongTaskEntryLike {
@@ -305,6 +453,10 @@ export class PerfCapture {
 	private autoScrollAppliedSum = 0;
 	private autoScrollSampleCount = 0;
 	private autoScrollConfig: AutoScrollConfigEcho | null = null;
+	/** §十.1: last-observed pointer-follow gauges. */
+	private pointerFollowEcho: PointerFollowEcho | null = null;
+	/** §八: resolves counted for the candidate-rows average. */
+	private anchorResolveCount = 0;
 	/** §四.2: per-phase duration accumulators (allocated on start). */
 	private phases = new Map<PluginPhase, PhaseAccumulator>();
 
@@ -342,6 +494,8 @@ export class PerfCapture {
 		this.appliedSampleSum = 0;
 		this.appliedSampleMax = 0;
 		this.appliedSampleCount = 0;
+		this.pointerFollowEcho = null;
+		this.anchorResolveCount = 0;
 		this.phases = new Map();
 		this.startedAt = win.performance.now();
 		this.active = true;
@@ -564,6 +718,80 @@ export class PerfCapture {
 		this.count("gapAnchorResolveCount");
 	}
 
+	/** §十.1: overwrite the pointer-follow gauges (last write wins). */
+	setPointerFollowEcho(echo: PointerFollowEcho): void {
+		if (!this.active) return;
+		this.pointerFollowEcho = echo;
+	}
+
+	/**
+	 * §四.2: one applied scroll delta (px, signed input — magnitude kept).
+	 * A zero delta is still a sample: it is exactly the "we wrote scrollTop
+	 * but nothing moved" case worth seeing in a capture.
+	 */
+	addScrollDeltaSample(deltaPx: number): void {
+		if (!this.active) return;
+		if (!Number.isFinite(deltaPx)) return;
+		const magnitude = Math.abs(deltaPx);
+		this.counters.scrollDeltaSampleCount++;
+		this.counters.scrollDeltaTotalPx += magnitude;
+		if (magnitude > this.counters.maxScrollDeltaPx) {
+			this.counters.maxScrollDeltaPx = magnitude;
+		}
+	}
+
+	/**
+	 * §八: one pointer-anchor resolve. `strategy` records HOW the row was
+	 * found; `candidateRows` is how many rows had to be examined, which is
+	 * the number that must stay O(log n) rather than O(n).
+	 */
+	addAnchorResolveSample(
+		strategy: "local" | "binary" | "gap" | "fallback",
+		candidateRows: number,
+	): void {
+		if (!this.active) return;
+		switch (strategy) {
+			case "local":
+				this.counters.anchorLocalHitCount++;
+				break;
+			case "binary":
+				this.counters.anchorBinaryHitCount++;
+				break;
+			case "gap":
+				this.counters.anchorGapCount++;
+				break;
+			case "fallback":
+				this.counters.anchorFallbackScanCount++;
+				break;
+		}
+		if (Number.isFinite(candidateRows) && candidateRows > 0) {
+			this.counters.anchorResolveCandidateRows += candidateRows;
+		}
+		this.anchorResolveCount++;
+	}
+
+	/**
+	 * §九: one frame's sparse dirty-row set. `identitySkipped` counts rows
+	 * we deliberately did NOT write because their transform was already
+	 * identity — the whole point of the sparse set.
+	 */
+	addDirtyRowsSample(dirtyRows: number, identitySkipped = 0): void {
+		if (!this.active) return;
+		this.counters.dirtyRowsSampleCount++;
+		this.counters.dirtyRowsTotal += dirtyRows;
+		if (dirtyRows > this.counters.maxDirtyRows) {
+			this.counters.maxDirtyRows = dirtyRows;
+		}
+		this.counters.identityRowsSkipped += identitySkipped;
+	}
+
+	/** §九: churn of the dirty set (rows entering / leaving settling). */
+	addDirtyRowChurn(added: number, removed: number): void {
+		if (!this.active) return;
+		this.counters.dirtyRowsAdded += added;
+		this.counters.dirtyRowsRemoved += removed;
+	}
+
 	/** §四.2: one plugin phase duration sample (ms). Ring-buffered. */
 	addPhaseSample(phase: PluginPhase, durationMs: number): void {
 		if (!this.active) return;
@@ -757,6 +985,47 @@ export class PerfCapture {
 				),
 				manualWheelCooldownCount: c.manualWheelCooldownCount,
 			},
+			scrollPipeline: {
+				edgeOnlyFrameCount: c.edgeOnlyFrameCount,
+				kineticOnlyFrameCount: c.kineticOnlyFrameCount,
+				combinedIntentFrameCount: c.combinedIntentFrameCount,
+				scrollTopMutationCount: c.scrollTopMutationCount,
+				scrollEventCount: c.scrollEventCount,
+				scrollEventReentrantCount: c.scrollEventReentrantCount,
+				zeroDeltaScrollEventCount: c.zeroDeltaScrollEventCount,
+				scrollBoundaryClampCount: c.scrollBoundaryClampCount,
+				avgScrollDeltaPx: round2(
+					c.scrollDeltaSampleCount > 0
+						? c.scrollDeltaTotalPx / c.scrollDeltaSampleCount
+						: 0,
+				),
+				maxScrollDeltaPx: round2(c.maxScrollDeltaPx),
+			},
+			anchorResolve: {
+				localHitCount: c.anchorLocalHitCount,
+				binaryHitCount: c.anchorBinaryHitCount,
+				gapCount: c.anchorGapCount,
+				fallbackScanCount: c.anchorFallbackScanCount,
+				avgCandidateRows: round2(
+					this.anchorResolveCount > 0
+						? c.anchorResolveCandidateRows / this.anchorResolveCount
+						: 0,
+				),
+			},
+			dirtyRows: {
+				avgDirtyRows: round2(
+					c.dirtyRowsSampleCount > 0
+						? c.dirtyRowsTotal / c.dirtyRowsSampleCount
+						: 0,
+				),
+				maxDirtyRows: c.maxDirtyRows,
+				identityRowsSkipped: c.identityRowsSkipped,
+				dirtyRowsAdded: c.dirtyRowsAdded,
+				dirtyRowsRemoved: c.dirtyRowsRemoved,
+			},
+			pointerFollow: this.pointerFollowEcho
+				? { ...this.pointerFollowEcho }
+				: null,
 		};
 	}
 
