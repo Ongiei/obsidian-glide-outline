@@ -2,6 +2,24 @@
 
 All notable changes to Glide Outline will be documented in this file.
 
+## 0.1.4
+
+Jump accuracy, a content-space scroll pipeline, and clean DOM boundaries.
+
+- fix: **jump landing error**. The corrector compared `lineBlockAt` (content origin) against `scrollTop` (scroller origin), so the inline title + properties block stayed in as a residual — a Windows capture settled 416.65625 px away while reporting zero error. The landing is now measured in client space via `coordsAtPos`, and a heading at the end of the document settles as `scroll-boundary` instead of failing.
+- perf: **row geometry moved to content space**. A scroll now updates one number instead of rewriting every cached row, solver entry and envelope rect.
+- perf: **anchor lookup is local + binary**. Anchor resolution is deferred to one per frame and done by a ±3 probe with a binary-search fallback, so `anchorFallbackScanCount` is 0 by construction.
+- perf: **sparse dirty rows**. The write loop visits `collision ∪ dirty` as a set instead of an inclusive span, which always over-covered after a boundary taper.
+- fix: **pointer follow**. `predictedY` drives the kinetic depth factor while eligibility keeps the actual position; gap moves are parked and committed by the frame-fresh envelope check, so the velocity ring no longer starves between cards and gap re-entry no longer wipes the gesture.
+- feat: **mount isolation**. Everything the plugin renders now hangs off a single wrapper tagged `data-glide-outline-owner` (`display: contents`, so layout is unchanged). The host is no longer branded with a class: its computed `position` is read and an inline `position: relative` is written only when the host is `static`, then restored verbatim on dispose. Mounting sweeps stale wrappers, the pending measure rAF is cancelled, and the `tabindex="-1"` written onto preview headings is removed.
+- fix: **fail-closed targeting**. Click/pointer resolution, the anchor lookup and the reading-intent gesture test verify ownership instead of trusting a class name, so a foreign node wearing Glide Outline's class names is ignored.
+- fix: **the stylesheet can no longer paint outside the plugin**. Every rule is scoped with `:where([data-glide-outline-owner])` — zero added specificity, so existing cascade outcomes are unchanged.
+- change: **no tooltips anywhere**. Obsidian renders `aria-label` as a hover bubble, so accessible names moved to sr-only spans referenced by `aria-labelledby`, and all 16 slider tooltips were replaced with an always-visible value readout next to the track.
+- perf: `autoScroll` diagnostics split into eleven steps, plus scroll-pipeline, anchor-strategy, dirty-row and pointer-follow counters.
+- test: 485 tests (+66), including a 21-test mount-isolation suite and static sweeps that fail the build if a tooltip or an unscoped CSS rule is reintroduced.
+
+Not verified on Windows: this release was developed and tested on macOS only. The jump fix targets a Windows capture but has not been manually re-measured there.
+
 ## 0.1.3
 
 Collision continuity hotfix + pointer movement assist strength.

@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-glide-outline",
-	"version": "0.1.3",
+	"version": "0.1.4",
 	"description": "A fluid editor-margin outline with dock-style proximity magnification.",
 	"main": "main.js",
 	"scripts": {
