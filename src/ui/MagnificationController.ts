@@ -49,7 +49,7 @@ import {
 import type { MotionItemState } from "../utils/motionInterp";
 import { resolveClickTarget } from "../utils/activation";
 import { closestOwned } from "./mount";
-import type { Diagnostics } from "../core/Diagnostics";
+import type { Diagnostics, ScrollDeltaSource } from "../core/Diagnostics";
 import type { PerfCapture, PerfCounters } from "../core/PerfCapture";
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
@@ -362,6 +362,20 @@ export class MagnificationController {
 	 * is the ONLY value an outline scroll has to update: every cached row
 	 * center and envelope item rect lives in content space. */
 	private currentScrollTop = 0;
+	/** §四.2: >0 while we are inside our own scrollTop write, so the
+	 * scroll listener can classify a synchronous (reentrant) dispatch. */
+	private scrollTopWriteDepth = 0;
+	/** §十: the source of the write currently in flight (reentrant path). */
+	private activeWriteSource: ScrollDeltaSource | null = null;
+	/** §十: short-lived attribution for the NEXT async scroll event(s).
+	 * Frame-counted TTL — no clock reads on the capture-off hot path. */
+	private scrollAttribution: {
+		source: ScrollDeltaSource;
+		ttl: number;
+	} | null = null;
+	/** §十: frames remaining during which a file/mode switch is "recent". */
+	private fileChangeTtl = 0;
+	private modeChangeTtl = 0;
 	// --- Pointer edge auto-scroll state (coordinated in the same RAF as
 	// magnification, so the two never fight over frames).
 	/** Viewport bounds cached alongside the item cache — no per-frame rect. */
@@ -496,14 +510,58 @@ export class MagnificationController {
 			viewportEl,
 			"scroll",
 			() => {
-				const scrollTop = viewportEl.scrollTop;
-				const delta = scrollTop - this.currentScrollTop;
-				this.currentScrollTop = scrollTop;
 				const perf = this.perf;
-				if (perf?.active === true) {
+				const measure = perf?.active === true;
+				// §四.2: a scroll event observed while we are still inside
+				// our own scrollTop write was dispatched SYNCHRONOUSLY by
+				// that write — its cost belongs to the write, not to the
+				// ordinary async handler phase.
+				const reentrant = this.scrollTopWriteDepth > 0;
+				const handlerStart = measure
+					? this.win.performance.now()
+					: 0;
+				const scrollTop = viewportEl.scrollTop;
+				const previousScrollTop = this.currentScrollTop;
+				const delta = scrollTop - previousScrollTop;
+				this.currentScrollTop = scrollTop;
+				// §十: attribute the delta to whoever moved the scroller.
+				const source = this.classifyScrollSource();
+				if (measure && perf) {
 					perf.count("scrollEventCount");
+					if (reentrant) perf.count("scrollEventReentrantCount");
 					if (delta === 0) perf.count("zeroDeltaScrollEventCount");
-					perf.addScrollDeltaSample(delta);
+					perf.addScrollDeltaSample(delta, source);
+					// §四.2 scrollOffsetUpdate: applying the delta to the
+					// cached content offset (the reads/writes above).
+					perf.addPhaseSample(
+						"scrollOffsetUpdate",
+						this.win.performance.now() - handlerStart,
+					);
+				}
+				// §十: |delta| beyond the viewport height is the "outline
+				// teleported" anomaly — snapshot it ALWAYS (capture on or
+				// off), never clamp it, never swallow the scroll. The
+				// comparison uses the cached viewport height so the hot
+				// path stays free of layout reads.
+				const cachedViewportHeight =
+					this.viewportBottom - this.viewportTop;
+				if (
+					this.diagnostics &&
+					Number.isFinite(delta) &&
+					cachedViewportHeight > 0 &&
+					Math.abs(delta) > cachedViewportHeight
+				) {
+					this.diagnostics.recordLargeScrollDelta({
+						previousScrollTop,
+						currentScrollTop: scrollTop,
+						delta,
+						clientHeight: viewportEl.clientHeight,
+						scrollHeight: viewportEl.scrollHeight,
+						source,
+						fileChangePending: this.fileChangeTtl > 0,
+						modeChangePending: this.modeChangeTtl > 0,
+						instanceId: this.view.getMountInstanceId(),
+					});
 				}
 				if (
 					!this.cacheDirty &&
@@ -515,7 +573,23 @@ export class MagnificationController {
 				}
 				// User is scrolling the outline — pause active-heading follow.
 				this.view.setFollowEnabled(false);
+				const scheduleStart = measure
+					? this.win.performance.now()
+					: 0;
 				this.schedule();
+				if (measure && perf) {
+					const handlerEnd = this.win.performance.now();
+					perf.addPhaseSample(
+						"scrollFrameReschedule",
+						handlerEnd - scheduleStart,
+					);
+					perf.addPhaseSample(
+						reentrant
+							? "synchronousScrollDispatch"
+							: "scrollEventHandler",
+						handlerEnd - handlerStart,
+					);
+				}
 			},
 			{ passive: true },
 		);
@@ -569,6 +643,10 @@ export class MagnificationController {
 		resizeObserver.observe(view.listEl);
 		resizeObserver.observe(view.rootEl);
 		this.disposables.add(() => resizeObserver.disconnect());
+
+		// §十: a scroll event arriving right after construction (initial
+		// layout settling, scrollTop restoration) is the mount's doing.
+		this.scrollAttribution = { source: "mount", ttl: 3 };
 	}
 
 	/** Called when the heading list or settings changed (centers are stale). */
@@ -577,6 +655,18 @@ export class MagnificationController {
 		this.envelopeDirty = true;
 		this.perf?.count("cacheInvalidationCount");
 		if (this.isExpanded()) this.schedule();
+	}
+
+	/**
+	 * §十: a file switch or view-mode switch just happened — a following
+	 * outline scroll (content swap, scrollTop clamp/reset) belongs to it.
+	 * TTLs are frame-counted; while collapsed they simply persist, which
+	 * is the honest reading of "nothing else touched the outline since".
+	 */
+	noteContextChange(reason: "file-change" | "mode-change"): void {
+		this.scrollAttribution = { source: reason, ttl: 3 };
+		if (reason === "file-change") this.fileChangeTtl = 3;
+		else this.modeChangeTtl = 3;
 	}
 
 	dispose(): void {
@@ -796,7 +886,15 @@ export class MagnificationController {
 		if (decision.action !== "outline") return; // native path untouched
 		event.preventDefault();
 		event.stopPropagation();
-		this.view.viewportEl.scrollTop += decision.deltaPx;
+		// §四.2: counted as a scrollTop mutation / boundary clamp, but NOT
+		// as a scrollTopWrite phase sample — the sub-phases stay a strict
+		// decomposition of the RAF autoScroll total.
+		this.writeScrollTop(
+			decision.deltaPx,
+			perf?.active === true ? perf : undefined,
+			false,
+			"manual-wheel",
+		);
 		this.startManualWheelCooldown();
 	};
 
@@ -1190,9 +1288,21 @@ export class MagnificationController {
 		// §六/§八: an outline scroll since the last frame moved the rows
 		// under the pointer. Re-resolve the anchor ONCE here from cached
 		// content-space geometry (the scroll handler itself stays O(1)).
+		const scrolledSinceLastFrame = this.anchorScrollStale;
 		if (this.anchorScrollStale) {
 			this.anchorScrollStale = false;
+			// §四.2 scrollAnchorResolve: re-resolving the pointer anchor
+			// after the content offset moved under it.
+			const anchorResolveStart = measure
+				? this.win.performance.now()
+				: 0;
 			this.refreshPointerAnchorAfterScroll();
+			if (measure && perf) {
+				perf.addPhaseSample(
+					"scrollAnchorResolve",
+					this.win.performance.now() - anchorResolveStart,
+				);
+			}
 		}
 		// Resolve the magnification anchor from the last pointer target.
 		// `closest` is an ancestor-tree walk (no layout access).
@@ -1221,8 +1331,22 @@ export class MagnificationController {
 		// §六: the cache is content-space, so the two moving inputs (the
 		// pointer and the visible window) are converted ONCE per frame —
 		// two subtractions instead of a per-row rewrite on every scroll.
+		// §四.2 scrollEnvelopeUpdate: when a scroll happened since the
+		// last frame, this conversion IS the envelope/viewport geometry
+		// update the scroll caused (the item rects themselves are content-
+		// space and deliberately untouched by scrolling).
+		const envUpdateStart =
+			measure && scrolledSinceLastFrame
+				? this.win.performance.now()
+				: 0;
 		const pointerContentY = this.clientYToContentY(this.lastPointerY);
 		const contentWindow = this.contentRangeForViewport();
+		if (measure && scrolledSinceLastFrame && perf) {
+			perf.addPhaseSample(
+				"scrollEnvelopeUpdate",
+				this.win.performance.now() - envUpdateStart,
+			);
+		}
 
 		// ---------------- §四 three independent ranges ----------------
 		// 1) SCALE range: pointerY ± radius (+1 overscan). Answers "which
@@ -1671,6 +1795,12 @@ export class MagnificationController {
 
 	/** Frame epilogue: break perf interval chains when the loop idles. */
 	private endFrame(): void {
+		// §十: age the frame-counted attribution notes.
+		if (this.scrollAttribution && --this.scrollAttribution.ttl <= 0) {
+			this.scrollAttribution = null;
+		}
+		if (this.fileChangeTtl > 0) this.fileChangeTtl--;
+		if (this.modeChangeTtl > 0) this.modeChangeTtl--;
 		if (this.rafId === 0) {
 			this.perf?.markFrameGap();
 			this.lastMotionTime = Number.NaN;
@@ -1756,8 +1886,21 @@ export class MagnificationController {
 	private stepAutoScroll(settings: GlideOutlineSettings): void {
 		const pointer = this.pointer;
 		const integ = this.integrator;
+		const perf = this.perf;
+		const measure = perf?.active === true;
+		// §四.2 scrollEligibility: everything that decides whether this
+		// frame may auto-scroll at all — expansion/press gate, manual-wheel
+		// cooldown, dt bookkeeping and ring-velocity decay. Capture-off →
+		// zero performance.now() calls on this path.
+		const eligibilityStart = measure ? this.win.performance.now() : 0;
 		if (!this.pointerExpanded || this.pressed) {
 			this.resetAllScrollIntent(this.pressed ? "pressed" : "collapsed");
+			if (measure && perf) {
+				perf.addPhaseSample(
+					"scrollEligibility",
+					this.win.performance.now() - eligibilityStart,
+				);
+			}
 			return;
 		}
 		const now = this.win.performance.now();
@@ -1772,6 +1915,12 @@ export class MagnificationController {
 			integ.appliedVelocity = 0;
 			integ.lastFrameTime = Number.NaN;
 			this.schedule();
+			if (measure && perf) {
+				perf.addPhaseSample(
+					"scrollEligibility",
+					this.win.performance.now() - eligibilityStart,
+				);
+			}
 			return;
 		}
 
@@ -1790,6 +1939,12 @@ export class MagnificationController {
 			);
 			if (Math.abs(kin.velocityY) < 1) kin.velocityY = 0;
 		}
+		if (measure && perf) {
+			perf.addPhaseSample(
+				"scrollEligibility",
+				this.win.performance.now() - eligibilityStart,
+			);
+		}
 
 		// P1-3: speed scales max velocity AND acceleration linearly, so the
 		// ramp/damp character is identical at every speed setting.
@@ -1804,9 +1959,11 @@ export class MagnificationController {
 		// Combined clamp honours whichever mechanism can run faster.
 		const combinedMaxSpeed = Math.max(edgeMaxSpeed, kineticMaxSpeed);
 		const overflow = this.view.getOverflowState();
-		const perf = this.perf;
 
 		// ---- EDGE intent (§八: position-only; §十二: own eligibility) ----
+		// §四.2 edgeIntentMath: the whole edge decision — zone math, dwell
+		// gate, latch bookkeeping.
+		const edgeMathStart = measure ? this.win.performance.now() : 0;
 		const edge = this.edgeIntent;
 		const edgeEligible =
 			pointer.overElement || (edge.latched && pointer.insideEnvelope);
@@ -1853,8 +2010,16 @@ export class MagnificationController {
 		) {
 			this.stopEdgeIntent("pointer-left");
 		}
+		if (measure && perf) {
+			perf.addPhaseSample(
+				"edgeIntentMath",
+				this.win.performance.now() - edgeMathStart,
+			);
+		}
 
 		// ---- KINETIC intent (§九/§十二: independent eligibility) --------
+		// §四.2 kineticIntentMath: pointer-follow velocity math.
+		const kineticMathStart = measure ? this.win.performance.now() : 0;
 		const kineticEligible =
 			pointer.overElement || pointer.insideEnvelope;
 		let kineticTarget = 0;
@@ -1886,6 +2051,12 @@ export class MagnificationController {
 		} else if (this.kineticActive || kin.velocityY !== 0) {
 			this.stopKineticIntent("pointer-left");
 		}
+		if (measure && perf) {
+			perf.addPhaseSample(
+				"kineticIntentMath",
+				this.win.performance.now() - kineticMathStart,
+			);
+		}
 
 		// §十八 config echo — only while a capture is running.
 		if (perf?.active === true) {
@@ -1916,6 +2087,9 @@ export class MagnificationController {
 		}
 
 		// ---- Shared integrator (§七): combine, clamp, damp --------------
+		// §四.2 scrollIntegrator: combine + clamp + acceleration-capped
+		// damping — everything between the intents and the actual write.
+		const integratorStart = measure ? this.win.performance.now() : 0;
 		integ.edgeIntentVelocity = edgeTarget;
 		integ.kineticIntentVelocity = kineticTarget;
 		const combined = Math.min(
@@ -1925,6 +2099,12 @@ export class MagnificationController {
 		integ.combinedTargetVelocity = combined;
 
 		if (combined === 0 && integ.appliedVelocity === 0) {
+			if (measure && perf) {
+				perf.addPhaseSample(
+					"scrollIntegrator",
+					this.win.performance.now() - integratorStart,
+				);
+			}
 			// §十一 hysteresis: a latched edge session in the dead zone
 			// survives while the pointer is within 12 px of the trigger
 			// boundary — re-entering resumes instantly without a second
@@ -1959,10 +2139,25 @@ export class MagnificationController {
 			if (combined === 0 && Math.abs(integ.appliedVelocity) < 4) {
 				integ.appliedVelocity = 0;
 			}
+			if (measure && perf) {
+				perf.addPhaseSample(
+					"scrollIntegrator",
+					this.win.performance.now() - integratorStart,
+				);
+			}
 			if (integ.appliedVelocity !== 0) {
 				// §十三: scroll intents ONLY move scrollTop — geometry and
 				// magnification react through the scroll handler's delta.
-				this.view.viewportEl.scrollTop += integ.appliedVelocity * dt;
+				this.writeScrollTop(
+					integ.appliedVelocity * dt,
+					measure ? perf : undefined,
+					true,
+					edgeTarget !== 0 && kineticTarget !== 0
+						? "combined"
+						: edgeTarget !== 0
+							? "edge"
+							: "kinetic",
+				);
 				perf?.count("autoScrollFrameCount");
 				perf?.addAutoScrollSample(combined, integ.appliedVelocity);
 				perf?.addCombinedIntentSample(combined);
@@ -1978,10 +2173,88 @@ export class MagnificationController {
 					perf?.count("kineticIntentFrameCount");
 					perf?.addKineticIntentSample(kineticTarget);
 				}
+				// §四.2 mode split: which mechanism(s) produced THIS
+				// frame's velocity (mutually exclusive by definition).
+				if (edgeTarget !== 0 && kineticTarget === 0) {
+					perf?.count("edgeOnlyFrameCount");
+				} else if (edgeTarget === 0 && kineticTarget !== 0) {
+					perf?.count("kineticOnlyFrameCount");
+				} else if (edgeTarget !== 0 && kineticTarget !== 0) {
+					perf?.count("combinedIntentFrameCount");
+				}
 			}
+		} else if (measure && perf) {
+			perf.addPhaseSample(
+				"scrollIntegrator",
+				this.win.performance.now() - integratorStart,
+			);
 		}
 		// Keep the loop alive while there is motion or a pending target.
 		this.schedule();
+	}
+
+	/**
+	 * §四.2 the ONE auto-scroll scrollTop mutation point. Distinguishes
+	 * requestedDelta (what the integrator asked for) from appliedDelta
+	 * (what the scroller actually moved); the shortfall is the
+	 * boundary-clamped remainder. `scrollTopMutationCount` only counts
+	 * writes that MOVED the scroller — a fully clamped write is counted
+	 * as a boundary clamp instead. The reentrancy depth lets the scroll
+	 * listener classify a synchronous dispatch (§四.2).
+	 */
+	/**
+	 * §十: best-effort attribution for one scroll event, cheapest test
+	 * first. Inside our own write the source is exact; otherwise recent
+	 * notes (programmatic reveal, plugin write, context change, mount)
+	 * are consulted before falling back to "external" (scrollbar drag,
+	 * find-in-page, another plugin — anything that is not us).
+	 */
+	private classifyScrollSource(): ScrollDeltaSource {
+		if (this.scrollTopWriteDepth > 0) {
+			return this.activeWriteSource ?? "unknown";
+		}
+		const note = this.view.takeProgrammaticScrollNote();
+		if (note) return note;
+		if (this.scrollAttribution) return this.scrollAttribution.source;
+		if (this.fileChangeTtl > 0) return "file-change";
+		if (this.modeChangeTtl > 0) return "mode-change";
+		return "external";
+	}
+
+	private writeScrollTop(
+		requestedDelta: number,
+		perf: PerfCapture | undefined,
+		recordPhase = true,
+		source: ScrollDeltaSource = "unknown",
+	): void {
+		const el = this.view.viewportEl;
+		const before = el.scrollTop;
+		const writeStart =
+			perf && recordPhase ? this.win.performance.now() : 0;
+		this.scrollTopWriteDepth++;
+		this.activeWriteSource = source;
+		try {
+			el.scrollTop = before + requestedDelta;
+		} finally {
+			this.scrollTopWriteDepth--;
+			this.activeWriteSource = null;
+		}
+		// §十: the browser may deliver the scroll event asynchronously —
+		// leave a short-lived note so that event still attributes to us.
+		this.scrollAttribution = { source, ttl: 2 };
+		if (!perf) return;
+		if (recordPhase) {
+			perf.addPhaseSample(
+				"scrollTopWrite",
+				this.win.performance.now() - writeStart,
+			);
+		}
+		const appliedDelta = el.scrollTop - before;
+		if (appliedDelta !== 0) perf.count("scrollTopMutationCount");
+		const boundaryClampedDelta = requestedDelta - appliedDelta;
+		if (Math.abs(boundaryClampedDelta) > 0.5) {
+			perf.count("scrollBoundaryClampCount");
+		}
 	}
 
 	/** §十一: pointer within (preZone + hysteresis) of either edge? */
