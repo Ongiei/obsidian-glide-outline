@@ -262,11 +262,28 @@ describe("Collision continuity: no visible overlap across pointer sweep (§三)"
 	 * the old and new motion ranges overlapping, which is exactly when the
 	 * boundary overlap (and Newton's-cradle propagation) appears.
 	 */
-	function sweepAndCheck(s: Scenario): void {
+	/**
+	 * A full sweep is several seconds of straight-line CPU work. Left
+	 * fully synchronous it starves the vitest worker's event loop, and the
+	 * reporter's `onTaskUpdate` RPC times out — the run reports every test
+	 * as passing and then fails on an unhandled error. Yielding a real
+	 * macrotask every few pointer steps costs nothing and keeps the worker
+	 * responsive. `setImmediate` is deliberately NOT in this suite's
+	 * `toFake` list, so this is a genuine yield.
+	 */
+	const YIELD_EVERY_STEPS = 40;
+	function yieldToLoop(): Promise<void> {
+		return new Promise<void>((resolve) => {
+			setImmediate(resolve);
+		});
+	}
+
+	async function sweepAndCheck(s: Scenario): Promise<void> {
 		const firstY = baseRects[0].top + baseRects[0].height / 2;
 		const lastY = baseRects[N - 1].top + baseRects[N - 1].height / 2;
 		const step = 5;
 		let first = true;
+		let sinceYield = 0;
 		for (let y = firstY; y <= lastY; y += step) {
 			if (first) {
 				pointer("pointerenter", s.pointerX, y);
@@ -281,14 +298,18 @@ describe("Collision continuity: no visible overlap across pointer sweep (§三)"
 				if (rafQueue.length === 0) break;
 				assertNoOverlap(1);
 			}
+			if (++sinceYield >= YIELD_EVERY_STEPS) {
+				sinceYield = 0;
+				await yieldToLoop();
+			}
 		}
 	}
 
 	for (const s of COMBOS) {
-		it(`no overlap: radius=${s.radius} maxScale=${s.maxScale} gap=${s.cardGap} dpr=${s.dpr} x=${s.pointerX}`, () => {
+		it(`no overlap: radius=${s.radius} maxScale=${s.maxScale} gap=${s.cardGap} dpr=${s.dpr} x=${s.pointerX}`, async () => {
 			buildScenario(s);
 			// Enter at the top first so the initial frame is valid.
-			sweepAndCheck(s);
+			await sweepAndCheck(s);
 		});
 	}
 
@@ -377,8 +398,14 @@ describe("Collision continuity: no visible overlap across pointer sweep (§三)"
 		assertNoOverlap(1);
 	});
 
-	it("mixed heights stay feasible across a full sweep", () => {
+	it("mixed heights stay feasible across a full sweep", async () => {
 		buildScenario({ radius: 80, maxScale: 2.25, cardGap: 4, dpr: 1, pointerX: 10 });
-		sweepAndCheck({ radius: 80, maxScale: 2.25, cardGap: 4, dpr: 1, pointerX: 10 });
+		await sweepAndCheck({
+			radius: 80,
+			maxScale: 2.25,
+			cardGap: 4,
+			dpr: 1,
+			pointerX: 10,
+		});
 	});
 });
