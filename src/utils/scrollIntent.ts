@@ -130,6 +130,11 @@ export class PointerSampleRing {
 		return this.samples.length >= 2;
 	}
 
+	/** §十.1 diagnostic gauge: how many samples back the current estimate. */
+	get length(): number {
+		return this.samples.length;
+	}
+
 	/** Clear all samples (e.g. on pointerdown / collapse / dispose). */
 	clear(): void {
 		this.samples.length = 0;
@@ -248,6 +253,20 @@ export function resolveEdgeZones(
 export interface KineticIntentInput {
 	/** Pointer Y in the same space as viewportTop/viewportBottom. */
 	pointerY: number;
+	/**
+	 * §十: forward-looking pointer position, `predictedPointerY(pointerY,
+	 * velocityY)`. Optional — omit (or pass a non-finite value) to fall
+	 * back to `pointerY`.
+	 *
+	 * ONLY the depth factor reads it. Eligibility (is the pointer inside
+	 * the viewport band at all?) deliberately keeps using the ACTUAL
+	 * position: a prediction that overshoots past the edge must never
+	 * switch the follow off, and one that undershoots must never switch it
+	 * on. What the prediction buys is anticipation — a pointer flicking
+	 * toward an edge gets the edge's stronger depth factor ~80 ms before it
+	 * arrives, instead of ramping up only after it is already there.
+	 */
+	predictedY?: number;
 	/** Smoothed pointer vertical velocity, px/s (+ = moving down). */
 	pointerVelocityY: number;
 	viewportTop: number;
@@ -279,13 +298,17 @@ export const POINTER_FOLLOW_DECAY_TAU_MS = 120;
  * §九 Kinetic (pointer-follow) scroll intent.
  *
  *   predictedY = pointerY + velocityY × (lookahead/1000)   // forward guess
- *   depthFactor = 0.35 + 0.65 × |pointerY − center| / (height/2)
+ *   depthFactor = 0.35 + 0.65 × |predictedY − center| / (height/2)
  *   kinetic = clamp(velocityY × gain × depthFactor,
  *                   −maxSpeed×maxShare, +maxSpeed×maxShare)
  *
  * No dwell (the gesture is the intent); a stationary or slow pointer is 0;
  * a fast flick anywhere in the band pre-scrolls toward the gesture; the
  * depth factor keeps the dead-center calm while the edges get stronger.
+ *
+ * §十: the depth factor is evaluated at the PREDICTED position when the
+ * caller supplies one, so the ramp leads the gesture instead of trailing
+ * it. Eligibility still uses the actual position (see `predictedY`).
  */
 export function computeKineticIntentVelocity(
 	input: KineticIntentInput,
@@ -320,7 +343,14 @@ export function computeKineticIntentVelocity(
 			: 1;
 	const center = input.viewportTop + height / 2;
 	const half = height / 2;
-	const norm = half > 0 ? Math.min(1, Math.abs(input.pointerY - center) / half) : 0;
+	// §十: measure depth where the pointer is HEADING. `Math.min(1, …)`
+	// already saturates an overshooting prediction at the edge value, so no
+	// extra clamp is needed.
+	const depthY =
+		input.predictedY !== undefined && Number.isFinite(input.predictedY)
+			? input.predictedY
+			: input.pointerY;
+	const norm = half > 0 ? Math.min(1, Math.abs(depthY - center) / half) : 0;
 	const depthFactor = 0.35 + 0.65 * norm;
 	const cap = maxSpeed * POINTER_FOLLOW_MAX_SHARE * strength;
 	const magnitude = Math.min(

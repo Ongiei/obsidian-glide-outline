@@ -195,6 +195,15 @@ function idlePointerState(): PointerInteractionState {
 	};
 }
 
+/** §十: a window-level pointer move parked for the deferred containment
+ * test. Only the fields the velocity ring needs — no event reference, so
+ * nothing keeps a DOM object alive past the frame. */
+interface PendingPointerSample {
+	pointerId: number;
+	clientY: number;
+	timeStamp: number;
+}
+
 /**
  * §十四: move a cached rect with its row's motion — vertical shift plus
  * vertical scale growth around the rect's own center (`transform-origin`
@@ -205,6 +214,12 @@ function applyMotionDeltaToRect(r: Rect, dy: number, ratio: number): void {
 	const hh = ((r.bottom - r.top) / 2) * ratio;
 	r.top = cy - hh;
 	r.bottom = cy + hh;
+}
+
+/** §九: numeric sort comparator (Array#sort is lexicographic by default,
+ * which would order row 10 before row 9). */
+function ascending(a: number, b: number): number {
+	return a - b;
 }
 
 /** §十七: quantize CSS var payloads — scale to 4 decimals, shift to
@@ -324,6 +339,21 @@ export class MagnificationController {
 	private envelopeDirty = true;
 	/** Window-level containment test deferred to the frame (section 4). */
 	private windowCheckPending = false;
+	/**
+	 * §十: the newest window-level pointer sample, waiting for the deferred
+	 * containment test.
+	 *
+	 * A move across a TRANSPARENT GAP (the space between two magnified
+	 * cards, or the marker↔card corridor) hits no outline element, so only
+	 * the window listener sees it. Feeding it into the velocity ring right
+	 * there would be wrong — the same listener also sees moves over the
+	 * editor, and those must not drive the outline's follow gesture. So the
+	 * sample is parked here and committed by `processWindowCheck()` only
+	 * once the (frame-fresh) envelope confirms the pointer is still inside.
+	 * That closes the hole where a gesture visibly stalled every time the
+	 * pointer glided over a gap.
+	 */
+	private pendingPointerSample: PendingPointerSample | null = null;
 	/** Active row window (sections 6/10); recomputed each frame. */
 	private activeRange: ActiveMotionRange = emptyActiveRange();
 	// --- §六 Content-coordinate geometry --------------------------------
@@ -377,13 +407,23 @@ export class MagnificationController {
 		lastFrameTime: Number.NaN,
 		manualWheelCooldownUntil: 0,
 	};
-	// --- Settling range (§五/§六) -------------------------------------
-	/** Inclusive index window of rows that may still be off identity
-	 * (mid-interpolation or carrying written vars / layer classes). The
-	 * per-frame write loop iterates ONLY Motion ∪ Settling — never the
-	 * whole visible list. `settleEnd < settleStart` = empty. */
-	private settleStart = 0;
-	private settleEnd = -1;
+	// --- Sparse dirty rows (§五/§六/§九) --------------------------------
+	/** §九: the EXACT set of row indices that may still be off identity
+	 * (mid-interpolation, or carrying written vars / layer classes).
+	 *
+	 * This replaces the old inclusive `[settleStart, settleEnd]` span.
+	 * The span was a lie whenever the dirty rows were not contiguous —
+	 * and after a taper they never are: a handful of chain rows above
+	 * the collision block plus the block itself made the span cover
+	 * every clean row in between, and the write loop walked all of them
+	 * once per frame just to hit the identity fast-skip. With a set the
+	 * loop visits `collision ∪ dirty` and nothing else. */
+	private readonly dirtyRows = new Set<number>();
+	/** Reused per-frame write order (ascending). Held as a field so the
+	 * frame loop allocates nothing on the hot path. */
+	private readonly writeOrder: number[] = [];
+	/** Reused scratch for dirty rows sitting outside the collision block. */
+	private readonly outsideDirty: number[] = [];
 	// --- Pointer activation lock (section 9) --------------------------
 	/** Set on pointerdown over a real marker/card; cleared on pointerup /
 	 * pointercancel / window blur / dispose. While set, the frame loop is
@@ -557,6 +597,16 @@ export class MagnificationController {
 	}
 
 	private onPointerEnter = (event: PointerEvent): void => {
+		// §十: is this a FRESH gesture, or a re-entry from a transparent
+		// gap? `pointerenter` fires on the rail AND on the list, so gliding
+		// off a card into the gap and onto the next one re-fires it several
+		// times per second mid-flick. Only a genuinely fresh visit (the
+		// outline was collapsed, or the pointer was outside the envelope)
+		// may wipe the velocity ring; clearing it on gap re-entry killed
+		// the very gesture the follow is supposed to continue.
+		const freshGesture =
+			!this.pointerExpanded ||
+			(!this.pointer.overElement && !this.pointer.insideEnvelope);
 		this.cancelCollapse();
 		this.pointerExpanded = true;
 		this.pointer.overElement = true;
@@ -570,11 +620,14 @@ export class MagnificationController {
 		this.lastPointerY = event.clientY;
 		this.pendingAnchorTarget = event.target;
 		this.anchorDirty = true;
-		// Fresh gesture: no carried-over velocity from a previous visit.
-		this.kinematics.samples.clear();
-		this.kinematics.velocityY = 0;
-		this.kinematics.active = false;
-		this.lastSampleEventId = "";
+		if (freshGesture) {
+			// No carried-over velocity from a previous visit.
+			this.kinematics.samples.clear();
+			this.kinematics.velocityY = 0;
+			this.kinematics.predictedY = Number.NaN;
+			this.kinematics.active = false;
+			this.lastSampleEventId = "";
+		}
 		this.syncExpanded();
 		this.schedule();
 	};
@@ -677,6 +730,13 @@ export class MagnificationController {
 		this.perf?.count("pointermoveCount");
 		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
+		// §十: park the sample; the frame decides whether this was a gap
+		// crossing (→ feed the ring) or a genuine exit (→ discard).
+		this.pendingPointerSample = {
+			pointerId: event.pointerId,
+			clientY: event.clientY,
+			timeStamp: event.timeStamp,
+		};
 		this.windowCheckPending = true;
 		this.schedule();
 	};
@@ -760,10 +820,24 @@ export class MagnificationController {
 	private processWindowCheck(): void {
 		if (!this.windowCheckPending) return;
 		this.windowCheckPending = false;
+		const sample = this.pendingPointerSample;
+		this.pendingPointerSample = null;
 		// Degenerate envelope (no measurable geometry — e.g. jsdom, or a
 		// detached/zero-size outline): never base a collapse decision on a
 		// zero rect. Trust element-level enter/move/leave state instead.
-		if (!this.envelopeIsMeasurable()) return;
+		if (!this.envelopeIsMeasurable()) {
+			// §十: with no geometry to test against we cannot claim the
+			// pointer left, and the element-level state still says it is
+			// interacting — so the sample is as trustworthy as any other.
+			if (sample && this.pointer.insideEnvelope) {
+				this.sampleKinematics(
+					sample.pointerId,
+					sample.clientY,
+					sample.timeStamp,
+				);
+			}
+			return;
+		}
 		if (
 			pointInEnvelope(
 				this.envelope,
@@ -776,6 +850,18 @@ export class MagnificationController {
 			// gap crossing, not an exit — the latch (if any) survives.
 			this.pointer.insideEnvelope = true;
 			this.pointer.overElement = false;
+			// §十 GAP SAMPLING: the gesture did not pause just because the
+			// pointer crossed a transparent stripe. Commit the parked
+			// sample so the velocity ring stays continuous; without this
+			// the ring starves over every gap, `velocityY` decays to 0 and
+			// the follow visibly stutters mid-flick.
+			if (sample) {
+				this.sampleKinematics(
+					sample.pointerId,
+					sample.clientY,
+					sample.timeStamp,
+				);
+			}
 			this.cancelCollapse();
 			return;
 		}
@@ -831,18 +917,32 @@ export class MagnificationController {
 	 * events (a stopped pointer stops assisting within a few frames).
 	 */
 	private trackPointerVelocity(event: PointerEvent): void {
-		const now = event.timeStamp;
-		const id = `${event.pointerId}:${now}`;
+		this.sampleKinematics(event.pointerId, event.clientY, event.timeStamp);
+	}
+
+	/**
+	 * §十 Core of the velocity ring update, shared by the element path
+	 * (immediate) and the transparent-gap path (deferred through
+	 * `pendingPointerSample` → `processWindowCheck`).
+	 */
+	private sampleKinematics(
+		pointerId: number,
+		clientY: number,
+		timeStamp: number,
+	): void {
+		const id = `${pointerId}:${timeStamp}`;
 		if (id === this.lastSampleEventId) return; // dedup double dispatch
 		this.lastSampleEventId = id;
-		this.kinematics.samples.push(event.clientY, now);
-		this.kinematics.lastSampleTime = now;
-		this.kinematics.velocityY = this.kinematics.samples.velocityY(now);
-		this.kinematics.active = this.kinematics.samples.active;
-		this.kinematics.predictedY = predictedPointerY(
-			this.lastPointerY,
-			this.kinematics.velocityY,
-		);
+		const kin = this.kinematics;
+		kin.samples.push(clientY, timeStamp);
+		kin.lastSampleTime = timeStamp;
+		kin.velocityY = kin.samples.velocityY(timeStamp);
+		kin.active = kin.samples.active;
+		// §十: predict from THIS sample's position. The previous code read
+		// `this.lastPointerY`, which the element handler had not updated
+		// yet — the prediction was anchored one whole move behind the
+		// pointer, which is exactly the lag the lookahead exists to remove.
+		kin.predictedY = predictedPointerY(clientY, kin.velocityY);
 	}
 
 	private onRootPointerDown = (event: PointerEvent): void => {
@@ -1138,7 +1238,6 @@ export class MagnificationController {
 			viewportBottom: contentWindow.bottom,
 		});
 		const rowCount = this.cache.length;
-		const settleEmpty = this.settleEnd < this.settleStart;
 		let cStart = Number.MAX_SAFE_INTEGER;
 		let cEnd = -1;
 		// Seed = Visible ∪ Scale only. Settling rows are deliberately NOT
@@ -1341,30 +1440,53 @@ export class MagnificationController {
 			? emptyActiveRange()
 			: { start: cStart, end: cEnd };
 
-		// §五/§六 per-frame iteration window = Collision ∪ Settling.
-		// Settling rows OUTSIDE the collision range get identity targets
-		// and interpolate home; rows outside both are clean by invariant
-		// and never visited.
-		let iterStart = Number.MAX_SAFE_INTEGER;
-		let iterEnd = -1;
-		if (!collisionEmpty) {
-			iterStart = cStart;
-			iterEnd = cEnd;
+		// §九 per-frame write order = Collision ∪ Dirty, SPARSE.
+		// Dirty rows OUTSIDE the collision range get identity targets and
+		// interpolate home; rows in neither set are clean by invariant and
+		// are never visited — not even to be skipped. Ascending order is
+		// produced by a merge (the collision block is already sorted, the
+		// outside rows are few), so no per-frame full sort is needed.
+		const outside = this.outsideDirty;
+		outside.length = 0;
+		if (this.dirtyRows.size > 0) {
+			for (const i of this.dirtyRows) {
+				if (i < 0 || i >= rowCount) {
+					// The row vanished with a rebuild — drop the stale index.
+					this.dirtyRows.delete(i);
+					continue;
+				}
+				if (!collisionEmpty && i >= cStart && i <= cEnd) continue;
+				outside.push(i);
+			}
+			if (outside.length > 1) outside.sort(ascending);
 		}
-		if (!settleEmpty) {
-			iterStart = Math.min(iterStart, this.settleStart);
-			iterEnd = Math.max(iterEnd, this.settleEnd);
+		const order = this.writeOrder;
+		order.length = 0;
+		let outsideCursor = 0;
+		if (collisionEmpty) {
+			for (const i of outside) order.push(i);
+		} else {
+			while (
+				outsideCursor < outside.length &&
+				outside[outsideCursor] < cStart
+			) {
+				order.push(outside[outsideCursor++]);
+			}
+			for (let i = cStart; i <= cEnd; i++) order.push(i);
+			while (outsideCursor < outside.length) {
+				order.push(outside[outsideCursor++]);
+			}
 		}
-		iterStart = Math.max(0, iterStart);
-		iterEnd = Math.min(rowCount - 1, iterEnd);
 
 		// ---------------- WRITE PHASE (styles only) ----------------
 		const writeStart = measure ? this.win.performance.now() : 0;
 		let converging = false;
 		let writes = 0;
-		let nextSettleStart = Number.MAX_SAFE_INTEGER;
-		let nextSettleEnd = -1;
-		for (let i = iterStart; i <= iterEnd; i++) {
+		// §九 churn / skip diagnostics for this frame.
+		let dirtyAdded = 0;
+		let dirtyRemoved = 0;
+		let identitySkipped = 0;
+		for (const i of order) {
 			const entry = this.cache[i];
 			const state = entry.motion;
 			const inMotion = !collisionEmpty && i >= cStart && i <= cEnd;
@@ -1385,9 +1507,10 @@ export class MagnificationController {
 				state.targetScale = 1;
 				state.targetShift = 0;
 				entry.wasSnapped = false;
-				// Fast skip: fully idle settling row — no interpolation,
-				// no writes, no repeated identity resets (section 10/14).
-				// It simply drops out of the next settling window.
+				// Fast skip: fully idle row — no interpolation, no writes,
+				// no repeated identity resets (section 10/14). It leaves
+				// the dirty set here and is not visited again until it
+				// moves.
 				if (
 					state.displayedScale === 1 &&
 					state.displayedShift === 0 &&
@@ -1404,6 +1527,8 @@ export class MagnificationController {
 					}
 					entry.contentVisualCenter = entry.contentCenter;
 					this.shifts[i] = 0;
+					identitySkipped++;
+					if (this.dirtyRows.delete(i)) dirtyRemoved++;
 					continue;
 				}
 			}
@@ -1439,25 +1564,21 @@ export class MagnificationController {
 			entry.contentVisualCenter =
 				entry.contentCenter + state.displayedShift;
 			this.shifts[i] = state.displayedShift;
-			// §六: a row stays inside the settling window until it is
-			// completely clean — identity, vars removed, classes off.
+			// §六/§九: a row stays in the dirty set until it is completely
+			// clean — identity, vars removed, classes off. Membership is
+			// updated in place so the set never has to be rebuilt.
 			const clean =
 				atIdentity &&
 				Number.isNaN(entry.lastWrittenScale) &&
 				Number.isNaN(entry.lastWrittenShift) &&
 				!entry.shifting &&
 				!entry.scaling;
-			if (!clean) {
-				if (i < nextSettleStart) nextSettleStart = i;
-				if (i > nextSettleEnd) nextSettleEnd = i;
+			if (clean) {
+				if (this.dirtyRows.delete(i)) dirtyRemoved++;
+			} else if (!this.dirtyRows.has(i)) {
+				this.dirtyRows.add(i);
+				dirtyAdded++;
 			}
-		}
-		if (nextSettleEnd >= 0) {
-			this.settleStart = nextSettleStart;
-			this.settleEnd = nextSettleEnd;
-		} else {
-			this.settleStart = 0;
-			this.settleEnd = -1;
 		}
 		if (measure && perf) {
 			perf.addPhaseSample(
@@ -1465,15 +1586,21 @@ export class MagnificationController {
 				this.win.performance.now() - writeStart,
 			);
 			// §十四 range statistics. WRITE range = rows still dirty
-			// (unconverged / carrying vars or layer classes) — exactly
-			// the settling window published above.
+			// (unconverged / carrying vars or layer classes) — now the
+			// true sparse count, not the span it happens to occupy.
 			const scaleRows = isEmptyActiveRange(this.scaleRange)
 				? 0
 				: this.scaleRange.end - this.scaleRange.start + 1;
 			const collisionRows = collisionEmpty ? 0 : cEnd - cStart + 1;
-			const writeRows =
-				nextSettleEnd >= 0 ? nextSettleEnd - nextSettleStart + 1 : 0;
+			const writeRows = this.dirtyRows.size;
 			perf.addRangeSample(scaleRows, collisionRows, writeRows);
+			// §九 sparse dirty-row telemetry: how many rows the next frame
+			// must revisit, how many were visited only to be skipped at
+			// identity, and how much the set churns frame over frame.
+			perf.addDirtyRowsSample(writeRows, identitySkipped);
+			if (dirtyAdded > 0 || dirtyRemoved > 0) {
+				perf.addDirtyRowChurn(dirtyAdded, dirtyRemoved);
+			}
 			// §十四 correctness diagnostic (capture-only, never a standing
 			// hot path): displayed visual boxes of adjacent VISIBLE rows
 			// must keep cardGap within tolerance.
@@ -1722,6 +1849,9 @@ export class MagnificationController {
 		if (kineticEligible) {
 			kineticTarget = computeKineticIntentVelocity({
 				pointerY: this.lastPointerY,
+				// §十: the depth ramp leads the gesture. Eligibility still
+				// uses the actual position inside the function.
+				predictedY: kin.predictedY,
 				pointerVelocityY: kin.velocityY,
 				viewportTop: this.viewportTop,
 				viewportBottom: this.viewportBottom,
@@ -1757,6 +1887,19 @@ export class MagnificationController {
 				computedPreZone: zones.preZone,
 				computedStrongZone: zones.strongZone,
 				hysteresisPx: AUTO_SCROLL_EXIT_HYSTERESIS_PX,
+			});
+			// §十.1 pointer-follow echo: the two caps side by side plus the
+			// live gauges. `pointerSampleCount` is the honest tell for gap
+			// starvation — a healthy flick keeps the ring at capacity, a
+			// starved one collapses to 0–1 and takes the velocity with it.
+			perf.setPointerFollowEcho({
+				pointerFollowStrength: followStrength,
+				edgeMaxSpeed,
+				kineticMaxSpeed,
+				combinedMaxSpeed,
+				currentPointerVelocityY: kin.velocityY,
+				predictedPointerY: kin.predictedY,
+				pointerSampleCount: kin.samples.length,
 			});
 		}
 
@@ -1882,6 +2025,8 @@ export class MagnificationController {
 		kin.lastSampleTime = Number.NaN;
 		kin.active = false;
 		this.lastSampleEventId = "";
+		// §十: a parked gap sample belongs to the gesture that just ended.
+		this.pendingPointerSample = null;
 		this.integrator.kineticIntentVelocity = 0;
 		if (hadSession) {
 			this.perf?.countKineticStopReason(reason);
@@ -2075,8 +2220,10 @@ export class MagnificationController {
 		const layout: { center: number; height: number }[] = [];
 		const shifts: number[] = [];
 		let rectReads = 1; // the viewport rect above
-		let settleStart = Number.MAX_SAFE_INTEGER;
-		let settleEnd = -1;
+		// §九: indices are about to be reassigned, so the old dirty set is
+		// meaningless. It is rebuilt below from the rows that actually
+		// carry residual motion across the rebuild.
+		const carriedDirty: number[] = [];
 		for (let i = 0; i < children.length; i++) {
 			const el = children[i];
 			// Pop-out safe instanceof (P1-1).
@@ -2101,16 +2248,17 @@ export class MagnificationController {
 			);
 			const height = measured > 0 ? measured : rect.height;
 			const index = next.length;
-			// §五/§六: rows that carry residual motion across the rebuild
-			// form the initial Settling Range so the next frame keeps
-			// decaying them even if the pointer is elsewhere.
+			// §五/§六/§九: rows that carry residual motion across the
+			// rebuild seed the new dirty set, so the next frame keeps
+			// decaying them even if the pointer is elsewhere. A row that
+			// still carries WRITTEN vars counts too — otherwise nobody
+			// would ever come back to remove them.
 			const carriesMotion =
 				Math.abs(motion.displayedShift) >= SHIFT_EPSILON ||
-				Math.abs(motion.displayedScale - 1) >= SCALE_EPSILON;
-			if (carriesMotion) {
-				if (index < settleStart) settleStart = index;
-				if (index > settleEnd) settleEnd = index;
-			}
+				Math.abs(motion.displayedScale - 1) >= SCALE_EPSILON ||
+				!Number.isNaN(previous?.lastWrittenScale ?? Number.NaN) ||
+				!Number.isNaN(previous?.lastWrittenShift ?? Number.NaN);
+			if (carriesMotion) carriedDirty.push(index);
 			nextIndex.set(el, index);
 			nextByKey.set(key, index);
 			next.push({
@@ -2146,15 +2294,14 @@ export class MagnificationController {
 		this.heights = heights;
 		this.layout = layout;
 		this.shifts = shifts;
-		// §五/§六: publish the carried-motion window as the Settling Range
-		// (clamped; empty when no row carries residual motion).
-		if (settleStart <= settleEnd) {
-			this.settleStart = Math.max(0, settleStart);
-			this.settleEnd = Math.min(next.length - 1, settleEnd);
-		} else {
-			this.settleStart = 0;
-			this.settleEnd = -1;
+		// §九: republish the dirty set against the NEW indices. Recorded as
+		// churn so the added/removed ledger stays balanced — a rebuild is a
+		// bulk drop followed by a bulk re-seed, not a leak.
+		if (this.perf?.active === true) {
+			this.perf.addDirtyRowChurn(carriedDirty.length, this.dirtyRows.size);
 		}
+		this.dirtyRows.clear();
+		for (const index of carriedDirty) this.dirtyRows.add(index);
 		this.perf?.count("rowRectReadCount", rectReads);
 		// The anchor element may have been removed with its heading.
 		if (this.pointerAnchorEl && !nextIndex.has(this.pointerAnchorEl)) {
@@ -2266,9 +2413,11 @@ export class MagnificationController {
 			entry.contentVisualCenter = entry.contentCenter;
 		}
 		this.shifts.fill(0);
-		// Everything snapped to identity — the settling window is empty.
-		this.settleStart = 0;
-		this.settleEnd = -1;
+		// Everything snapped to identity — nothing is dirty any more.
+		if (this.perf?.active === true && this.dirtyRows.size > 0) {
+			this.perf.addDirtyRowChurn(0, this.dirtyRows.size);
+		}
+		this.dirtyRows.clear();
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
 		this.pendingAnchorTarget = null;
