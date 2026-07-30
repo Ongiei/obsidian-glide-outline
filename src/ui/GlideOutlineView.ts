@@ -9,6 +9,8 @@ import type { OverflowState } from "../utils/overflow";
 import { bridgeRectFor } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
 import type { PerfCapture } from "../core/PerfCapture";
+import { createOutlineMount } from "./mount";
+import type { OutlineMount } from "./mount";
 
 /** Copy the four edges out of a DOMRect-like object into our Rect shape. */
 function rectFrom(r: { left: number; top: number; right: number; bottom: number }): Rect {
@@ -33,7 +35,6 @@ export interface GlideOutlineViewHandlers {
 	onMetricsChanged?(): void;
 }
 
-const HOST_CLASS = "glide-outline-host";
 export const RAIL_WIDTH = 28;
 export const LABEL_GAP = 6;
 export const SAFE_SLACK = 20;
@@ -103,6 +104,8 @@ export class GlideOutlineView {
 	readonly listEl: HTMLElement;
 
 	private readonly doc: Document;
+	/** Owns every node this view creates; the only thing added to the host. */
+	private readonly mount: OutlineMount;
 	private readonly hostResizeObserver: ResizeObserver | null = null;
 	/** One shared observer for every card (never one per item). */
 	private readonly cardResizeObserver: ResizeObserver | null = null;
@@ -111,6 +114,8 @@ export class GlideOutlineView {
 	private activeKey: string | null = null;
 	private followEnabled = true;
 	private metricsScheduled = false;
+	/** rAF handle for the queued measure pass; 0 = none in flight. */
+	private pendingMeasureFrame = 0;
 	private disposed = false;
 	private overflowState: OverflowState = {
 		hasOverflow: false,
@@ -132,7 +137,9 @@ export class GlideOutlineView {
 		private readonly perf: PerfCapture | null = null,
 	) {
 		this.doc = hostEl.ownerDocument;
-		hostEl.classList.add(HOST_CLASS);
+		// Every node below hangs off the owned wrapper; the host itself is
+		// left alone (see src/ui/mount.ts).
+		this.mount = createOutlineMount(hostEl);
 
 		this.rootEl = this.doc.createElement("div");
 		this.rootEl.className = "glide-outline-root";
@@ -145,12 +152,20 @@ export class GlideOutlineView {
 
 		this.listEl = this.doc.createElement("nav");
 		this.listEl.className = "glide-outline-list";
-		this.listEl.setAttribute("aria-label", "Document outline");
+		// Accessible name via a hidden span, NOT `aria-label`: Obsidian
+		// renders aria-label as a hover tooltip, and a tooltip over the rail
+		// is exactly what this plugin exists to replace.
+		const listLabel = this.doc.createElement("span");
+		listLabel.className = "glide-outline-a11y-label";
+		listLabel.id = `glide-outline-a11y-${a11yLabelSeq++}`;
+		listLabel.textContent = "Document outline";
+		this.listEl.setAttribute("aria-labelledby", listLabel.id);
 
 		this.viewportEl.appendChild(this.listEl);
+		this.rootEl.appendChild(listLabel);
 		this.rootEl.appendChild(this.hitZoneEl);
 		this.rootEl.appendChild(this.viewportEl);
-		hostEl.appendChild(this.rootEl);
+		this.mount.mountEl.appendChild(this.rootEl);
 
 		// Edge fades track the scroll position (passive — no work per frame
 		// beyond three cheap reads and two class toggles).
@@ -336,15 +351,29 @@ export class GlideOutlineView {
 		this.scheduleMeasure();
 	}
 
+	/** True when `node` belongs to this view's owned subtree. */
+	owns(node: unknown): boolean {
+		return this.mount.owns(node);
+	}
+
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
 		this.viewportEl.removeEventListener("scroll", this.onViewportScroll);
 		this.hostResizeObserver?.disconnect();
 		this.cardResizeObserver?.disconnect();
+		// A measure pass queued for the next frame would otherwise run once
+		// against detached nodes. The `disposed` guard makes it harmless, but
+		// cancelling means we never hold the callback (or this view) alive.
+		if (this.pendingMeasureFrame !== 0) {
+			this.doc.defaultView?.cancelAnimationFrame(this.pendingMeasureFrame);
+			this.pendingMeasureFrame = 0;
+		}
+		this.metricsScheduled = false;
 		this.itemRecords.clear();
 		this.rootEl.remove();
-		this.hostEl.classList.remove(HOST_CLASS);
+		// Removes the owned wrapper and undoes the host anchor, if any.
+		this.mount.dispose();
 	}
 
 	/** Current overflow / scrollability of the outline viewport. */
@@ -490,11 +519,12 @@ export class GlideOutlineView {
 		this.metricsScheduled = true;
 		const win = this.doc.defaultView;
 		const run = () => {
+			this.pendingMeasureFrame = 0;
 			this.metricsScheduled = false;
 			this.measureRows();
 		};
 		if (win && typeof win.requestAnimationFrame === "function") {
-			win.requestAnimationFrame(run);
+			this.pendingMeasureFrame = win.requestAnimationFrame(run);
 		} else {
 			run();
 		}

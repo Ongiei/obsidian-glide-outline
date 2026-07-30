@@ -48,6 +48,7 @@ import {
 } from "../utils/motionInterp";
 import type { MotionItemState } from "../utils/motionInterp";
 import { resolveClickTarget } from "../utils/activation";
+import { closestOwned } from "./mount";
 import type { Diagnostics } from "../core/Diagnostics";
 import type { PerfCapture, PerfCounters } from "../core/PerfCapture";
 import type { HeadingItem } from "../model/HeadingItem";
@@ -430,6 +431,14 @@ export class MagnificationController {
 	 * suspended entirely, so target AND displayed motion values are frozen
 	 * and the locked target cannot slide away (section 12). */
 	private pressed: PressedHeadingState | null = null;
+
+	/**
+	 * Ownership predicate handed to every `closest()` on this hot path.
+	 * Event targets can come from anywhere in the document (window-level
+	 * listeners, foreign plugins reusing our class names), so a class match
+	 * alone is never treated as proof that a node is ours.
+	 */
+	private readonly ownsNode = (node: unknown): boolean => this.view.owns(node);
 
 	constructor(
 		private readonly view: GlideOutlineView,
@@ -946,12 +955,14 @@ export class MagnificationController {
 	}
 
 	private onRootPointerDown = (event: PointerEvent): void => {
-		const activation = resolveClickTarget(event.target);
+		const activation = resolveClickTarget(event.target, this.ownsNode);
 		if (!activation) return; // not on a real marker / card
 		const item = this.view.getItems().find((c) => c.key === activation.key);
 		if (!item) return;
-		const targetEl = (event.target as Partial<Element> | null)?.closest?.(
+		const targetEl = closestOwned(
+			event.target,
 			".glide-outline-marker, .glide-outline-card",
+			this.ownsNode,
 		) as HTMLElement | null;
 		if (!targetEl) return;
 		const rect = targetEl.getBoundingClientRect();
@@ -1187,10 +1198,11 @@ export class MagnificationController {
 		// `closest` is an ancestor-tree walk (no layout access).
 		if (this.anchorDirty) {
 			this.anchorDirty = false;
-			const target = this.pendingAnchorTarget as Partial<Element> | null;
-			this.pointerAnchorEl =
-				(target?.closest?.(".glide-outline-row") as HTMLElement | null) ??
-				null;
+			this.pointerAnchorEl = closestOwned(
+				this.pendingAnchorTarget,
+				".glide-outline-row",
+				this.ownsNode,
+			) as HTMLElement | null;
 			this.pendingAnchorTarget = null;
 			this.resolveAnchorIndex(); // refresh the §八 local-probe seed
 		}

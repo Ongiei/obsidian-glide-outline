@@ -35,11 +35,22 @@
      --glide-label-content-width  text budget from the width solver
    ========================================================================== */
 
-.glide-outline-host {
-	position: relative;
+/* The host (editor container) is deliberately NOT styled from this sheet.
+   `createOutlineMount()` reads the host's computed `position` and only when
+   it is `static` writes an inline `position: relative`, recording the
+   previous inline value and restoring it verbatim on dispose. A stylesheet
+   rule cannot be undone that precisely, and it would also mutate a node the
+   plugin does not own. */
+
+/* The owned wrapper. `display: contents` means it generates no box, so the
+   rail is laid out exactly as if it were a direct child of the host — the
+   wrapper buys ownership and a one-node unmount, and costs no layout.
+   Compound (not descendant) selector: this element IS the owner. */
+:where([data-glide-outline-owner]).glide-outline-mount {
+	display: contents;
 }
 
-.glide-outline-root {
+:where([data-glide-outline-owner]) .glide-outline-root {
 	position: absolute;
 	top: calc(28px + var(--glide-vertical-offset, 0px));
 	bottom: 28px;
@@ -54,21 +65,21 @@
 
 /* Horizontal offset keeps the rail clear of the editor scrollbar (right)
    and mirrors the same semantics on the left. Written from settings. */
-.glide-outline-root--right {
+:where([data-glide-outline-owner]) .glide-outline-root--right {
 	right: var(--glide-horizontal-offset, 12px);
 }
 
-.glide-outline-root--left {
+:where([data-glide-outline-owner]) .glide-outline-root--left {
 	left: var(--glide-horizontal-offset, 12px);
 }
 
 /* Empty state: no visible headings → no rail, no hit zone. */
-.glide-outline-root.is-empty {
+:where([data-glide-outline-owner]) .glide-outline-root.is-empty {
 	display: none;
 }
 
 /* Transparent hover strip over the marker rail — narrow on purpose. */
-.glide-outline-hit-zone {
+:where([data-glide-outline-owner]) .glide-outline-hit-zone {
 	position: absolute;
 	top: 0;
 	bottom: 0;
@@ -76,17 +87,17 @@
 	pointer-events: auto;
 }
 
-.glide-outline-root--right .glide-outline-hit-zone {
+:where([data-glide-outline-owner]) .glide-outline-root--right .glide-outline-hit-zone {
 	right: 0;
 }
 
-.glide-outline-root--left .glide-outline-hit-zone {
+:where([data-glide-outline-owner]) .glide-outline-root--left .glide-outline-hit-zone {
 	left: 0;
 }
 
 /* Drawing layers: never intercept the pointer. --glide-viewport-pad keeps
    vertical painting space so edge cards can magnify without clipping. */
-.glide-outline-viewport {
+:where([data-glide-outline-owner]) .glide-outline-viewport {
 	position: absolute;
 	inset: 0;
 	overflow-y: auto;
@@ -99,11 +110,11 @@
 	overscroll-behavior: contain;
 }
 
-.glide-outline-viewport::-webkit-scrollbar {
+:where([data-glide-outline-owner]) .glide-outline-viewport::-webkit-scrollbar {
 	display: none;
 }
 
-.glide-outline-list {
+:where([data-glide-outline-owner]) .glide-outline-list {
 	display: flex;
 	flex-direction: column;
 	margin-block: auto; /* safe vertical centering that keeps overflow scrollable */
@@ -114,7 +125,7 @@
    Row: measured layout height, zero visual chrome, pointer-transparent.
    Height is written by GlideOutlineView.measureRows().
    -------------------------------------------------------------------------- */
-.glide-outline-row {
+:where([data-glide-outline-owner]) .glide-outline-row {
 	position: relative;
 	height: var(--glide-row-height, 22px);
 	background: none;
@@ -131,7 +142,7 @@
    anchored to the editor edge and only wraps its own marker + card —
    NEVER the whole root — so leaked chrome cannot form a row-wide bar.
    -------------------------------------------------------------------------- */
-.glide-outline-root button.glide-outline-item {
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item {
 	all: unset;
 	display: block;
 	position: absolute;
@@ -157,19 +168,19 @@
 	pointer-events: none;
 }
 
-.glide-outline-root--right button.glide-outline-item {
+:where([data-glide-outline-owner]) .glide-outline-root--right button.glide-outline-item {
 	right: 0;
 }
 
-.glide-outline-root--left button.glide-outline-item {
+:where([data-glide-outline-owner]) .glide-outline-root--left button.glide-outline-item {
 	left: 0;
 }
 
 /* Every interactive state stays chrome-free — themes often restyle these. */
-.glide-outline-root button.glide-outline-item:hover,
-.glide-outline-root button.glide-outline-item:active,
-.glide-outline-root button.glide-outline-item:focus,
-.glide-outline-root button.glide-outline-item:focus-visible {
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item:hover,
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item:active,
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item:focus,
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item:focus-visible {
 	background: none;
 	background-image: none;
 	border: none;
@@ -180,21 +191,21 @@
 }
 
 /* Focus is shown on the card and marker — never as a row-wide outline. */
-.glide-outline-root button.glide-outline-item:focus-visible .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item:focus-visible .glide-outline-card {
 	outline: 2px solid var(--interactive-accent);
 	outline-offset: 1px;
 }
 
-.glide-outline-root button.glide-outline-item:focus-visible .glide-outline-marker::before {
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item:focus-visible .glide-outline-marker::before {
 	background-color: var(--interactive-accent);
 }
 
 /* Pure text mode: no card box to outline → underline the text instead. */
-.glide-outline-root--pure-text button.glide-outline-item:focus-visible .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-root--pure-text button.glide-outline-item:focus-visible .glide-outline-card {
 	outline: none;
 }
 
-.glide-outline-root--pure-text button.glide-outline-item:focus-visible .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-root--pure-text button.glide-outline-item:focus-visible .glide-outline-label {
 	text-decoration: underline;
 	color: var(--interactive-accent);
 }
@@ -203,7 +214,7 @@
    Motion: marker + card live together and share the vertical displacement,
    so they can never end up on different rows during give-way.
    -------------------------------------------------------------------------- */
-.glide-outline-motion {
+:where([data-glide-outline-owner]) .glide-outline-motion {
 	display: flex;
 	align-items: center;
 	/* Hierarchy staircase: deeper headings sit further from the rail —
@@ -230,10 +241,10 @@
    controller adds/removes these classes with epsilon thresholds and
    strips them at identity — a converged or out-of-range row never holds
    a standing layer, so its text re-rasterizes crisply. */
-.glide-outline-row--is-shifting .glide-outline-motion {
+:where([data-glide-outline-owner]) .glide-outline-row--is-shifting .glide-outline-motion {
 	will-change: transform;
 }
-.glide-outline-row--is-scaling .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-row--is-scaling .glide-outline-card {
 	will-change: transform;
 }
 
@@ -245,11 +256,11 @@
 
 /* DOM order is marker → reveal; on the right edge the marker must sit at
    the outermost position, so the row is reversed visually. */
-.glide-outline-root--right .glide-outline-motion {
+:where([data-glide-outline-owner]) .glide-outline-root--right .glide-outline-motion {
 	flex-direction: row-reverse;
 }
 
-.glide-outline-root--left .glide-outline-motion {
+:where([data-glide-outline-owner]) .glide-outline-root--left .glide-outline-motion {
 	flex-direction: row;
 }
 
@@ -257,7 +268,7 @@
    Marker: a rail-width hit slot; the visible line/dot is drawn by ::before.
    Always clickable, spans the full row height for a comfortable target.
    -------------------------------------------------------------------------- */
-.glide-outline-marker {
+:where([data-glide-outline-owner]) .glide-outline-marker {
 	position: relative;
 	flex: 0 0 var(--glide-rail-width, 28px);
 	align-self: stretch;
@@ -265,7 +276,7 @@
 	pointer-events: auto;
 }
 
-.glide-outline-marker::before {
+:where([data-glide-outline-owner]) .glide-outline-marker::before {
 	content: "";
 	position: absolute;
 	top: 50%;
@@ -285,11 +296,11 @@
 	transition: background-color 160ms ease;
 }
 
-.glide-outline-root--right .glide-outline-marker::before {
+:where([data-glide-outline-owner]) .glide-outline-root--right .glide-outline-marker::before {
 	right: 9px;
 }
 
-.glide-outline-root--left .glide-outline-marker::before {
+:where([data-glide-outline-owner]) .glide-outline-root--left .glide-outline-marker::before {
 	left: 9px;
 }
 
@@ -302,32 +313,32 @@
    --text-faint) blended with color-mix — no hex values, no hue carousel —
    so it adapts to any theme, light or dark. The active accent overrides
    below win because they come later at equal-or-higher specificity. */
-.glide-outline-item[data-level="1"] {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="1"] {
 	--glide-line-size: 20px;
 	--glide-dot-size: 8px;
 	--glide-level-color: var(--text-normal);
 }
-.glide-outline-item[data-level="2"] {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="2"] {
 	--glide-line-size: 16px;
 	--glide-dot-size: 7px;
 	--glide-level-color: color-mix(in srgb, var(--text-normal) 78%, var(--text-muted));
 }
-.glide-outline-item[data-level="3"] {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="3"] {
 	--glide-line-size: 12px;
 	--glide-dot-size: 6px;
 	--glide-level-color: color-mix(in srgb, var(--text-normal) 42%, var(--text-muted));
 }
-.glide-outline-item[data-level="4"] {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="4"] {
 	--glide-line-size: 10px;
 	--glide-dot-size: 5px;
 	--glide-level-color: var(--text-muted);
 }
-.glide-outline-item[data-level="5"] {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="5"] {
 	--glide-line-size: 8px;
 	--glide-dot-size: 4px;
 	--glide-level-color: color-mix(in srgb, var(--text-muted) 60%, var(--text-faint));
 }
-.glide-outline-item[data-level="6"] {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="6"] {
 	--glide-line-size: 6px;
 	--glide-dot-size: 3px;
 	--glide-level-color: var(--text-faint);
@@ -336,26 +347,26 @@
 /* Dot markers: visual size shrinks with depth, but the HIT AREA is the
    marker slot itself (full rail width × full row height) — small dots
    never reduce the clickable target. */
-.glide-outline-root--marker-dot .glide-outline-marker::before {
+:where([data-glide-outline-owner]) .glide-outline-root--marker-dot .glide-outline-marker::before {
 	height: var(--glide-dot-size, 6px);
 	width: var(--glide-dot-size, 6px);
 	border-radius: 50%;
 }
 
-.glide-outline-item.is-active .glide-outline-marker::before {
+:where([data-glide-outline-owner]) .glide-outline-item.is-active .glide-outline-marker::before {
 	background-color: var(--interactive-accent);
 }
 
 /* Active dot: accent + slight scale. `scale` is a paint-only transform on
    an absolutely positioned pseudo-element — layout size is unchanged. */
-.glide-outline-root--marker-dot .glide-outline-item.is-active .glide-outline-marker::before {
+:where([data-glide-outline-owner]) .glide-outline-root--marker-dot .glide-outline-item.is-active .glide-outline-marker::before {
 	scale: 1.3;
 }
 
 /* --------------------------------------------------------------------------
    Reveal: horizontal slide from the margin toward the text + opacity.
    -------------------------------------------------------------------------- */
-.glide-outline-reveal {
+:where([data-glide-outline-owner]) .glide-outline-reveal {
 	display: block;
 	opacity: 0;
 	background: none;
@@ -367,16 +378,16 @@
 		opacity 160ms ease;
 }
 
-.glide-outline-root--right .glide-outline-reveal {
+:where([data-glide-outline-owner]) .glide-outline-root--right .glide-outline-reveal {
 	transform: translateX(16px);
 }
 
-.glide-outline-root--left .glide-outline-reveal {
+:where([data-glide-outline-owner]) .glide-outline-root--left .glide-outline-reveal {
 	transform: translateX(-16px);
 }
 
-.glide-outline-root.is-expanded .glide-outline-reveal,
-.glide-outline-root:focus-within .glide-outline-reveal {
+:where([data-glide-outline-owner]) .glide-outline-root.is-expanded .glide-outline-reveal,
+:where([data-glide-outline-owner]) .glide-outline-root:focus-within .glide-outline-reveal {
 	opacity: 1;
 	transform: translateX(0);
 }
@@ -386,7 +397,7 @@
    the dock-scale container. Interactive only while actually visible.
    box-sizing: border-box → the width solver budgets padding and border.
    -------------------------------------------------------------------------- */
-.glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-card {
 	display: flex;
 	align-items: baseline;
 	column-gap: 6px;
@@ -407,8 +418,8 @@
 	pointer-events: none;
 }
 
-.glide-outline-root.is-expanded .glide-outline-card,
-.glide-outline-root:focus-within .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-root.is-expanded .glide-outline-card,
+:where([data-glide-outline-owner]) .glide-outline-root:focus-within .glide-outline-card {
 	pointer-events: auto;
 }
 
@@ -416,13 +427,13 @@
    side so the badge ALWAYS sits on the rail-facing (editor-edge) side:
    right outline → badge visually right of the label, left outline →
    badge visually left. It never floats outside the card. */
-.glide-outline-root--right .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-root--right .glide-outline-card {
 	flex-direction: row-reverse;
 	transform-origin: right center;
 	text-align: right;
 }
 
-.glide-outline-root--left .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-root--left .glide-outline-card {
 	flex-direction: row;
 	transform-origin: left center;
 	text-align: left;
@@ -433,7 +444,7 @@
    Small, faint and separated from the label so it never competes with
    the heading text. Rendered only when the setting enables it.
    -------------------------------------------------------------------------- */
-.glide-outline-level-badge {
+:where([data-glide-outline-owner]) .glide-outline-level-badge {
 	display: none;
 	flex: none;
 	font-size: 0.68em;
@@ -446,27 +457,27 @@
 	pointer-events: none;
 }
 
-.glide-outline-root--level-badge .glide-outline-level-badge {
+:where([data-glide-outline-owner]) .glide-outline-root--level-badge .glide-outline-level-badge {
 	display: inline-block;
 }
 
-.glide-outline-item.is-active .glide-outline-level-badge {
+:where([data-glide-outline-owner]) .glide-outline-item.is-active .glide-outline-level-badge {
 	color: var(--interactive-accent);
 	opacity: 0.75;
 }
 
 /* Card appearance modifiers (settings-driven). */
-.glide-outline-root--card-border .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-root--card-border .glide-outline-card {
 	border: 1px solid var(--background-modifier-border);
 }
 
-.glide-outline-root--card-shadow .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-root--card-shadow .glide-outline-card {
 	box-shadow: var(--shadow-s);
 }
 
 /* Pure text mode: opacity 0 + no border + no shadow → the card element
    stays (it remains the scale container) but paints nothing. */
-.glide-outline-root--pure-text .glide-outline-card {
+:where([data-glide-outline-owner]) .glide-outline-root--pure-text .glide-outline-card {
 	background-color: transparent;
 	border: none;
 	box-shadow: none;
@@ -476,7 +487,7 @@
    Label: text content area. Its max-width is the TEXT budget from the
    width solver; padding/border/shadow are budgeted separately on the card.
    -------------------------------------------------------------------------- */
-.glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-label {
 	display: block;
 	max-width: var(--glide-label-content-width, 240px);
 	white-space: nowrap;
@@ -486,14 +497,14 @@
 	color: var(--text-muted);
 }
 
-.glide-outline-label p,
-.glide-outline-label div {
+:where([data-glide-outline-owner]) .glide-outline-label p,
+:where([data-glide-outline-owner]) .glide-outline-label div {
 	display: inline;
 	margin: 0;
 }
 
-.glide-outline-label img,
-.glide-outline-label br {
+:where([data-glide-outline-owner]) .glide-outline-label img,
+:where([data-glide-outline-owner]) .glide-outline-label br {
 	display: none;
 }
 
@@ -504,7 +515,7 @@
    tooltip. Standard sr-only recipe: 1×1 px, clipped, out of flow,
    pointer-transparent — announced by AT, never painted, never a target.
    -------------------------------------------------------------------------- */
-.glide-outline-a11y-label {
+:where([data-glide-outline-owner]) .glide-outline-a11y-label {
 	position: absolute;
 	width: 1px;
 	height: 1px;
@@ -527,32 +538,32 @@
    active H6 keeps its size/weight but wins the accent color — hierarchy
    is never fully lost on the active item.
    -------------------------------------------------------------------------- */
-.glide-outline-item[data-level="1"] .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="1"] .glide-outline-label {
 	font-weight: 700;
 	font-size: 1em;
 	color: var(--glide-level-color, var(--text-normal));
 }
-.glide-outline-item[data-level="2"] .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="2"] .glide-outline-label {
 	font-weight: 600;
 	font-size: 0.98em;
 	color: var(--glide-level-color, var(--text-muted));
 }
-.glide-outline-item[data-level="3"] .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="3"] .glide-outline-label {
 	font-weight: 500;
 	font-size: 0.96em;
 	color: var(--glide-level-color, var(--text-muted));
 }
-.glide-outline-item[data-level="4"] .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="4"] .glide-outline-label {
 	font-weight: 500;
 	font-size: 0.94em;
 	color: var(--glide-level-color, var(--text-muted));
 }
-.glide-outline-item[data-level="5"] .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="5"] .glide-outline-label {
 	font-weight: 400;
 	font-size: 0.92em;
 	color: var(--glide-level-color, var(--text-muted));
 }
-.glide-outline-item[data-level="6"] .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-item[data-level="6"] .glide-outline-label {
 	font-weight: 400;
 	font-size: 0.9em;
 	color: var(--glide-level-color, var(--text-faint));
@@ -560,15 +571,15 @@
 
 /* Active / hover colors override the ramp color (same specificity, later
    in the file) but never its size or weight. */
-.glide-outline-item.is-active .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-item.is-active .glide-outline-label {
 	color: var(--interactive-accent);
 }
 
-.glide-outline-root.is-expanded .glide-outline-item:hover .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-root.is-expanded .glide-outline-item:hover .glide-outline-label {
 	color: var(--text-normal);
 }
 
-.glide-outline-item.is-active:hover .glide-outline-label {
+:where([data-glide-outline-owner]) .glide-outline-item.is-active:hover .glide-outline-label {
 	color: var(--interactive-accent);
 }
 
@@ -583,7 +594,7 @@
      only scrollable up   → top fade only
      both                 → both fades
    -------------------------------------------------------------------------- */
-.glide-outline-root--edge-fade .glide-outline-viewport {
+:where([data-glide-outline-owner]) .glide-outline-root--edge-fade .glide-outline-viewport {
 	--glide-fade-top-stop: 0px;
 	--glide-fade-bottom-stop: 0px;
 	-webkit-mask-image: linear-gradient(
@@ -602,11 +613,11 @@
 	);
 }
 
-.glide-outline-root--edge-fade.glide-outline-root--fade-top .glide-outline-viewport {
+:where([data-glide-outline-owner]) .glide-outline-root--edge-fade.glide-outline-root--fade-top .glide-outline-viewport {
 	--glide-fade-top-stop: var(--glide-edge-fade-size, 28px);
 }
 
-.glide-outline-root--edge-fade.glide-outline-root--fade-bottom .glide-outline-viewport {
+:where([data-glide-outline-owner]) .glide-outline-root--edge-fade.glide-outline-root--fade-bottom .glide-outline-viewport {
 	--glide-fade-bottom-stop: var(--glide-edge-fade-size, 28px);
 }
 
@@ -614,7 +625,7 @@
    Compact mode: pane too narrow for cards → markers only. The marker stays
    inside motion, so only the reveal (card side) is hidden.
    -------------------------------------------------------------------------- */
-.glide-outline-root--compact .glide-outline-reveal {
+:where([data-glide-outline-owner]) .glide-outline-root--compact .glide-outline-reveal {
 	display: none;
 }
 
@@ -632,14 +643,22 @@
    Settings tab (P1-5): four-section tabbed page. Pure Obsidian theme
    variables — follows light/dark themes and accent color automatically.
    -------------------------------------------------------------------------- */
-.glide-settings-tablist {
+/* Ownership wrapper for the settings page — same contract as the view mount:
+   it exists so every rule below can be scoped fail-closed, and it is
+   `display: contents` so Obsidian's settings layout is byte-for-byte
+   unchanged. Compound selector: this element IS the owner. */
+:where([data-glide-outline-owner]).glide-settings-root {
+	display: contents;
+}
+
+:where([data-glide-outline-owner]) .glide-settings-tablist {
 	display: flex;
 	gap: 4px;
 	margin-bottom: 16px;
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.glide-settings-tab {
+:where([data-glide-outline-owner]) .glide-settings-tab {
 	appearance: none;
 	background: none;
 	border: none;
@@ -653,18 +672,34 @@
 	cursor: pointer;
 }
 
-.glide-settings-tab:hover {
+:where([data-glide-outline-owner]) .glide-settings-tab:hover {
 	color: var(--text-normal);
 	background-color: var(--background-modifier-hover);
 }
 
-.glide-settings-tab.is-active {
+:where([data-glide-outline-owner]) .glide-settings-tab.is-active {
 	color: var(--text-normal);
 	border-bottom-color: var(--interactive-accent);
 	font-weight: var(--font-semibold);
 }
 
-.glide-settings-tab:focus-visible {
+:where([data-glide-outline-owner]) .glide-settings-tab:focus-visible {
 	outline: 2px solid var(--interactive-accent);
 	outline-offset: -2px;
+}
+
+/* Always-visible slider readout, replacing Obsidian's dynamic tooltip.
+   Tabular figures + a fixed min-width so the control does not reflow while
+   dragging. `aria-hidden` is set in TS — the range input announces its own
+   value, so this is purely visual. */
+:where([data-glide-outline-owner]) .glide-settings-value {
+	flex: 0 0 auto;
+	min-width: 3.5em;
+	margin-left: 8px;
+	text-align: right;
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+	color: var(--text-muted);
+	pointer-events: none;
+	user-select: none;
 }
