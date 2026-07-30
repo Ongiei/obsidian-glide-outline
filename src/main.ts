@@ -69,12 +69,12 @@ export default class GlideOutlinePlugin extends Plugin {
 		);
 		this.registerEvent(
 			this.app.workspace.on("file-open", () => {
-				this.controller?.handleContextChange();
+				this.controller?.handleContextChange("file-change");
 			}),
 		);
 		this.registerEvent(
 			this.app.workspace.on("layout-change", () => {
-				this.controller?.handleContextChange();
+				this.controller?.handleContextChange("mode-change");
 			}),
 		);
 
@@ -269,6 +269,8 @@ export default class GlideOutlinePlugin extends Plugin {
 			outline: this.controller?.getDiagnosticsSnapshot() ?? null,
 			lastPointerActivation: this.diagnostics.lastPointerActivation,
 			lastJump: this.diagnostics.lastJump,
+			// §十: bounded ring of anomalous (> viewport height) scroll deltas.
+			largeScrollDeltas: this.diagnostics.largeScrollDeltas,
 		};
 		await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
 		new Notice("Glide Outline diagnostics copied to clipboard.");

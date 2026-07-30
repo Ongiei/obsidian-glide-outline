@@ -10,7 +10,7 @@ import { bridgeRectFor } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
 import type { PerfCapture } from "../core/PerfCapture";
 import { createOutlineMount } from "./mount";
-import type { OutlineMount } from "./mount";
+import type { MountHostMutationDiagnostics, OutlineMount } from "./mount";
 
 /** Copy the four edges out of a DOMRect-like object into our Rect shape. */
 function rectFrom(r: { left: number; top: number; right: number; bottom: number }): Rect {
@@ -128,6 +128,9 @@ export class GlideOutlineView {
 
 	/** §八: last written `--glide-viewport-pad` value (px); NaN = never. */
 	private lastWrittenViewportPad = Number.NaN;
+	/** §十: set right before a programmatic reveal scroll, consumed by the
+	 * magnification controller's scroll handler for source attribution. */
+	private programmaticScrollNote: "jump" | null = null;
 
 	constructor(
 		private readonly hostEl: HTMLElement,
@@ -354,6 +357,27 @@ export class GlideOutlineView {
 	/** True when `node` belongs to this view's owned subtree. */
 	owns(node: unknown): boolean {
 		return this.mount.owns(node);
+	}
+
+	/** §十: the owning mount's instance id, for scroll-delta snapshots. */
+	getMountInstanceId(): string {
+		return this.mount.instanceId;
+	}
+
+	/** §十一: host-mutation observation (live object from the mount). */
+	getMountDiagnostics(): MountHostMutationDiagnostics {
+		return this.mount.diagnostics;
+	}
+
+	/**
+	 * §十: consume the note left by the last programmatic outline scroll
+	 * (active-heading reveal). Cleared on read so a later user scroll is
+	 * never mis-attributed.
+	 */
+	takeProgrammaticScrollNote(): "jump" | null {
+		const note = this.programmaticScrollNote;
+		this.programmaticScrollNote = null;
+		return note;
 	}
 
 	dispose(): void {
@@ -606,6 +630,9 @@ export class GlideOutlineView {
 	}
 
 	private scrollRowIntoView(rowEl: HTMLElement): void {
+		// §十: leave an attribution note BEFORE the scroll — scrollIntoView
+		// may dispatch the scroll event synchronously in some runtimes.
+		this.programmaticScrollNote = "jump";
 		// block: "nearest" keeps outline-internal scrolling minimal and never
 		// scrolls ancestor containers unexpectedly.
 		rowEl.scrollIntoView({ block: "nearest" });

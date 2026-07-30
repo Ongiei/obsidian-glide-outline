@@ -119,6 +119,62 @@ describe("owned mount wrapper", () => {
 	});
 });
 
+describe("mount host-mutation diagnostics (§十一)", () => {
+	let host: HTMLElement;
+
+	beforeEach(() => {
+		document.body.innerHTML = "";
+		host = document.createElement("div");
+		document.body.appendChild(host);
+	});
+
+	it("observes an anchored mount truthfully across its lifecycle", () => {
+		// jsdom: unstyled div computes `static`, so the mount anchors.
+		const mount = createOutlineMount(host);
+		const d = mount.diagnostics;
+		expect(d.mountHostComputedPosition).toBe("static");
+		expect(d.mountHostInlinePositionBefore).toBe("");
+		expect(d.mountMutatedHostPosition).toBe(true);
+		expect(d.mountHostInlinePositionAfter).toBe("relative");
+		expect(d.mountRestoredHostPosition).toBe(false);
+		expect(d.staleMountsRemoved).toBe(0);
+
+		mount.dispose();
+		expect(d.mountRestoredHostPosition).toBe(true);
+		expect(d.mountHostInlinePositionAfter).toBe("");
+	});
+
+	it("observes an untouched host as not mutated", () => {
+		host.style.position = "absolute";
+		const mount = createOutlineMount(host);
+		const d = mount.diagnostics;
+		expect(d.mountHostInlinePositionBefore).toBe("absolute");
+		expect(d.mountMutatedHostPosition).toBe(false);
+		expect(d.mountHostInlinePositionAfter).toBe("absolute");
+
+		mount.dispose();
+		// Nothing was written, so nothing was "restored".
+		expect(d.mountRestoredHostPosition).toBe(false);
+		expect(d.mountHostInlinePositionAfter).toBe("absolute");
+	});
+
+	it("records a foreign takeover as not restored", () => {
+		const mount = createOutlineMount(host);
+		host.style.position = "sticky"; // another actor
+		mount.dispose();
+		expect(mount.diagnostics.mountRestoredHostPosition).toBe(false);
+		expect(mount.diagnostics.mountHostInlinePositionAfter).toBe("sticky");
+	});
+
+	it("counts stale wrappers swept at mount time", () => {
+		const stale = createOutlineMount(host); // never disposed
+		expect(stale.mountEl.isConnected).toBe(true);
+		const mount = createOutlineMount(host);
+		expect(mount.diagnostics.staleMountsRemoved).toBe(1);
+		mount.dispose();
+	});
+});
+
 describe("fail-closed ownership addressing", () => {
 	let host: HTMLElement;
 
@@ -294,6 +350,37 @@ describe("the plugin ships no tooltips", () => {
 		const view = readFileSync(join(SRC_DIR, "ui", "GlideOutlineView.ts"), "utf8");
 		expect(view).toContain("glide-outline-a11y-label");
 		expect(view).toContain("aria-labelledby");
+	});
+
+	it("renders an outline DOM free of every tooltip-triggering attribute (§十二)", () => {
+		const host = document.createElement("div");
+		document.body.appendChild(host);
+		const view = new GlideOutlineView(
+			host,
+			() => structuredClone(DEFAULT_SETTINGS),
+			{ onJump: () => undefined },
+		);
+		view.setItems(HEADINGS);
+
+		const banned = [
+			"title",
+			"aria-label",
+			"data-tooltip-position",
+			"data-tooltip-delay",
+			"data-tooltip-class",
+		];
+		for (const el of Array.from(host.querySelectorAll("*"))) {
+			for (const attr of banned) {
+				expect(
+					el.hasAttribute(attr),
+					`<${el.tagName.toLowerCase()} class="${el.className}"> carries ${attr}`,
+				).toBe(false);
+			}
+		}
+		// The accessible-name pattern itself must stay intact.
+		expect(host.querySelector("[aria-labelledby]")).not.toBe(null);
+		view.dispose();
+		host.remove();
 	});
 });
 

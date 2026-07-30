@@ -147,8 +147,11 @@ export class GlideOutlineController {
 	}
 
 	/** Same view, different file (file-open) or mode switch (layout-change). */
-	handleContextChange(): void {
+	handleContextChange(reason: "file-change" | "mode-change" = "mode-change"): void {
 		if (this.disposed) return;
+		// §十: leave a short-lived attribution note so a large scrollTop
+		// swing caused by the context switch is classified correctly.
+		this.magnification.noteContextChange(reason);
 		this.refreshFromCache();
 		this.tracker.schedule();
 	}
@@ -188,6 +191,9 @@ export class GlideOutlineController {
 			rootClasses: this.outlineView.getRootClassList(),
 			outlineViewport: this.outlineView.getViewportMetrics(),
 			overflow: this.outlineView.getOverflowState(),
+			// §十一: read-only mount host mutation diagnostics.
+			mountInstanceId: this.outlineView.getMountInstanceId(),
+			mount: this.outlineView.getMountDiagnostics(),
 		};
 	}
 
@@ -296,14 +302,22 @@ export class GlideOutlineController {
 	}
 
 	/**
-	 * Corrected editor jump (section 12). Smooth mode animates toward the
-	 * current estimate first; auto mode dispatches the exact effect right
-	 * away. Either way a ScrollCorrector verifies the landing position
-	 * after the scroll settles (scrollend AND a 600–800 ms timeout
-	 * fallback — whichever fires first), re-corrects while the error
-	 * exceeds the tolerance, and stops at the correction cap. The final
-	 * error and pass count are recorded for the diagnostics command, which
-	 * is how a "wrong drop point" is told apart from a "wrong heading".
+	 * Corrected editor jump (§四, 0.1.5). EVERY scroll of the jump —
+	 * initial estimate AND all correction rounds — goes through
+	 * `scrollTo({ behavior: "smooth" })`; a raw `scrollTop` write never
+	 * happens. 0.1.4 animated the first scroll but applied corrections
+	 * instantly, which is exactly the "sometimes smooth, sometimes
+	 * teleports" bug this release fixes.
+	 *
+	 * The ScrollCorrector verifies each landing after the scroll settles
+	 * (scrollend AND a 600–800 ms timeout fallback — whichever fires
+	 * first, then two rAFs), re-corrects smoothly while the error exceeds
+	 * the tolerance, and stops at the correction cap. The only remaining
+	 * non-smooth path is the explicitly gated `instant-fallback` (CM's
+	 * measure-driven `scrollIntoView` effect), reached ONLY when the
+	 * landing cannot even be estimated (`strategy === "none"`) — a smooth
+	 * scroll has no position to aim for then. It is recorded as
+	 * `usedInstantFallback` and never taken for rendered targets.
 	 */
 	private startEditorCorrection(
 		item: HeadingItem,
@@ -326,39 +340,30 @@ export class GlideOutlineController {
 		const evaluate = (): JumpLandingEvaluation =>
 			this.evaluateEditorLanding(cm, scroller, offset);
 
-		if (smooth) {
-			// Animate toward the current estimate; the corrector waits for
-			// the animation to settle before dispatching the exact effect,
-			// so the animation is never cancelled mid-flight. The estimate
-			// goes through the same landing math as the corrections — the
-			// old inline `lineBlockAt().top - margin` was the source of the
-			// coordinate-space error (§五).
-			const { result } = evaluate();
-			if (result.strategy !== "none") {
-				scroller.scrollTo({
-					top: result.desiredScrollTop,
-					behavior: "smooth",
-				});
-			}
-		}
 		const corrector = new ScrollCorrector({
 			maxCorrections: JUMP_MAX_CORRECTIONS,
 			timeoutMs: JUMP_SETTLE_TIMEOUT_MS,
 			evaluate,
-			apply: (result) => {
+			requestScroll: (desiredScrollTop) => {
 				if (this.disposed) return;
 				try {
-					if (result.strategy === "coords") {
-						// The target is rendered, so the desired position is
-						// exact in client space — write it directly.
-						scroller.scrollTop = result.desiredScrollTop;
-					} else {
-						// Not rendered: CM's own effect can measure its way
-						// there, which a raw scrollTop write cannot.
-						cm.dispatch({ effects: this.scrollEffect(offset) });
-					}
+					// §四: the ONLY scroll primitive of the normal path.
+					scroller.scrollTo({
+						top: desiredScrollTop,
+						behavior: "smooth",
+					});
 				} catch {
 					// View detached mid-scroll — nothing left to correct.
+				}
+			},
+			requestInstantFallback: () => {
+				if (this.disposed) return;
+				try {
+					// Not measurable at all: CM's own effect can measure
+					// its way there, which no smooth target could.
+					cm.dispatch({ effects: this.scrollEffect(offset) });
+				} catch {
+					// View detached mid-scroll.
 				}
 			},
 			done: (summary) => {
@@ -379,11 +384,14 @@ export class GlideOutlineController {
 						summary.acceptedAsVisibleBoundaryLanding,
 					finalViewportErrorPx:
 						summary.finalViewportErrorPx ?? undefined,
+					landingReason: summary.landingReason,
+					animationConsistent: summary.animationConsistent,
+					usedInstantFallback: summary.usedInstantFallback,
+					correctionAttemptCount: summary.attempts.length,
 				});
 			},
 			win,
 			scroller,
-			smoothFirst: smooth,
 		});
 		this.corrector = corrector;
 		corrector.start();
@@ -439,6 +447,10 @@ export class GlideOutlineController {
 
 			return {
 				scrollTop,
+				scrollHeight: scroller.scrollHeight,
+				clientHeight: scroller.clientHeight,
+				targetClientTop,
+				desiredClientTop: scrollerRect.top + JUMP_Y_MARGIN,
 				result: evaluateJumpLanding({
 					targetClientTop,
 					targetClientBottom,
@@ -455,6 +467,10 @@ export class GlideOutlineController {
 		} catch {
 			return {
 				scrollTop,
+				scrollHeight: 0,
+				clientHeight: 0,
+				targetClientTop: null,
+				desiredClientTop: null,
 				result: {
 					strategy: "none",
 					targetRendered: false,

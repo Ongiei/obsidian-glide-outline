@@ -6,6 +6,8 @@
  * console per frame; the report is produced once, on stop.
  */
 
+import type { ScrollDeltaSource } from "./Diagnostics";
+
 /** Ring buffer capacity for frame intervals (~85 s at 60 fps). */
 const FRAME_RING_CAPACITY = 5120;
 
@@ -404,6 +406,8 @@ export interface PerfReport {
 		scrollBoundaryClampCount: number;
 		avgScrollDeltaPx: number;
 		maxScrollDeltaPx: number;
+		/** §十: sample count per attributed scroll source. */
+		scrollDeltaBySource: Record<string, number>;
 	};
 	/** §八: how pointer anchors were resolved (fallbackScanCount must be 0). */
 	anchorResolve: {
@@ -449,6 +453,8 @@ export class PerfCapture {
 	/** §十八: stop-reason / rebuild-reason histograms + velocity sums. */
 	private stopReasons: Record<string, number> = {};
 	private geometryRebuildReasons: Record<string, number> = {};
+	/** §十: scroll-delta sample count per attributed source. */
+	private scrollDeltaBySource: Record<string, number> = {};
 	private autoScrollTargetSum = 0;
 	private autoScrollAppliedSum = 0;
 	private autoScrollSampleCount = 0;
@@ -472,6 +478,7 @@ export class PerfCapture {
 		this.maxSuspendedGapMs = 0;
 		this.stopReasons = {};
 		this.geometryRebuildReasons = {};
+		this.scrollDeltaBySource = {};
 		this.autoScrollTargetSum = 0;
 		this.autoScrollAppliedSum = 0;
 		this.autoScrollSampleCount = 0;
@@ -729,9 +736,13 @@ export class PerfCapture {
 	 * A zero delta is still a sample: it is exactly the "we wrote scrollTop
 	 * but nothing moved" case worth seeing in a capture.
 	 */
-	addScrollDeltaSample(deltaPx: number): void {
+	addScrollDeltaSample(deltaPx: number, source?: ScrollDeltaSource): void {
 		if (!this.active) return;
 		if (!Number.isFinite(deltaPx)) return;
+		if (source) {
+			this.scrollDeltaBySource[source] =
+				(this.scrollDeltaBySource[source] ?? 0) + 1;
+		}
 		const magnitude = Math.abs(deltaPx);
 		this.counters.scrollDeltaSampleCount++;
 		this.counters.scrollDeltaTotalPx += magnitude;
@@ -1000,6 +1011,7 @@ export class PerfCapture {
 						: 0,
 				),
 				maxScrollDeltaPx: round2(c.maxScrollDeltaPx),
+				scrollDeltaBySource: { ...this.scrollDeltaBySource },
 			},
 			anchorResolve: {
 				localHitCount: c.anchorLocalHitCount,
