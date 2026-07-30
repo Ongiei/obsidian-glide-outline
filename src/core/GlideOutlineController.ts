@@ -147,8 +147,11 @@ export class GlideOutlineController {
 	}
 
 	/** Same view, different file (file-open) or mode switch (layout-change). */
-	handleContextChange(): void {
+	handleContextChange(reason: "file-change" | "mode-change" = "mode-change"): void {
 		if (this.disposed) return;
+		// §十: leave a short-lived attribution note so a large scrollTop
+		// swing caused by the context switch is classified correctly.
+		this.magnification.noteContextChange(reason);
 		this.refreshFromCache();
 		this.tracker.schedule();
 	}
@@ -188,6 +191,9 @@ export class GlideOutlineController {
 			rootClasses: this.outlineView.getRootClassList(),
 			outlineViewport: this.outlineView.getViewportMetrics(),
 			overflow: this.outlineView.getOverflowState(),
+			// §十一: read-only mount host mutation diagnostics.
+			mountInstanceId: this.outlineView.getMountInstanceId(),
+			mount: this.outlineView.getMountDiagnostics(),
 		};
 	}
 

@@ -46,11 +46,35 @@ interface ClosestCapable {
 	closest?(selector: string): Element | null;
 }
 
+/**
+ * §十一: what the mount observed and did to the HOST node. Pure
+ * observation — exposing these numbers changes no mount behaviour.
+ * `mountHostInlinePositionAfter` / `mountRestoredHostPosition` are
+ * updated at dispose time; before dispose they describe the mounted
+ * state.
+ */
+export interface MountHostMutationDiagnostics {
+	/** getComputedStyle(host).position at mount time. */
+	mountHostComputedPosition: string;
+	/** host.style.position BEFORE any write of ours ("" when unset). */
+	mountHostInlinePositionBefore: string;
+	/** True when we wrote inline `position: relative` onto the host. */
+	mountMutatedHostPosition: boolean;
+	/** host.style.position after mount (== before when not mutated). */
+	mountHostInlinePositionAfter: string;
+	/** True once dispose verbatim-restored the host's inline position. */
+	mountRestoredHostPosition: boolean;
+	/** Owned wrappers from earlier instances swept away at mount. */
+	staleMountsRemoved: number;
+}
+
 export interface OutlineMount {
 	/** The owned wrapper. All plugin DOM must be created inside it. */
 	readonly mountEl: HTMLElement;
 	/** Stable id for this mount, mirrored onto the wrapper. */
 	readonly instanceId: string;
+	/** §十一: host-mutation observation (live object, updated on dispose). */
+	readonly diagnostics: MountHostMutationDiagnostics;
 	/** True when `node` lives inside this mount. */
 	owns(node: unknown): boolean;
 	/** Idempotent: detaches the wrapper and undoes any host mutation. */
@@ -73,7 +97,8 @@ export function createOutlineMount(hostEl: HTMLElement): OutlineMount {
 	const doc = hostEl.ownerDocument;
 	const instanceId = `${++mountSeq}`;
 
-	sweepStaleMounts(hostEl);
+	const staleMountsRemoved = sweepStaleMounts(hostEl);
+	const inlinePositionBefore = hostEl.style.position;
 
 	const mountEl = doc.createElement("div");
 	mountEl.className = "glide-outline-mount";
@@ -93,10 +118,22 @@ export function createOutlineMount(hostEl: HTMLElement): OutlineMount {
 
 	hostEl.appendChild(mountEl);
 
+	// §十一: observation only — every value mirrors a decision the mount
+	// already made above; nothing reads back later except dispose.
+	const diagnostics: MountHostMutationDiagnostics = {
+		mountHostComputedPosition: hostPosition,
+		mountHostInlinePositionBefore: inlinePositionBefore,
+		mountMutatedHostPosition: anchored,
+		mountHostInlinePositionAfter: hostEl.style.position,
+		mountRestoredHostPosition: false,
+		staleMountsRemoved,
+	};
+
 	let disposed = false;
 	return {
 		mountEl,
 		instanceId,
+		diagnostics,
 		owns(node: unknown): boolean {
 			const candidate = node as Node | null;
 			if (!candidate || typeof candidate.nodeType !== "number") return false;
@@ -113,7 +150,9 @@ export function createOutlineMount(hostEl: HTMLElement): OutlineMount {
 				if (hostEl.getAttribute("style") === "") {
 					hostEl.removeAttribute("style");
 				}
+				diagnostics.mountRestoredHostPosition = true;
 			}
+			diagnostics.mountHostInlinePositionAfter = hostEl.style.position;
 		},
 	};
 }

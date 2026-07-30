@@ -135,11 +135,55 @@ export interface LastJumpDiagnostic {
 	correctionAttemptCount?: number;
 }
 
+/**
+ * §十: who moved the outline viewport's scrollTop. Attribution is
+ * best-effort — plugin writes are exact (we hold the write depth), the
+ * rest is classified from short-lived notes left by the code path that
+ * most recently touched the outline.
+ */
+export type ScrollDeltaSource =
+	| "manual-wheel"
+	| "edge"
+	| "kinetic"
+	| "combined"
+	| "jump"
+	| "mount"
+	| "file-change"
+	| "mode-change"
+	| "external"
+	| "unknown";
+
+/**
+ * §十: one scroll event whose |delta| exceeded the viewport height —
+ * exactly the "the outline teleported" class of bug report. Recorded
+ * ALWAYS (not only during a perf capture), never clamped, never
+ * swallowed: the scroll itself proceeds untouched.
+ */
+export interface LargeScrollDeltaSnapshot {
+	previousScrollTop: number;
+	currentScrollTop: number;
+	delta: number;
+	clientHeight: number;
+	scrollHeight: number;
+	source: ScrollDeltaSource;
+	/** A file switch was noted shortly before this scroll. */
+	fileChangePending: boolean;
+	/** A view-mode switch was noted shortly before this scroll. */
+	modeChangePending: boolean;
+	/** The owning mount's instance id (null before the first mount). */
+	instanceId: string | null;
+}
+
+/** §十: bounded ring — diagnostics must never grow without limit. */
+const MAX_LARGE_SCROLL_DELTAS = 10;
+
 /** Mutable collector shared by the magnification controller (activation)
  * and the outline controller (jump). */
 export class Diagnostics {
 	lastPointerActivation: LastPointerActivationDiagnostic | null = null;
 	lastJump: LastJumpDiagnostic | null = null;
+	/** §十: most recent large outline scroll deltas, oldest first. */
+	largeScrollDeltas: LargeScrollDeltaSnapshot[] = [];
 
 	recordPointerActivation(d: LastPointerActivationDiagnostic): void {
 		this.lastPointerActivation = d;
@@ -147,5 +191,13 @@ export class Diagnostics {
 
 	recordJump(d: LastJumpDiagnostic): void {
 		this.lastJump = d;
+	}
+
+	/** §十: bounded push — keeps the newest MAX_LARGE_SCROLL_DELTAS. */
+	recordLargeScrollDelta(d: LargeScrollDeltaSnapshot): void {
+		this.largeScrollDeltas.push(d);
+		if (this.largeScrollDeltas.length > MAX_LARGE_SCROLL_DELTAS) {
+			this.largeScrollDeltas.shift();
+		}
 	}
 }
