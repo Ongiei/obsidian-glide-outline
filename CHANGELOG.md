@@ -2,6 +2,19 @@
 
 All notable changes to Glide Outline will be documented in this file.
 
+## 0.1.5
+
+Consistently smooth editor jumps, and the 0.1.4 scroll-pipeline stats actually wired.
+
+- fix: **editor jumps are now smooth every time**. The correction loop is a small state machine (smooth-estimate → smooth-client-correction → boundary-accepted / instant-fallback); an instant scroll only happens when explicitly gated, never as a silent fallback mid-round. Previously a jump was sometimes smooth and sometimes teleported depending on which correction round it landed in.
+- fix: **scroll pipeline sub-phase stats were all zero in 0.1.4**. The eleven sub-phases are now measured inside the controller's own frame callback with paired timing reads; with capture off the path performs zero timing calls.
+- feat: **scroll source attribution**. Every scroll event is classified (manual-wheel / edge / kinetic / combined / jump / mount / file-change / mode-change / external) via write-depth guards plus short-lived frame-TTL notes, and the perf report gains a `scrollDeltaBySource` histogram.
+- feat: **large scroll delta diagnostics**. A scroll whose delta exceeds the viewport height records a bounded (max 10) snapshot — previous/current scrollTop, delta, heights, attributed source, pending context flags, instance id. Anomalous scrolls are never clamped or swallowed.
+- feat: **mount host mutation diagnostics** (read-only, mount behaviour unchanged): computed/inline position before and after, whether the host was mutated and restored, and how many stale wrappers were swept.
+- test: 513 tests (+28): 8 large-scroll-delta, 7 scroll-pipeline, 4 mount host-mutation lifecycle, plus a static outline-DOM tooltip-attribute scan (§十二) alongside the existing settings scan.
+
+Collision taper, scale/collision ranges, pointer-follow strength and gain, edge auto-scroll, wheel routing, the content-coordinate cache, anchor resolve, CSS transforms, edge fade, markdown labels and tooltip visuals are untouched. Not re-verified on Windows across full jump distances in this release.
+
 ## 0.1.4
 
 Jump accuracy, a content-space scroll pipeline, and clean DOM boundaries.
