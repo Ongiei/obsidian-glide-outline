@@ -22,6 +22,25 @@ export interface LastPointerActivationDiagnostic {
 }
 
 /**
+ * §四: how one correction round moved the scroller. The normal path only
+ * ever uses the two smooth modes; `instant-fallback` is an explicitly
+ * gated escape hatch for targets the editor never renders, and
+ * `boundary-accepted` closes a round that could not move any further but
+ * left the target fully visible.
+ */
+export type JumpCorrectionMode =
+	| "smooth-estimate"
+	| "smooth-client-correction"
+	| "boundary-accepted"
+	| "instant-fallback";
+
+/** What started a correction round. */
+export type JumpAttemptTrigger = "initial" | "verify";
+
+/** How the settle wait of one round ended. */
+export type JumpWaitSettledBy = "scrollend" | "timeout";
+
+/**
  * §四.3: one correction round of the editor jump FSM. Recording every
  * attempt (not just the final error) is what makes a "landed 400 px off"
  * report actionable: it shows whether the corrector never converged, or
@@ -30,24 +49,39 @@ export interface LastPointerActivationDiagnostic {
 export interface JumpCorrectionAttempt {
 	/** 1-based round index. */
 	attempt: number;
-	/** scrollTop before this correction was applied. */
-	scrollTopBefore: number;
-	/** scrollTop the corrector asked for. */
-	desiredScrollTop: number;
-	/** scrollTop actually observed after the write settled. */
-	scrollTopAfter: number;
-	/** Error in SCROLL space (scrollTopAfter - desiredScrollTop). */
-	scrollErrorPx: number;
-	/**
-	 * Error in VIEWPORT space from coordsAtPos — the authoritative
-	 * "where did the line actually render" verdict. Null when the target
-	 * offset was outside the rendered range and produced no coordinates.
-	 */
-	viewportErrorPx: number | null;
+	/** §四: which scroll primitive this round used. */
+	mode: JumpCorrectionMode;
+	/** §四: what started this round (first estimate vs re-verification). */
+	trigger: JumpAttemptTrigger;
 	/** Whether coordsAtPos returned coordinates for the target at all. */
 	targetRendered: boolean;
-	/** True when the write was clamped by the document scroll range. */
-	clampedAtBoundary: boolean;
+	/** coordsAtPos().top at verification time, client space. */
+	targetClientTop: number | null;
+	/** Where the target SHOULD sit in client space (scroller top + margin). */
+	desiredClientTop: number | null;
+	/**
+	 * Viewport-space error at verification (targetClientTop -
+	 * desiredClientTop). Null when the target was not rendered.
+	 */
+	errorPx: number | null;
+	/** scrollTop before this round's scroll request. */
+	previousScrollTop: number;
+	/** scrollTop this round asked the scroller to reach. */
+	requestedScrollTop: number;
+	/** scrollTop actually observed after the round settled. */
+	resultingScrollTop: number;
+	/** scroller.scrollHeight at verification. */
+	scrollHeight: number;
+	/** scroller.clientHeight at verification. */
+	clientHeight: number;
+	/** Resulting scrollTop is pinned at the top of the scroll range. */
+	atTopBoundary: boolean;
+	/** Resulting scrollTop is pinned at the bottom of the scroll range. */
+	atBottomBoundary: boolean;
+	/** Whether scrollend or the timeout fallback ended the wait. */
+	settledBy: JumpWaitSettledBy;
+	/** True only for the explicitly gated instant fallback (§四). */
+	usedInstantFallback: boolean;
 }
 
 export type JumpSettledBy =
@@ -56,6 +90,13 @@ export type JumpSettledBy =
 	| "scroll-boundary"
 	| "timeout"
 	| "target-not-rendered";
+
+/** §六: single terminal verdict of where the jump actually landed. */
+export type JumpLandingReason =
+	| "desired-position"
+	| "top-boundary-visible"
+	| "bottom-boundary-visible"
+	| "failed";
 
 export interface LastJumpDiagnostic {
 	headingKey: string;
@@ -81,6 +122,17 @@ export interface LastJumpDiagnostic {
 	acceptedAsVisibleBoundaryLanding?: boolean;
 	/** §四.3: final error measured in viewport space (coordsAtPos). */
 	finalViewportErrorPx?: number;
+	/** §六: terminal landing verdict. */
+	landingReason?: JumpLandingReason;
+	/**
+	 * §六: true when EVERY scroll this jump issued was a smooth one —
+	 * i.e. the user never saw an instant reposition.
+	 */
+	animationConsistent?: boolean;
+	/** §六: whether the gated instant fallback fired (normal path: false). */
+	usedInstantFallback?: boolean;
+	/** §六: number of correction rounds actually recorded. */
+	correctionAttemptCount?: number;
 }
 
 /** Mutable collector shared by the magnification controller (activation)
