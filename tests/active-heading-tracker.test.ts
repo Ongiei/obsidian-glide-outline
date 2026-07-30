@@ -9,6 +9,7 @@ import {
 	JUMP_SETTLE_MS,
 } from "../src/core/ActiveHeadingTracker";
 import type { EditorUpdateSummary } from "../src/core/EditorUpdateBridge";
+import { OWNER_ATTR, OWNER_VALUE } from "../src/ui/mount";
 
 function heading(level: number, text: string, line: number): HeadingItem {
 	return {
@@ -364,14 +365,19 @@ describe("ActiveHeadingTracker Reading-Mode focus hold (unified model)", () => {
 		expect(tracker.getSource()).toBe("viewport");
 	});
 
-	it("pointerdown INSIDE the outline root does not release the focus", () => {
+	it("pointerdown INSIDE the outline mount does not release the focus", () => {
 		tracker.beginJump(ITEMS[2].key);
 		settleJump();
+		// The gesture test is ownership-based, not class-based: only the
+		// owned mount counts as "inside the outline".
+		const mount = document.createElement("div");
+		mount.setAttribute(OWNER_ATTR, OWNER_VALUE);
 		const root = document.createElement("div");
 		root.className = "glide-outline-root";
 		const card = document.createElement("div");
 		root.appendChild(card);
-		contentEl.appendChild(root);
+		mount.appendChild(root);
+		contentEl.appendChild(mount);
 		card.dispatchEvent(new Event("pointerdown", { bubbles: true }));
 		expect(tracker.getSource()).toBe("focus"); // outline gesture
 		contentEl.dispatchEvent(new Event("pointerdown", { bubbles: true }));

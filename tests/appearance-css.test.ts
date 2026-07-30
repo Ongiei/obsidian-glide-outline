@@ -19,13 +19,27 @@ function declarations(selectorPart: string): string[] {
 	return blocks;
 }
 
+/**
+ * Every rule in the sheet is scoped fail-closed under the ownership
+ * attribute (see the CSS header). Selector assertions are written against
+ * the unscoped form, so the prefix is normalised away here — the presence of
+ * the prefix itself is asserted separately in `mount.test.ts`.
+ */
+const OWNER_SCOPE = ":where([data-glide-outline-owner])";
+
+function unscope(selector: string): string {
+	return selector.startsWith(`${OWNER_SCOPE} `)
+		? selector.slice(OWNER_SCOPE.length + 1)
+		: selector;
+}
+
 /** Declaration block whose (comma-free) selector matches EXACTLY. */
 function exactBlock(selector: string): string {
 	const stripped = css.replace(/\/\*[\s\S]*?\*\//g, "");
 	const re = /([^{}]+)\{([^{}]*)\}/g;
 	let match: RegExpExecArray | null;
 	while ((match = re.exec(stripped)) !== null) {
-		if (match[1].trim() === selector) return match[2];
+		if (unscope(match[1].trim()) === selector) return match[2];
 	}
 	return "";
 }

@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
+import { OWNER_ATTR, OWNER_VALUE } from "../src/ui/mount";
 import { resolveClickTarget } from "../src/utils/activation";
 
 /**
@@ -8,8 +9,11 @@ import { resolveClickTarget } from "../src/utils/activation";
  * reveal wrapper, row slack and the viewport background must all resolve
  * to null — even though they are ancestors/siblings inside the same item.
  *
- * DOM mirrors GlideOutlineView.createRow():
- *   row > button.glide-outline-item[data-key]
+ * DOM mirrors GlideOutlineView.createRow(), including the owned mount that
+ * every rail now lives inside — resolution is fail-closed, so a marker or
+ * card outside that wrapper resolves to null no matter how it is classed
+ * (covered in mount.test.ts):
+ *   [data-glide-outline-owner] > row > button.glide-outline-item[data-key]
  *     > .glide-outline-motion > .glide-outline-marker
  *                             > .glide-outline-reveal > .glide-outline-card
  */
@@ -44,7 +48,10 @@ describe("resolveClickTarget", () => {
 		motion.appendChild(reveal);
 		button.appendChild(motion);
 		row.appendChild(button);
-		document.body.appendChild(row);
+		const mount = document.createElement("div");
+		mount.setAttribute(OWNER_ATTR, OWNER_VALUE);
+		mount.appendChild(row);
+		document.body.replaceChildren(mount);
 	});
 
 	it("resolves a direct marker hit", () => {

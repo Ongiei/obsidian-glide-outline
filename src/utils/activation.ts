@@ -12,6 +12,8 @@
  * pop-out windows where the element constructors differ from the main window.
  */
 
+import { OWNED_SELECTOR } from "../ui/mount";
+
 export type ActivationTargetType = "marker" | "card";
 
 export interface ActivationTarget {
@@ -32,11 +34,18 @@ interface ClosestCapable {
  */
 export function resolveClickTarget(
 	target: EventTarget | null,
+	owns?: (node: unknown) => boolean,
 ): ActivationTarget | null {
 	const el = target as (ClosestCapable & Element) | null;
 	if (!el || typeof el.closest !== "function") return null;
 	const interactive = el.closest(".glide-outline-marker, .glide-outline-card");
 	if (!interactive) return null;
+	// Fail closed: a class name is not proof of ownership. Either the caller
+	// vouches for the node, or it must carry our ownership attribute.
+	const owned = owns
+		? owns(interactive)
+		: !!interactive.closest?.(OWNED_SELECTOR);
+	if (!owned) return null;
 	const item = interactive.closest(".glide-outline-item");
 	const key = item?.getAttribute?.("data-key");
 	if (!key) return null;

@@ -6,6 +6,7 @@ import { DisposableStore } from "../utils/disposable";
 import { EditorPositionAdapter } from "./EditorPositionAdapter";
 import type { CmViewLike } from "./EditorPositionAdapter";
 import type { EditorUpdateSummary } from "./EditorUpdateBridge";
+import { OWNED_SELECTOR } from "../ui/mount";
 
 /** Activation line sits at 20% of the viewport height. */
 export const ACTIVATION_RATIO = 0.2;
@@ -307,8 +308,11 @@ export class ActiveHeadingTracker {
 		// Interactions with the outline itself (e.g. pointerdown on a
 		// heading card) are outline gestures, not reading — they begin a
 		// new jump instead of demoting the current one.
+		// Addressed by ownership attribute, not class name: a foreign node
+		// carrying our class must not silence a real reading intent, and our
+		// own nodes stay recognisable no matter how a theme re-skins them.
 		const target = event.target as Partial<Element> | null;
-		if (target?.closest?.(".glide-outline-root")) return;
+		if (target?.closest?.(OWNED_SELECTOR)) return;
 		this.clearJumpTimers();
 		this.clearCursorGuard();
 		this.jumpKey = null;

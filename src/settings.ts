@@ -1,6 +1,7 @@
 import { PluginSettingTab, Setting } from "obsidian";
 import type { App } from "obsidian";
 import type GlideOutlinePlugin from "./main";
+import { OWNER_ATTR, OWNER_VALUE } from "./ui/mount";
 
 export type OutlinePosition = "left" | "right";
 export type MarkerStyle = "line" | "dot";
@@ -387,6 +388,48 @@ const SETTINGS_TABS: ReadonlyArray<{ id: SettingsTabId; label: string }> = [
 	{ id: "advanced", label: "Advanced" },
 ];
 
+/** Minimal shape of Obsidian's SliderComponent that we depend on. */
+interface SliderLike {
+	sliderEl: HTMLInputElement;
+	setValue(value: number): SliderLike;
+}
+
+/**
+ * Replace Obsidian's dynamic slider tooltip with a value that is simply
+ * always visible.
+ *
+ * `setDynamicTooltip()` renders a hover bubble — a tooltip, and this plugin
+ * ships none. A permanent readout is also strictly better: the number is
+ * there while you drag, without hovering, and it never covers the track.
+ *
+ * `setValue` is wrapped (on this instance only) so the readout repaints when
+ * the builder chain seeds the initial value, which happens after this call.
+ * The span is `aria-hidden` because the range input already announces its
+ * own value — a screen reader must not hear it twice.
+ */
+function withValueReadout<T extends SliderLike>(
+	slider: T,
+	format: (value: number) => string = (value) => String(value),
+): T {
+	const el = slider.sliderEl;
+	const readout = el.ownerDocument.createElement("span");
+	readout.className = "glide-settings-value";
+	readout.setAttribute("aria-hidden", "true");
+	const paint = (): void => {
+		readout.textContent = format(Number(el.value));
+	};
+	const setValue = slider.setValue.bind(slider);
+	slider.setValue = (value: number): T => {
+		setValue(value);
+		paint();
+		return slider;
+	};
+	el.addEventListener("input", paint);
+	el.insertAdjacentElement("afterend", readout);
+	paint();
+	return slider;
+}
+
 /**
  * Tabbed settings page (P1-5): General / Appearance / Motion / Advanced.
  *
@@ -409,11 +452,24 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 		containerEl.empty();
 		this.tabButtons.clear();
 
-		const tablist = containerEl.createDiv({
+		// Everything the plugin renders into Obsidian's settings container
+		// hangs off one owned node, tagged the same way the outline mount is
+		// — so the stylesheet can stay scoped to DOM we actually own.
+		const root = containerEl.createDiv({ cls: "glide-settings-root" });
+		root.setAttribute(OWNER_ATTR, OWNER_VALUE);
+
+		const tablist = root.createDiv({
 			cls: "glide-settings-tablist",
 		});
 		tablist.setAttribute("role", "tablist");
-		tablist.setAttribute("aria-label", "Glide Outline settings sections");
+		// Accessible name via a hidden span rather than `aria-label`, which
+		// Obsidian would render as a hover tooltip.
+		const tablistLabel = tablist.createSpan({
+			cls: "glide-outline-a11y-label",
+			text: "Glide Outline settings sections",
+		});
+		tablistLabel.id = "glide-settings-tablist-label";
+		tablist.setAttribute("aria-labelledby", tablistLabel.id);
 
 		for (const tab of SETTINGS_TABS) {
 			const button = tablist.createEl("button", {
@@ -431,7 +487,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			this.tabButtons.set(tab.id, button);
 		}
 
-		const panel = containerEl.createDiv({ cls: "glide-settings-tabpanel" });
+		const panel = root.createDiv({ cls: "glide-settings-tabpanel" });
 		panel.id = "glide-settings-panel";
 		panel.setAttribute("role", "tabpanel");
 		this.panelEl = panel;
@@ -538,10 +594,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Horizontal offset")
 			.setDesc("Move the outline inward from the editor edge. Increase it on the right to leave space beside the editor scrollbar.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.horizontalOffset.min, RANGES.horizontalOffset.max, 1)
 					.setValue(s.horizontalOffset)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.horizontalOffset = value;
 						this.plugin.previewSettings();
@@ -552,10 +607,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Vertical offset")
 			.setDesc("Shift the rail down (positive) or up (negative), in pixels.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.verticalOffset.min, RANGES.verticalOffset.max, 10)
 					.setValue(s.verticalOffset)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.verticalOffset = value;
 						this.plugin.previewSettings();
@@ -599,10 +653,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Base font size")
 			.setDesc("Label font size in pixels, before magnification.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.baseFontSize.min, RANGES.baseFontSize.max, 1)
 					.setValue(s.baseFontSize)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.baseFontSize = value;
 						this.plugin.previewSettings();
@@ -613,10 +666,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Maximum label width")
 			.setDesc("Longer headings are truncated with an ellipsis.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.maxLabelWidth.min, RANGES.maxLabelWidth.max, 10)
 					.setValue(s.maxLabelWidth)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.maxLabelWidth = value;
 						this.plugin.previewSettings();
@@ -630,10 +682,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Background opacity")
 			.setDesc("0 turns the card into pure text.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.cardOpacity.min, RANGES.cardOpacity.max, 2)
 					.setValue(s.card.opacity)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.card.opacity = value;
 						this.plugin.previewSettings();
@@ -652,10 +703,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Corner radius")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.cardRadius.min, RANGES.cardRadius.max, 1)
 					.setValue(s.card.radius)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.card.radius = value;
 						this.plugin.previewSettings();
@@ -674,10 +724,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Horizontal padding")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.cardPaddingX.min, RANGES.cardPaddingX.max, 1)
 					.setValue(s.card.paddingX)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.card.paddingX = value;
 						this.plugin.previewSettings();
@@ -687,10 +736,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName("Vertical padding")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.cardPaddingY.min, RANGES.cardPaddingY.max, 1)
 					.setValue(s.card.paddingY)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.card.paddingY = value;
 						this.plugin.previewSettings();
@@ -701,10 +749,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Minimum card gap")
 			.setDesc("Minimum vertical space maintained between neighbouring label cards, including during magnification.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.cardGap.min, RANGES.cardGap.max, 1)
 					.setValue(s.cardGap)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.cardGap = value;
 						this.plugin.previewSettings();
@@ -749,10 +796,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Maximum magnification")
 			.setDesc("Peak scale of the heading nearest the pointer.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.maxScale.min, RANGES.maxScale.max, 0.05)
 					.setValue(s.maxScale)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.maxScale = value;
 						this.plugin.previewSettings();
@@ -763,10 +809,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Magnification radius")
 			.setDesc("Distance in pixels over which magnification decays to normal size.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.radius.min, RANGES.radius.max, 5)
 					.setValue(s.radius)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.radius = value;
 						this.plugin.previewSettings();
@@ -790,10 +835,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Edge fade size")
 			.setDesc("Height of the fade zone, in pixels.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.edgeFadeSize.min, RANGES.edgeFadeSize.max, 2)
 					.setValue(s.edgeFadeSize)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.edgeFadeSize = value;
 						this.plugin.previewSettings();
@@ -824,14 +868,13 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Edge auto-scroll speed")
 			.setDesc("Speed multiplier for pointer EDGE auto-scroll only. 1 is the tuned default; lower is gentler, higher is brisker. Does not affect Pointer movement assist.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(
 						RANGES.pointerAutoScrollSpeed.min,
 						RANGES.pointerAutoScrollSpeed.max,
 						0.1,
 					)
 					.setValue(s.pointerAutoScrollSpeed)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.pointerAutoScrollSpeed = value;
 						this.plugin.previewSettings();
@@ -842,14 +885,13 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Pointer movement assist strength")
 			.setDesc("How strongly quick vertical pointer movements pre-scroll the outline. 1 is the tuned default; 0.5 is gentle; 2.5 is aggressive. Independent of edge auto-scroll speed.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(
 						RANGES.pointerFollowStrength.min,
 						RANGES.pointerFollowStrength.max,
 						0.1,
 					)
 					.setValue(s.pointerFollowStrength)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.pointerFollowStrength = value;
 						this.plugin.previewSettings();
@@ -860,14 +902,13 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Auto-scroll trigger area")
 			.setDesc("Height of the edge zone that starts auto-scroll, in pixels from each list edge. Capped at half the list height on short panes.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(
 						RANGES.pointerAutoScrollZone.min,
 						RANGES.pointerAutoScrollZone.max,
 						10,
 					)
 					.setValue(s.pointerAutoScrollZone)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.pointerAutoScrollZone = value;
 						this.plugin.previewSettings();
@@ -884,10 +925,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			.setName("Level indentation (legacy)")
 			.setDesc("Pixels each deeper level steps toward the text body. Superseded by the level badge; kept for vaults that prefer the staircase. 0 = off.")
 			.addSlider((slider) =>
-				slider
+				withValueReadout(slider)
 					.setLimits(RANGES.levelIndent.min, RANGES.levelIndent.max, 1)
 					.setValue(s.levelIndent)
-					.setDynamicTooltip()
 					.onChange((value) => {
 						s.levelIndent = value;
 						this.plugin.previewSettings();

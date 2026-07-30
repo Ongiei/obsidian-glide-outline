@@ -64,6 +64,11 @@ export class GlideOutlineController {
 	private unsubscribeEditorUpdates: (() => void) | null = null;
 	/** In-flight editor jump correction; a new jump cancels the old one. */
 	private corrector: ScrollCorrector | null = null;
+	/**
+	 * Reading-Mode headings we temporarily made focusable. They are
+	 * Obsidian's nodes, so the attribute must never outlive us.
+	 */
+	private readonly tempTabindexEls = new Set<HTMLElement>();
 
 	constructor(
 		private readonly view: MarkdownView,
@@ -167,6 +172,7 @@ export class GlideOutlineController {
 		this.tracker.dispose();
 		this.magnification.dispose();
 		this.outlineView.dispose();
+		this.restorePreviewTabindexes();
 		this.renderComponent.unload();
 	}
 
@@ -530,11 +536,26 @@ export class GlideOutlineController {
 			}
 		}
 		if (!hadTabindex) {
-			element.addEventListener(
-				"blur",
-				() => element.removeAttribute("tabindex"),
-				{ once: true },
-			);
+			// The heading belongs to Obsidian, not to us. Blur normally
+			// cleans up, but a heading that never blurs (the pane is closed,
+			// the plugin is disabled, Reading Mode re-renders) would keep our
+			// attribute forever — so the undo is also registered as a
+			// disposal, and whichever fires first wins.
+			const restore = (): void => {
+				if (!this.tempTabindexEls.delete(element)) return;
+				element.removeAttribute("tabindex");
+				element.removeEventListener("blur", restore);
+			};
+			this.tempTabindexEls.add(element);
+			element.addEventListener("blur", restore);
+		}
+	}
+
+	/** Undo every `tabindex` we wrote onto Obsidian's own heading elements. */
+	private restorePreviewTabindexes(): void {
+		for (const element of [...this.tempTabindexEls]) {
+			this.tempTabindexEls.delete(element);
+			element.removeAttribute("tabindex");
 		}
 	}
 
