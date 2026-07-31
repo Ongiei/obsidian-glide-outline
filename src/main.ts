@@ -3,6 +3,7 @@ import type { Editor, MarkdownView, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { Diagnostics } from "./core/Diagnostics";
 import { PerfCapture } from "./core/PerfCapture";
+import { ColdStartTrace } from "./core/ColdStartTrace";
 import { FULL_MOTION_STATE } from "./utils/motion";
 import {
 	DEFAULT_SETTINGS,
@@ -38,10 +39,21 @@ export default class GlideOutlinePlugin extends Plugin {
 	private readonly diagnostics = new Diagnostics();
 	/** On-demand performance capture (section 3) — zero cost while off. */
 	private readonly perf = new PerfCapture();
+	/**
+	 * §八/§九: one-shot cold-start trace. Non-null only for the single
+	 * reload after the arm command ran; null (and therefore zero cost)
+	 * otherwise.
+	 */
+	private coldStart: ColdStartTrace | null = null;
 
 	override async onload(): Promise<void> {
+		// §八: t0 — the FIRST thing onload does, before any await, so the
+		// milestones are measured from the real start of the plugin's load.
+		const coldStartAt = window.performance.now();
 		this.settings = normalizeSettings(await this.loadData());
+		this.maybeArmColdStart(coldStartAt);
 		this.provider = new HeadingProvider(this.app);
+		this.coldStart?.mark("providerReady");
 		this.addSettingTab(new GlideOutlineSettingTab(this.app, this));
 
 		// P0-2: a single updateListener for every editor in the workspace.
@@ -77,6 +89,7 @@ export default class GlideOutlinePlugin extends Plugin {
 				this.controller?.handleContextChange("mode-change");
 			}),
 		);
+		this.coldStart?.mark("eventsRegistered");
 
 		// Command names deliberately avoid the plugin name and the word
 		// "command" — Obsidian already prefixes them with "Glide Outline:".
@@ -168,13 +181,46 @@ export default class GlideOutlinePlugin extends Plugin {
 				return true;
 			},
 		});
+		// §八/§九: one-shot cold-start tracing. Arming persists a latch that
+		// the next onload consumes; the copy command reads back whatever the
+		// last consumed trace recorded.
+		this.addCommand({
+			id: "cold-start-arm",
+			name: "Arm cold-start performance capture for next reload",
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
+				void this.armColdStartCapture();
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "cold-start-copy",
+			name: "Copy latest cold-start performance report",
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
+				void this.copyColdStartReport();
+				return true;
+			},
+		});
+		this.coldStart?.mark("commandsRegistered");
 
-		this.app.workspace.onLayoutReady(() => this.lifecycle.start());
+		this.app.workspace.onLayoutReady(() => {
+			this.coldStart?.mark("layoutReady");
+			this.lifecycle.start();
+			// Begin the post-load frame watch only once the outline has had
+			// its first chance to mount.
+			this.coldStart?.beginSettleWatch();
+		});
+		this.coldStart?.mark("onloadEnd");
 	}
 
 	override onunload(): void {
 		// Never leave a longtask observer behind (section 3).
 		if (this.perf.active) this.perf.stop(window);
+		// §八: never leave the cold-start frame watch running.
+		this.coldStart?.dispose();
 		if (this.saveTimer !== 0) {
 			window.clearTimeout(this.saveTimer);
 			this.saveTimer = 0;
@@ -286,6 +332,47 @@ export default class GlideOutlinePlugin extends Plugin {
 		}
 		await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
 		new Notice("Glide Outline: performance report copied to clipboard.");
+	}
+
+	/**
+	 * §八: consume the one-shot cold-start latch. If the previous session
+	 * armed it, build the trace at the captured t0, record the first
+	 * milestone and clear the latch immediately (persisting the clear) so
+	 * the trace fires exactly once per arm — even if this onload throws
+	 * later. When the latch is unset this does nothing and `coldStart`
+	 * stays null, so an un-armed reload pays zero cost.
+	 */
+	private maybeArmColdStart(coldStartAt: number): void {
+		if (!this.settings.coldStartCaptureArmed) return;
+		this.coldStart = new ColdStartTrace(window, coldStartAt);
+		this.coldStart.mark("settingsLoaded");
+		this.settings.coldStartCaptureArmed = false;
+		void this.saveData(this.settings);
+	}
+
+	/** §八: arm the one-shot cold-start latch and persist it immediately. */
+	private async armColdStartCapture(): Promise<void> {
+		this.settings.coldStartCaptureArmed = true;
+		await this.saveData(this.settings);
+		new Notice(
+			"Glide Outline: cold-start capture armed. Reload Obsidian (or " +
+				"toggle the plugin off and on) to record the next startup, " +
+				"then run the copy command.",
+		);
+	}
+
+	/** §九: copy the latest consumed cold-start trace to the clipboard. */
+	private async copyColdStartReport(): Promise<void> {
+		if (!this.coldStart) {
+			new Notice(
+				"Glide Outline: no cold-start report. Arm the capture and " +
+					"reload first.",
+			);
+			return;
+		}
+		const report = this.coldStart.buildReport();
+		await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+		new Notice("Glide Outline: cold-start report copied to clipboard.");
 	}
 
 	/**

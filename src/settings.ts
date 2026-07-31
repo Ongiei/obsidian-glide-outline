@@ -112,6 +112,14 @@ export interface GlideOutlineSettings {
 	 * commands only add noise to the palette when they cannot help.
 	 */
 	developerMode: boolean;
+	/**
+	 * §八: one-shot latch for cold-start tracing. The "arm cold-start
+	 * capture" command sets it; the NEXT onload consumes it (builds a
+	 * ColdStartTrace at t0) and clears it again, so a cold start is traced
+	 * exactly once per arm. NOT a user-facing toggle — armed by command,
+	 * never rendered in the settings UI.
+	 */
+	coldStartCaptureArmed: boolean;
 }
 
 export const DEFAULT_CARD: LabelAppearanceSettings = {
@@ -148,6 +156,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	renderMarkdown: false,
 	card: { ...DEFAULT_CARD },
 	developerMode: false,
+	coldStartCaptureArmed: false,
 };
 
 export const RANGES = {
@@ -316,6 +325,10 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 		) as GlideOutlineSettings["showLevels"],
 		renderMarkdown: bool(data.renderMarkdown, DEFAULT_SETTINGS.renderMarkdown),
 		developerMode: bool(data.developerMode, DEFAULT_SETTINGS.developerMode),
+		coldStartCaptureArmed: bool(
+			data.coldStartCaptureArmed,
+			DEFAULT_SETTINGS.coldStartCaptureArmed,
+		),
 		// Legacy persisted fields `motionMode`, `animationEnabled`,
 		// `pointerAutoScrollStrength` (migrated above) and
 		// `card.textEffect` / `card.textShadow` are silently ignored.
