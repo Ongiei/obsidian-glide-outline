@@ -48,6 +48,37 @@ export const CARD_BORDER_WIDTH = 1;
 /** Width the H1–H6 badge (incl. its gap) adds to the card, px. */
 export const LEVEL_BADGE_ALLOWANCE = 26;
 
+/**
+ * §四: how the user is currently interacting with the outline.
+ *
+ * Only `collapsed` pre-positions the active heading; the three expanded
+ * variants mean the user (pointer hover, keyboard focus, or an in-flight
+ * press) is driving the outline, so automatic follow stands down and
+ * never fights them.
+ */
+export type OutlineInteractionState =
+	| "collapsed"
+	| "expanded-pointer"
+	| "expanded-keyboard"
+	| "pressed";
+
+/** §四: why an active-follow re-position was requested (for diagnostics). */
+export type ActiveFollowReason =
+	| "active-change"
+	| "items-change"
+	| "metrics-change"
+	| "resize"
+	| "collapse"
+	| "mode-change"
+	| "file-change";
+
+/**
+ * §四: a follow queued before the active row has been measured retries a
+ * bounded number of frames instead of dropping silently. A single measure
+ * pass takes one RAF, so a few frames is ample for geometry to settle.
+ */
+const ACTIVE_FOLLOW_RETRY_BUDGET = 3;
+
 export interface ItemRecord {
 	rowEl: HTMLElement;
 	buttonEl: HTMLButtonElement;
@@ -154,8 +185,27 @@ export class GlideOutlineView {
 	/** §八: last written `--glide-viewport-pad` value (px); NaN = never. */
 	private lastWrittenViewportPad = Number.NaN;
 	/** §十: set right before a programmatic reveal scroll, consumed by the
-	 * magnification controller's scroll handler for source attribution. */
-	private programmaticScrollNote: "jump" | null = null;
+	 * magnification controller's scroll handler for source attribution.
+	 * §四: widened to distinguish an active-follow reveal from a jump. */
+	private programmaticScrollNote: "jump" | "active-follow" | null = null;
+
+	/** §四: current interaction state; only `collapsed` pre-positions. */
+	private interactionState: OutlineInteractionState = "collapsed";
+	/** §四: rAF handle for the queued active-follow pass; 0 = none. */
+	private activeFollowFrame = 0;
+	/** §四: a follow request arrived while a frame was already in flight. */
+	private activeFollowPending = false;
+	/** §四: retry frames left while the active row is still unmeasured. */
+	private activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
+	/** §四: coalescing + outcome counters for tests and diagnostics. */
+	private readonly activeFollowDiag = {
+		requestCount: 0,
+		appliedCount: 0,
+		deferredCount: 0,
+		suppressedCount: 0,
+		coalescedCount: 0,
+		lastReason: "" as ActiveFollowReason | "",
+	};
 
 	constructor(
 		private readonly hostEl: HTMLElement,
@@ -268,6 +318,9 @@ export class GlideOutlineView {
 		// §五.1: rows came and went — the cached scroll height is a lie now.
 		this.invalidateOverflowMetrics();
 		this.scheduleMeasure();
+		// §四: the list changed, so the active row's offset moved. Re-center
+		// it (retries until the queued measure pass gives it a real height).
+		this.requestActiveFollow("items-change");
 	}
 
 	getItems(): readonly HeadingItem[] {
@@ -280,7 +333,16 @@ export class GlideOutlineView {
 	}
 
 	setActiveKey(key: string | null): void {
-		if (this.disposed || key === this.activeKey) return;
+		if (this.disposed) return;
+		// §四: the same-key case is NOT a no-op. The active heading can be
+		// unchanged while its row offset moved (file/mode swap, resize,
+		// re-measure). The class/aria toggles below are skipped — nothing
+		// changed there — but a re-position is still requested so a
+		// collapsed outline stays centred on the active row.
+		if (key === this.activeKey) {
+			this.requestActiveFollow("active-change");
+			return;
+		}
 		if (this.activeKey) {
 			const prev = this.itemRecords.get(this.activeKey);
 			prev?.buttonEl.classList.remove("is-active");
@@ -292,25 +354,37 @@ export class GlideOutlineView {
 			if (record) {
 				record.buttonEl.classList.add("is-active");
 				record.buttonEl.setAttribute("aria-current", "true");
-				// Keep the active heading visible inside the outline's own
-				// scroll viewport — but never fight the user's pointer.
-				if (this.followEnabled) {
-					this.scrollRowIntoView(record.rowEl);
-				}
 			}
 		}
+		// §四: keep the active heading positioned inside the outline's own
+		// scroll viewport — but only while collapsed, so the pointer/keyboard
+		// user is never fought (requestActiveFollow enforces that gate).
+		this.requestActiveFollow("active-change");
 	}
 
 	/**
 	 * While the pointer is inside the outline (or the user scrolls it),
-	 * automatic follow of the active heading is paused.
+	 * automatic follow of the active heading is paused. §四: this only
+	 * flips the flag now; positioning is driven by requestActiveFollow,
+	 * which is gated on both this flag and the collapsed interaction state.
 	 */
 	setFollowEnabled(enabled: boolean): void {
 		this.followEnabled = enabled;
-		if (enabled && this.activeKey) {
-			const record = this.itemRecords.get(this.activeKey);
-			if (record) this.scrollRowIntoView(record.rowEl);
-		}
+	}
+
+	/**
+	 * §四: record how the user is interacting with the outline. Pure
+	 * setter — the controller pairs a collapse transition with an explicit
+	 * requestActiveFollow, so this never schedules work on its own.
+	 */
+	setInteractionState(state: OutlineInteractionState): void {
+		if (this.disposed) return;
+		this.interactionState = state;
+	}
+
+	/** §四: current interaction state (diagnostics / tests). */
+	getInteractionState(): OutlineInteractionState {
+		return this.interactionState;
 	}
 
 	setExpanded(expanded: boolean): void {
@@ -402,7 +476,7 @@ export class GlideOutlineView {
 	 * (active-heading reveal). Cleared on read so a later user scroll is
 	 * never mis-attributed.
 	 */
-	takeProgrammaticScrollNote(): "jump" | null {
+	takeProgrammaticScrollNote(): "jump" | "active-follow" | null {
 		const note = this.programmaticScrollNote;
 		this.programmaticScrollNote = null;
 		return note;
@@ -421,6 +495,12 @@ export class GlideOutlineView {
 			this.doc.defaultView?.cancelAnimationFrame(this.pendingMeasureFrame);
 			this.pendingMeasureFrame = 0;
 		}
+		// §四: drop any queued active-follow pass too.
+		if (this.activeFollowFrame !== 0) {
+			this.doc.defaultView?.cancelAnimationFrame(this.activeFollowFrame);
+			this.activeFollowFrame = 0;
+		}
+		this.activeFollowPending = false;
 		this.metricsScheduled = false;
 		this.itemRecords.clear();
 		this.rootEl.remove();
@@ -628,6 +708,9 @@ export class GlideOutlineView {
 		// §五.1: a width change rewraps labels, so row heights (and with
 		// them the scroll height) can move.
 		this.invalidateOverflowMetrics();
+		// §四: a viewport-size change shifts the active row's centred
+		// position — re-request a follow (no-op unless collapsed).
+		this.requestActiveFollow("resize");
 	}
 
 	/** Coalesce measurement work into one pass per frame. */
@@ -719,16 +802,157 @@ export class GlideOutlineView {
 			this.updateOverflowState();
 		}
 
-		if (changed) this.handlers.onMetricsChanged?.();
+		if (changed) {
+			this.handlers.onMetricsChanged?.();
+			// §四: row heights moved, so the active row's centred position
+			// moved too. This is also the pass that satisfies a follow
+			// deferred by setItems (rows finally have a real height).
+			this.requestActiveFollow("metrics-change");
+		}
 	}
 
-	private scrollRowIntoView(rowEl: HTMLElement): void {
-		// §十: leave an attribution note BEFORE the scroll — scrollIntoView
-		// may dispatch the scroll event synchronously in some runtimes.
-		this.programmaticScrollNote = "jump";
-		// block: "nearest" keeps outline-internal scrolling minimal and never
-		// scrolls ancestor containers unexpectedly.
-		rowEl.scrollIntoView({ block: "nearest" });
+	/**
+	 * §四: request that the active heading be re-centred inside the outline
+	 * viewport. Coalesced into a single RAF; multiple reasons in one frame
+	 * collapse to one pass. A follow queued before the active row has a
+	 * measured height retries for a bounded number of frames.
+	 *
+	 * Only the collapsed interaction state pre-positions — while the user
+	 * hovers, focuses, or presses the outline, the request is refused so we
+	 * never yank the content out from under them.
+	 */
+	requestActiveFollow(reason: ActiveFollowReason): void {
+		if (this.disposed) return;
+		this.activeFollowDiag.requestCount++;
+		this.activeFollowDiag.lastReason = reason;
+		if (!this.followEnabled || this.interactionState !== "collapsed") {
+			this.activeFollowDiag.suppressedCount++;
+			return;
+		}
+		if (this.activeKey === null) return;
+		if (this.activeFollowFrame !== 0) {
+			// A frame is already queued — remember that a fresh reason
+			// arrived so it runs once more against the latest geometry.
+			this.activeFollowPending = true;
+			this.activeFollowDiag.coalescedCount++;
+			return;
+		}
+		this.scheduleActiveFollowFrame();
+	}
+
+	/** §四: coalescing + outcome counters for tests and diagnostics. */
+	getActiveFollowDiagnostics(): {
+		interactionState: OutlineInteractionState;
+		requestCount: number;
+		appliedCount: number;
+		deferredCount: number;
+		suppressedCount: number;
+		coalescedCount: number;
+		lastReason: ActiveFollowReason | "";
+	} {
+		return {
+			interactionState: this.interactionState,
+			requestCount: this.activeFollowDiag.requestCount,
+			appliedCount: this.activeFollowDiag.appliedCount,
+			deferredCount: this.activeFollowDiag.deferredCount,
+			suppressedCount: this.activeFollowDiag.suppressedCount,
+			coalescedCount: this.activeFollowDiag.coalescedCount,
+			lastReason: this.activeFollowDiag.lastReason,
+		};
+	}
+
+	private scheduleActiveFollowFrame(): void {
+		const win = this.doc.defaultView;
+		const run = (): void => {
+			this.activeFollowFrame = 0;
+			const hadPending = this.activeFollowPending;
+			this.activeFollowPending = false;
+			const applied = this.runActiveFollow();
+			// The gate may have closed (user grabbed the outline) between
+			// the request and this frame — stop and reset the budget.
+			if (!this.followEnabled || this.interactionState !== "collapsed") {
+				this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
+				return;
+			}
+			let reschedule = false;
+			// A fresh reason arrived mid-flight — honour the latest geometry.
+			if (hadPending) reschedule = true;
+			// Geometry was not ready — retry, bounded, until it is.
+			if (!applied && this.activeFollowRetryBudget > 0) {
+				this.activeFollowRetryBudget--;
+				reschedule = true;
+			}
+			if (applied) this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
+			if (reschedule) this.scheduleActiveFollowFrame();
+		};
+		if (win && typeof win.requestAnimationFrame === "function") {
+			this.activeFollowFrame = win.requestAnimationFrame(run);
+		} else {
+			run();
+		}
+	}
+
+	private runActiveFollow(): boolean {
+		const applied = this.scrollActiveRowIntoPosition({
+			alignment: "center",
+			behavior: "auto",
+			source: "active-follow",
+		});
+		if (applied) this.activeFollowDiag.appliedCount++;
+		else this.activeFollowDiag.deferredCount++;
+		return applied;
+	}
+
+	/**
+	 * §四: pure numeric re-position of the active row inside the outline
+	 * viewport. Deliberately NOT `Element.scrollIntoView` — that walks
+	 * ancestor scroll containers and (with `behavior:"smooth"`) animates,
+	 * both of which fight the outline's own motion. We compute the exact
+	 * `scrollTop` and clamp it to the scrollable range.
+	 *
+	 * Returns false when the active row has no measured height yet (never
+	 * laid out / display:none), so the caller can retry after a measure.
+	 */
+	scrollActiveRowIntoPosition(options: {
+		alignment: "center" | "nearest";
+		behavior: "auto";
+		source: "active-follow" | "jump";
+	}): boolean {
+		if (this.disposed || this.activeKey === null) return false;
+		const record = this.itemRecords.get(this.activeKey);
+		if (!record) return false;
+		const rowEl = record.rowEl;
+		const viewport = this.viewportEl;
+		const clientHeight = viewport.clientHeight;
+		const rowHeight = rowEl.offsetHeight;
+		// Not laid out yet — signal a retry rather than scrolling to 0.
+		if (!(clientHeight > 0) || !(rowHeight > 0)) return false;
+		const scrollHeight = viewport.scrollHeight;
+		const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+		const rowTop = rowEl.offsetTop;
+		let target: number;
+		if (options.alignment === "center") {
+			target = rowTop + rowHeight / 2 - clientHeight / 2;
+		} else {
+			const current = viewport.scrollTop;
+			const rowBottom = rowTop + rowHeight;
+			if (rowTop < current) {
+				target = rowTop;
+			} else if (rowBottom > current + clientHeight) {
+				target = rowBottom - clientHeight;
+			} else {
+				return true; // already fully visible
+			}
+		}
+		target = Math.max(0, Math.min(maxScrollTop, target));
+		if (target === viewport.scrollTop) return true; // already there
+		// §十: attribute the scroll BEFORE the write — the event may be
+		// delivered synchronously. active-follow reveals are their own
+		// source so the histogram never blames them on a user gesture.
+		this.programmaticScrollNote =
+			options.source === "active-follow" ? "active-follow" : "jump";
+		viewport.scrollTop = target;
+		return true;
 	}
 
 	private createItemRecord(item: HeadingItem): ItemRecord {

@@ -147,6 +147,7 @@ export type ScrollDeltaSource =
 	| "kinetic"
 	| "combined"
 	| "jump"
+	| "active-follow"
 	| "mount"
 	| "file-change"
 	| "mode-change"
