@@ -335,6 +335,9 @@ export class MagnificationController {
 	// --- Pointer Envelope (geometric hover maintenance) ----------------
 	/** Union of rail hit zone + active headings' marker/card/bridge rects. */
 	private envelope: PointerEnvelope = { railRect: emptyRect(), items: [] };
+	/** §六: row index span the cached envelope was collected for; -1 = none. */
+	private envelopeRangeStart = -1;
+	private envelopeRangeEnd = -1;
 	/** Rebuild the envelope during the next frame's READ phase. Only set
 	 * on real geometry changes (section 5) — never unconditionally. */
 	private envelopeDirty = true;
@@ -711,8 +714,9 @@ export class MagnificationController {
 		// outline was collapsed, or the pointer was outside the envelope)
 		// may wipe the velocity ring; clearing it on gap re-entry killed
 		// the very gesture the follow is supposed to continue.
+		const wasExpanded = this.pointerExpanded;
 		const freshGesture =
-			!this.pointerExpanded ||
+			!wasExpanded ||
 			(!this.pointer.overElement && !this.pointer.insideEnvelope);
 		this.cancelCollapse();
 		this.pointerExpanded = true;
@@ -722,7 +726,17 @@ export class MagnificationController {
 		// identical collapsed/expanded (the reveal animates opacity and a
 		// horizontal translate only). Card rects DO move horizontally, so
 		// the envelope is refreshed on demand; the row cache is not.
-		this.envelopeDirty = true;
+		//
+		// §六: and ONLY the expansion moves them. Re-entering from a gap
+		// while already expanded changes no geometry, yet this fired
+		// several times a second mid-flick and each one queued a forced
+		// layout for the next pointerleave to pay.
+		if (!wasExpanded) {
+			this.envelopeDirty = true;
+			this.perf?.count("envelopeEnterDirtyCount");
+		} else {
+			this.perf?.count("envelopeEnterReusedCount");
+		}
 		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
 		this.pendingAnchorTarget = event.target;
@@ -770,9 +784,13 @@ export class MagnificationController {
 	 * magnified neighbours, or the intra-row marker↔card gap) keep the
 	 * outline open but stop auto-scroll. Otherwise start the collapse grace.
 	 *
-	 * pointerleave is a DISCRETE event (not the per-move hot path), so a
-	 * synchronous envelope refresh here is acceptable and keeps the
-	 * collapse decision authoritative at the moment of exit.
+	 * §六: the decision must be authoritative at the moment of exit, but
+	 * "authoritative" does not mean "re-read layout". Motion is the only
+	 * thing that moves these rects between frames, and motion is pure
+	 * math on the row cache — so the warm path derives and reads nothing.
+	 * A synchronous rebuild is left ONLY for a structurally stale
+	 * envelope (rows or expansion changed), where the cached rects
+	 * describe a layout that no longer exists.
 	 */
 	private onPointerLeave = (event: PointerEvent): void => {
 		const related = event.relatedTarget;
@@ -780,6 +798,10 @@ export class MagnificationController {
 		if (this.envelopeDirty) {
 			this.activeRange = this.computeRange();
 			this.rebuildEnvelope();
+			this.perf?.count("envelopeSyncRebuildCount");
+		} else {
+			this.updateEnvelopeFromMotion();
+			this.perf?.count("envelopeDerivedLeaveCount");
 		}
 		if (
 			pointInEnvelope(
@@ -1206,6 +1228,8 @@ export class MagnificationController {
 			this.envelope = { railRect: emptyRect(), items: [] };
 			this.envelopeMotionShift.clear();
 			this.envelopeMotionScale.clear();
+			this.envelopeRangeStart = -1;
+			this.envelopeRangeEnd = -1;
 			this.activeRange = emptyActiveRange();
 			this.windowCheckPending = false;
 			this.lastMotionTime = Number.NaN;
@@ -1274,6 +1298,9 @@ export class MagnificationController {
 		const settings = this.getSettings();
 		// Envelope/compat window from cached numbers (pure, O(log n)).
 		this.activeRange = this.computeRange();
+		// §六: the range slides with the pointer. Cached rects stay valid
+		// for the rows they were collected for, and only for those.
+		if (!this.envelopeCoversActiveRange()) this.envelopeDirty = true;
 		// §十四 gating: a stale envelope is only rebuilt when a containment
 		// decision actually needs it (a deferred window check is pending).
 		// Motion keeps the cached rects fresh mathematically (see the write
@@ -2648,6 +2675,12 @@ export class MagnificationController {
 			start = 0;
 			end = this.view.getItems().length - 1;
 		}
+		// §六: remember what this envelope actually covers. Without it the
+		// cached rects silently stop describing the rows under the pointer
+		// as the active range slides, and a containment test on rows the
+		// envelope never held reads as "outside".
+		this.envelopeRangeStart = start;
+		this.envelopeRangeEnd = end;
 		this.envelope = this.view.collectEnvelope(
 			ENVELOPE_H_TOLERANCE,
 			ENVELOPE_V_TOLERANCE,
@@ -2675,6 +2708,20 @@ export class MagnificationController {
 		const rows = this.envelope.items.length;
 		this.perf?.addEnvelopeSample(rows);
 		this.perf?.count("markerCardRectReadCount", rows * 2);
+	}
+
+	/**
+	 * §六: does the cached envelope still span every row the active range
+	 * needs? An empty range asks for nothing and is always covered.
+	 */
+	private envelopeCoversActiveRange(): boolean {
+		const range = this.activeRange;
+		if (range.end < range.start) return true;
+		return (
+			this.envelopeRangeStart >= 0 &&
+			this.envelopeRangeStart <= range.start &&
+			this.envelopeRangeEnd >= range.end
+		);
 	}
 
 	/**

@@ -55,6 +55,15 @@ export interface PerfCounters {
 	/** Envelope rebuilds and the rows they touched. */
 	envelopeRebuildCount: number;
 	envelopeRowTotal: number;
+	/**
+	 * §六: how the envelope answered discrete pointer events. A gap
+	 * crossing must NOT show up as a synchronous rebuild — that is a
+	 * forced layout inside an input handler.
+	 */
+	envelopeEnterDirtyCount: number;
+	envelopeEnterReusedCount: number;
+	envelopeSyncRebuildCount: number;
+	envelopeDerivedLeaveCount: number;
 	/** Auto-scroll session lifecycle (§十八). */
 	autoScrollFrameCount: number;
 	autoScrollStartCount: number;
@@ -185,6 +194,10 @@ function zeroCounters(): PerfCounters {
 		cacheInvalidationCount: 0,
 		envelopeRebuildCount: 0,
 		envelopeRowTotal: 0,
+		envelopeEnterDirtyCount: 0,
+		envelopeEnterReusedCount: 0,
+		envelopeSyncRebuildCount: 0,
+		envelopeDerivedLeaveCount: 0,
 		autoScrollFrameCount: 0,
 		autoScrollStartCount: 0,
 		autoScrollStopCount: 0,
@@ -574,6 +587,8 @@ export interface PerfReport {
 		avgEnvelopeRows: number;
 		avgCssWritesPerFrame: number;
 		avgRectReadsPerFrame: number;
+		/** §六: pointerenters served from cached envelope geometry. */
+		envelopeEnterReuseShare: number;
 	};
 	/** §十八: auto-scroll session detail + config echo. */
 	autoScroll: {
@@ -1578,6 +1593,18 @@ export class PerfCapture {
 				avgCssWritesPerFrame: round2(c.cssVarWriteCount / frameDiv),
 				avgRectReadsPerFrame: round2(
 					(c.rowRectReadCount + c.markerCardRectReadCount) / frameDiv,
+				),
+				/**
+				 * §六: share of pointerenters that reused cached envelope
+				 * geometry. A rail glide should sit near 1 — every miss is
+				 * a forced layout queued inside an input handler.
+				 */
+				envelopeEnterReuseShare: round2(
+					c.envelopeEnterReusedCount + c.envelopeEnterDirtyCount > 0
+						? c.envelopeEnterReusedCount /
+								(c.envelopeEnterReusedCount +
+									c.envelopeEnterDirtyCount)
+						: 0,
 				),
 			},
 			autoScroll: {
