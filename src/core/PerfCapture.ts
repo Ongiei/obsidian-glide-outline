@@ -110,6 +110,17 @@ export interface PerfCounters {
 	collisionRangeExpansionCount: number;
 	collisionRangeExpansionRows: number;
 	boundarySafetyRetryCount: number;
+	// --- §七 Compositor layer budget ---
+	/**
+	 * Rows holding a GPU layer hint, summed per frame. Divided by the
+	 * layer sample count these become "how many standing layers does a
+	 * moving outline cost", which is the number Windows actually pays.
+	 */
+	promotedShiftLayerRows: number;
+	promotedScaleLayerRows: number;
+	/** Layer-class toggles written vs. skipped as no-ops. */
+	promotionClassMutationCount: number;
+	promotionClassSkippedCount: number;
 	// --- §六/§十四 Correctness diagnostics ---
 	visibleOverlapViolationCount: number;
 	maxVisibleOverlapPx: number;
@@ -226,6 +237,10 @@ function zeroCounters(): PerfCounters {
 		collisionRangeExpansionCount: 0,
 		collisionRangeExpansionRows: 0,
 		boundarySafetyRetryCount: 0,
+		promotedShiftLayerRows: 0,
+		promotedScaleLayerRows: 0,
+		promotionClassMutationCount: 0,
+		promotionClassSkippedCount: 0,
 		visibleOverlapViolationCount: 0,
 		maxVisibleOverlapPx: 0,
 		staleAnchorResetCount: 0,
@@ -613,6 +628,20 @@ export interface PerfReport {
 		collisionRangeExpansionRows: number;
 		boundarySafetyRetryCount: number;
 	};
+	/**
+	 * §七: compositor layer budget. The maxima must track the scale range,
+	 * NOT the visible range — if they grow with the window height the
+	 * promotion bound has regressed.
+	 */
+	layers: {
+		avgPromotedShiftLayers: number;
+		maxPromotedShiftLayers: number;
+		avgPromotedScaleLayers: number;
+		maxPromotedScaleLayers: number;
+		classMutationCount: number;
+		classSkippedCount: number;
+		classSkippedShare: number;
+	};
 	/** §六/§十四: overlap + scroll-anchor correctness diagnostics. */
 	correctness: {
 		visibleOverlapViolationCount: number;
@@ -793,6 +822,9 @@ export class PerfCapture {
 		this.maxScaleRangeRows = 0;
 		this.maxCollisionRangeRows = 0;
 		this.maxWriteRangeRows = 0;
+		this.layerSampleCount = 0;
+		this.maxPromotedShiftLayers = 0;
+		this.maxPromotedScaleLayers = 0;
 		this.edgeStopReasons = {};
 		this.kineticStopReasons = {};
 		this.edgeSampleSum = 0;
@@ -1096,6 +1128,32 @@ export class PerfCapture {
 		);
 		this.maxWriteRangeRows = Math.max(this.maxWriteRangeRows, writeRows);
 		this.rangeSampleCount++;
+	}
+
+	// --- §七 layer promotion sampling -------------------------------
+	private layerSampleCount = 0;
+	private maxPromotedShiftLayers = 0;
+	private maxPromotedScaleLayers = 0;
+
+	/**
+	 * §七: how many rows hold a GPU layer hint at the end of this frame.
+	 * The MAX is the interesting number — it is the peak the compositor
+	 * had to keep resident, and the one that should now be bounded by the
+	 * scale range rather than by how many rows happen to be visible.
+	 */
+	addLayerPromotionSample(shiftLayers: number, scaleLayers: number): void {
+		if (!this.active) return;
+		this.counters.promotedShiftLayerRows += shiftLayers;
+		this.counters.promotedScaleLayerRows += scaleLayers;
+		this.maxPromotedShiftLayers = Math.max(
+			this.maxPromotedShiftLayers,
+			shiftLayers,
+		);
+		this.maxPromotedScaleLayers = Math.max(
+			this.maxPromotedScaleLayers,
+			scaleLayers,
+		);
+		this.layerSampleCount++;
 	}
 
 	/** §四: one dynamic collision-boundary expansion (extra rows pulled in). */
@@ -1645,6 +1703,29 @@ export class PerfCapture {
 				collisionRangeExpansionCount: c.collisionRangeExpansionCount,
 				collisionRangeExpansionRows: c.collisionRangeExpansionRows,
 				boundarySafetyRetryCount: c.boundarySafetyRetryCount,
+			},
+			layers: {
+				avgPromotedShiftLayers: round2(
+					this.layerSampleCount > 0
+						? c.promotedShiftLayerRows / this.layerSampleCount
+						: 0,
+				),
+				maxPromotedShiftLayers: this.maxPromotedShiftLayers,
+				avgPromotedScaleLayers: round2(
+					this.layerSampleCount > 0
+						? c.promotedScaleLayerRows / this.layerSampleCount
+						: 0,
+				),
+				maxPromotedScaleLayers: this.maxPromotedScaleLayers,
+				classMutationCount: c.promotionClassMutationCount,
+				classSkippedCount: c.promotionClassSkippedCount,
+				classSkippedShare: round2(
+					c.promotionClassMutationCount + c.promotionClassSkippedCount > 0
+						? c.promotionClassSkippedCount /
+								(c.promotionClassMutationCount +
+									c.promotionClassSkippedCount)
+						: 0,
+				),
 			},
 			correctness: {
 				visibleOverlapViolationCount: c.visibleOverlapViolationCount,

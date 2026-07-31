@@ -122,6 +122,15 @@ export const AUTO_SCROLL_ACCEL = 1400;
  * solver target (see wasSnapped), so it never surfaces as a visible
  * overlap. */
 export const COLLISION_GUARD_ROWS = 2;
+/**
+ * §七: extra rows on each side of the SCALE range that may still take a
+ * GPU layer hint. The collision range spans the whole visible window, so
+ * promoting everything it touches would hand the compositor one layer
+ * per visible row for motion that is, past this guard, a sub-pixel taper
+ * settling home. Two rows cover the give-way neighbours that carry real
+ * displacement while the pointer sits between them.
+ */
+export const LAYER_PROMOTION_GUARD_ROWS = 2;
 /** §三/§十四: allowed adjacent overlap slack, px (rounding tolerance). */
 export const OVERLAP_TOLERANCE_PX = 1;
 /** §四/§六 handoff apron: when a layout has NO offscreen gap to relax
@@ -271,8 +280,9 @@ interface PressedHeadingState {
  *     a time-based exponential step, section 11); CSS transitions no
  *     longer drive the continuous transforms. CSS vars are written only
  *     past epsilon thresholds and only for rows that changed (section 14).
- *   - `will-change: transform` exists only on active-range rows and is
- *     removed on exit/convergence/collapse/dispose (section 15).
+ *   - `will-change: transform` exists only on unconverged rows inside the
+ *     SCALE range + a two-row guard (§七) — never on the far taper — and
+ *     is removed on exit/convergence/collapse/dispose (section 15).
  *
  * Coordinate system: viewport client coordinates for BOTH the pointer
  * (`event.clientY`) and cached item centers (`getBoundingClientRect()`).
@@ -1669,6 +1679,32 @@ export class MagnificationController {
 		let dirtyAdded = 0;
 		let dirtyRemoved = 0;
 		let identitySkipped = 0;
+		// §七 LAYER PROMOTION BUDGET. The collision range is Visible ∪
+		// Scale — i.e. essentially the whole on-screen list — and every
+		// row in it carries some displacement while the cascade settles.
+		// Promoting on displacement alone therefore scales the compositor
+		// layer count with the viewport, which is exactly the standing
+		// cost Windows cannot afford. Promotion is bounded to the rows
+		// whose motion is actually worth a layer: the scale range (the
+		// magnification disc) plus a two-row guard for the give-way
+		// neighbours. Rows outside it still animate — their transform is
+		// written exactly as before — they simply do it on the paint path.
+		const promotionEmpty = isEmptyActiveRange(this.scaleRange);
+		const pStart = promotionEmpty
+			? 0
+			: Math.max(0, this.scaleRange.start - LAYER_PROMOTION_GUARD_ROWS);
+		const pEnd = promotionEmpty
+			? -1
+			: Math.min(
+					rowCount - 1,
+					this.scaleRange.end + LAYER_PROMOTION_GUARD_ROWS,
+				);
+		// §七 layer telemetry, tallied as plain locals and flushed once
+		// after the loop — a counter call per row would itself be a cost.
+		let promotedShiftLayers = 0;
+		let promotedScaleLayers = 0;
+		let promotionMutations = 0;
+		let promotionSkips = 0;
 		for (const i of order) {
 			const entry = this.cache[i];
 			const state = entry.motion;
@@ -1703,10 +1739,12 @@ export class MagnificationController {
 					if (entry.shifting) {
 						entry.el.classList.remove(MOTION_SHIFT_CLASS);
 						entry.shifting = false;
+						promotionMutations++;
 					}
 					if (entry.scaling) {
 						entry.el.classList.remove(MOTION_SCALE_CLASS);
 						entry.scaling = false;
+						promotionMutations++;
 					}
 					entry.contentVisualCenter = entry.contentCenter;
 					this.shifts[i] = 0;
@@ -1727,22 +1765,35 @@ export class MagnificationController {
 				motionStateConverged(state) &&
 				state.targetScale === 1 &&
 				state.targetShift === 0;
+			// §七: outside the promotion band a row is never a layer,
+			// however far from identity it currently is.
+			const promotable = i >= pStart && i <= pEnd;
 			const shifting =
+				promotable &&
 				!atIdentity &&
 				(state.targetShift !== 0 ||
 					Math.abs(state.displayedShift) >= SHIFT_EPSILON);
 			const scaling =
+				promotable &&
 				!atIdentity &&
 				(state.targetScale !== 1 ||
 					Math.abs(state.displayedScale - 1) >= SCALE_EPSILON);
 			if (shifting !== entry.shifting) {
 				entry.el.classList.toggle(MOTION_SHIFT_CLASS, shifting);
 				entry.shifting = shifting;
+				promotionMutations++;
+			} else {
+				promotionSkips++;
 			}
 			if (scaling !== entry.scaling) {
 				entry.el.classList.toggle(MOTION_SCALE_CLASS, scaling);
 				entry.scaling = scaling;
+				promotionMutations++;
+			} else {
+				promotionSkips++;
 			}
+			if (shifting) promotedShiftLayers++;
+			if (scaling) promotedScaleLayers++;
 			// Keep the visual model in lockstep with what is on screen.
 			entry.contentVisualCenter =
 				entry.contentCenter + state.displayedShift;
@@ -1774,6 +1825,18 @@ export class MagnificationController {
 			const collisionRows = collisionEmpty ? 0 : cEnd - cStart + 1;
 			const writeRows = this.dirtyRows.size;
 			perf.addRangeSample(scaleRows, collisionRows, writeRows);
+			// §七: standing compositor layers this frame, and how much of
+			// the class work was avoided by remembering the last value.
+			perf.addLayerPromotionSample(
+				promotedShiftLayers,
+				promotedScaleLayers,
+			);
+			if (promotionMutations > 0) {
+				perf.count("promotionClassMutationCount", promotionMutations);
+			}
+			if (promotionSkips > 0) {
+				perf.count("promotionClassSkippedCount", promotionSkips);
+			}
 			// §九 sparse dirty-row telemetry: how many rows the next frame
 			// must revisit, how many were visited only to be skipped at
 			// identity, and how much the set churns frame over frame.

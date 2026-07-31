@@ -240,7 +240,13 @@
    row that only scales must not promote the whole motion span. The
    controller adds/removes these classes with epsilon thresholds and
    strips them at identity — a converged or out-of-range row never holds
-   a standing layer, so its text re-rasterizes crisply. */
+   a standing layer, so its text re-rasterizes crisply.
+
+   §七: "moving" is necessary but not sufficient. The collision cascade
+   reaches the whole visible window, so the controller also bounds these
+   classes to the scale range plus a two-row guard — the far taper
+   animates on the paint path rather than costing a resident layer per
+   visible row. */
 :where([data-glide-outline-owner]) .glide-outline-row--is-shifting .glide-outline-motion {
 	will-change: transform;
 }
