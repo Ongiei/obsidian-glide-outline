@@ -20,6 +20,24 @@ const FRAME_RING_CAPACITY = 5120;
  */
 const SUSPENDED_GAP_THRESHOLD_MS = 250;
 
+/**
+ * §三: capture depth.
+ *
+ * LIGHT is the default. It samples ONLY the mutually exclusive frame
+ * segments — six `performance.now()` reads per frame — so a capture can be
+ * left running during ordinary use without meaningfully distorting the very
+ * frame budget it is measuring.
+ *
+ * DEEP additionally samples the fine-grained sub-phases (auto-scroll math,
+ * scroll pipeline, anchor resolves). It exists to localise a cost once
+ * LIGHT has shown that a cost exists, and is EXPECTED to be more expensive;
+ * `capture.estimatedOverheadPerFrameMs` in the report quantifies how much.
+ */
+export type PerfCaptureMode = "light" | "deep";
+
+/** Iterations used to calibrate the telemetry cost model once, on start. */
+const CALIBRATION_ITERATIONS = 128;
+
 /** Counter keys — one increment site per hot-path event. */
 export interface PerfCounters {
 	rafCount: number;
@@ -124,6 +142,22 @@ export interface PerfCounters {
 	identityRowsSkipped: number;
 	dirtyRowsAdded: number;
 	dirtyRowsRemoved: number;
+	// --- §三 capture self-diagnostics (the observer effect, measured) ---
+	/**
+	 * `performance.now()` reads made ON BEHALF OF the capture. Every
+	 * timestamp handed to `markPhase`/`endFrameAttribution` counts one.
+	 * LIGHT must stay at ~6 per frame; DEEP is expected to be higher.
+	 */
+	performanceNowCallCount: number;
+	/** Phase samples actually stored (LIGHT gates the deep ones out). */
+	sampledPhaseCount: number;
+	/** Phase marks whose slice was dropped because the phase is gated off. */
+	skippedPhaseSampleCount: number;
+	/** Auto-scroll config echoes written vs skipped as unchanged. */
+	configEchoUpdateCount: number;
+	configEchoSkippedCount: number;
+	/** Pointer-follow gauge refreshes (in place — never an allocation). */
+	pointerEchoUpdateCount: number;
 }
 
 function zeroCounters(): PerfCounters {
@@ -195,6 +229,12 @@ function zeroCounters(): PerfCounters {
 		identityRowsSkipped: 0,
 		dirtyRowsAdded: 0,
 		dirtyRowsRemoved: 0,
+		performanceNowCallCount: 0,
+		sampledPhaseCount: 0,
+		skippedPhaseSampleCount: 0,
+		configEchoUpdateCount: 0,
+		configEchoSkippedCount: 0,
+		pointerEchoUpdateCount: 0,
 	};
 }
 
@@ -206,6 +246,13 @@ function zeroCounters(): PerfCounters {
 export type PluginPhase =
 	| "pluginFrameJs"
 	| "read"
+	/**
+	 * §四: pure math between the READ and WRITE phases minus the solver
+	 * (anchor resolve, motion step inputs, the three ranges, the taper).
+	 */
+	| "pureCalc"
+	/** §四: the collision solver call itself. */
+	| "collisionSolve"
 	| "styleWrite"
 	| "envelopeMotionUpdate"
 	/**
@@ -214,6 +261,19 @@ export type PluginPhase =
 	 * sub-phases below are what actually localise the cost.
 	 */
 	| "autoScroll"
+	/**
+	 * §四: `pluginFrameJs` minus the six exclusive segments. This is the
+	 * glue — RAF entry, the capture's own bookkeeping, anything not yet
+	 * attributed. A LIGHT capture should keep it small; if it grows, the
+	 * segments no longer tile the frame and the model needs another mark.
+	 */
+	| "unattributedFrameJs"
+	/**
+	 * §三: MODELLED cost of the capture itself this frame (now() reads and
+	 * stored samples × their calibrated unit costs). Not wall-clock — a
+	 * measurement of the measurement cannot be free.
+	 */
+	| "telemetryBookkeeping"
 	// --- §四.1 auto-scroll sub-phases ---
 	/** Deciding whether this frame is allowed to auto-scroll at all. */
 	| "scrollEligibility"
@@ -241,9 +301,13 @@ export type PluginPhase =
 const PLUGIN_PHASES: readonly PluginPhase[] = [
 	"pluginFrameJs",
 	"read",
+	"pureCalc",
+	"collisionSolve",
 	"styleWrite",
 	"envelopeMotionUpdate",
 	"autoScroll",
+	"unattributedFrameJs",
+	"telemetryBookkeeping",
 	"scrollEligibility",
 	"edgeIntentMath",
 	"kineticIntentMath",
@@ -256,6 +320,34 @@ const PLUGIN_PHASES: readonly PluginPhase[] = [
 	"scrollEnvelopeUpdate",
 	"scrollFrameReschedule",
 ];
+
+/**
+ * §四: the segments that TILE one frame. Each wall-clock slice belongs to
+ * exactly one of them, so `Σ exclusive + unattributedFrameJs === pluginFrameJs`
+ * by construction. Deep sub-phases are NESTED inside these (they measure the
+ * same wall clock again at finer grain) and therefore never join this sum.
+ */
+const EXCLUSIVE_PHASES: readonly PluginPhase[] = [
+	"read",
+	"pureCalc",
+	"collisionSolve",
+	"styleWrite",
+	"envelopeMotionUpdate",
+	"autoScroll",
+];
+
+/** Phases sampled in BOTH modes — the frame-level skeleton. */
+const LIGHT_PHASES: ReadonlySet<PluginPhase> = new Set<PluginPhase>([
+	...EXCLUSIVE_PHASES,
+	"pluginFrameJs",
+	"unattributedFrameJs",
+	"telemetryBookkeeping",
+]);
+
+/** Phase → slot in the per-frame exclusive accumulator. */
+const PHASE_SLOT: ReadonlyMap<PluginPhase, number> = new Map(
+	PLUGIN_PHASES.map((phase, index) => [phase, index] as const),
+);
 
 /** Per-phase ring capacity (~17 s of frames at 60 fps — enough for p95). */
 const PHASE_RING_CAPACITY = 1024;
@@ -324,9 +416,36 @@ export interface PointerFollowEcho {
 	pointerSampleCount: number;
 }
 
+/**
+ * §三: what the capture cost, in the capture's own words. Read this FIRST
+ * when comparing two reports — a DEEP report is not comparable to a LIGHT
+ * one until this block is accounted for.
+ */
+export interface CaptureOverheadReport {
+	mode: PerfCaptureMode;
+	/** True when the fine-grained sub-phases were sampled. */
+	deepPhaseSampling: boolean;
+	performanceNowCallCount: number;
+	sampledPhaseCount: number;
+	skippedPhaseSampleCount: number;
+	configEchoUpdateCount: number;
+	configEchoSkippedCount: number;
+	pointerEchoUpdateCount: number;
+	/** now() reads per RAF frame — the headline light-vs-deep number. */
+	nowCallsPerFrame: number;
+	/** Modelled totals from the calibrated unit costs (see below). */
+	estimatedOverheadMs: number;
+	estimatedOverheadPerFrameMs: number;
+	/** Unit costs measured once, at capture start (microseconds). */
+	nowCallCostUs: number;
+	phaseSampleCostUs: number;
+}
+
 export interface PerfReport {
 	capturedAt: string;
 	captureDurationMs: number;
+	/** §三: the observer effect, measured. */
+	capture: CaptureOverheadReport;
 	frames: {
 		count: number;
 		intervalAvgMs: number;
@@ -436,6 +555,14 @@ interface LongTaskEntryLike {
 export class PerfCapture {
 	/** Hot-path guard — read directly (cheaper than a method call). */
 	active = false;
+	/**
+	 * §三 hot-path guard for the FINE-GRAINED samples: `active && deep`,
+	 * precomputed so a sub-phase site is one boolean read, not a string
+	 * comparison. Sites that time a sub-phase MUST check this before they
+	 * read `performance.now()` — that read is the cost being avoided.
+	 */
+	deepActive = false;
+	private mode: PerfCaptureMode = "light";
 
 	private counters: PerfCounters = zeroCounters();
 	private readonly intervals = new Float64Array(FRAME_RING_CAPACITY);
@@ -465,10 +592,34 @@ export class PerfCapture {
 	private anchorResolveCount = 0;
 	/** §四.2: per-phase duration accumulators (allocated on start). */
 	private phases = new Map<PluginPhase, PhaseAccumulator>();
+	// --- §四 per-frame exclusive attribution cursor -------------------
+	/** Start of the segment currently open (NaN outside a frame). */
+	private segmentOpenAt = Number.NaN;
+	/** Frame start, for the pluginFrameJs total. */
+	private frameOpenAt = Number.NaN;
+	/** Per-frame totals per phase slot — flushed once, at frame end. */
+	private readonly frameTotals = new Float64Array(PLUGIN_PHASES.length);
+	/** Slots touched this frame (avoids scanning all phases at flush). */
+	private readonly frameTouched: number[] = [];
+	/** §三 calibrated unit costs of the telemetry itself (ms). */
+	private nowCallCostMs = 0;
+	private phaseSampleCostMs = 0;
+	/** Sink that keeps the calibration loop from being optimised away. */
+	private calibrationSink = 0;
+	/** §三 per-frame telemetry counts, for the modelled overhead phase. */
+	private frameNowCalls = 0;
+	private frameSamples = 0;
 
-	/** Begin a capture; resets all previous data. Idempotent. */
-	start(win: Window & typeof globalThis): void {
+	/**
+	 * Begin a capture; resets all previous data. Idempotent.
+	 *
+	 * `mode` defaults to LIGHT deliberately: the cheap capture is the one
+	 * that should be reached for by default, and the expensive one has to
+	 * be asked for by name.
+	 */
+	start(win: Window & typeof globalThis, mode: PerfCaptureMode = "light"): void {
 		if (this.active) return;
+		this.mode = mode;
 		this.counters = zeroCounters();
 		this.ringLength = 0;
 		this.ringNext = 0;
@@ -504,10 +655,48 @@ export class PerfCapture {
 		this.pointerFollowEcho = null;
 		this.anchorResolveCount = 0;
 		this.phases = new Map();
+		this.segmentOpenAt = Number.NaN;
+		this.frameOpenAt = Number.NaN;
+		this.frameTotals.fill(0);
+		this.frameTouched.length = 0;
+		this.frameNowCalls = 0;
+		this.frameSamples = 0;
+		this.calibrateTelemetryCost(win);
 		this.startedAt = win.performance.now();
 		this.active = true;
+		this.deepActive = mode === "deep";
 		this.observeLongTasks(win);
 		this.observeSuspension(win);
+	}
+
+	/**
+	 * §三: measure the two unit costs the overhead model is built on — one
+	 * `performance.now()` read and one stored phase sample. Runs ONCE per
+	 * capture, before `active` is set, so it can never contaminate a
+	 * sample. On a clock without real resolution (test stubs) both costs
+	 * come out 0 and the modelled overhead is simply 0.
+	 */
+	private calibrateTelemetryCost(win: Window & typeof globalThis): void {
+		this.nowCallCostMs = 0;
+		this.phaseSampleCostMs = 0;
+		const clock = (win as { performance?: { now?: () => number } }).performance;
+		if (typeof clock?.now !== "function") return;
+		const now = clock.now.bind(clock);
+		let sink = 0;
+		const nowStart = now();
+		for (let i = 0; i < CALIBRATION_ITERATIONS; i++) sink += now();
+		const nowEnd = now();
+		const probe = new PhaseAccumulator();
+		const sampleStart = now();
+		for (let i = 0; i < CALIBRATION_ITERATIONS; i++) probe.add(0.01);
+		const sampleEnd = now();
+		this.calibrationSink = sink + probe.totalMs;
+		const nowCost = (nowEnd - nowStart) / CALIBRATION_ITERATIONS;
+		const sampleCost = (sampleEnd - sampleStart) / CALIBRATION_ITERATIONS;
+		if (Number.isFinite(nowCost) && nowCost > 0) this.nowCallCostMs = nowCost;
+		if (Number.isFinite(sampleCost) && sampleCost > 0) {
+			this.phaseSampleCostMs = sampleCost;
+		}
 	}
 
 	/**
@@ -518,6 +707,7 @@ export class PerfCapture {
 	stop(win: Window & typeof globalThis): PerfReport | null {
 		if (!this.active) return null;
 		this.active = false;
+		this.deepActive = false;
 		this.longTaskObserver?.disconnect();
 		this.longTaskObserver = null;
 		this.removeSuspensionListeners?.();
@@ -597,10 +787,43 @@ export class PerfCapture {
 		this.autoScrollSampleCount++;
 	}
 
-	/** §十八: echo the effective auto-scroll configuration (last wins). */
-	setAutoScrollConfig(config: AutoScrollConfigEcho): void {
+	/**
+	 * §十八/§三: echo the effective auto-scroll configuration.
+	 *
+	 * Primitive arguments on purpose — the caller runs this EVERY frame, and
+	 * an object literal per frame is an allocation the capture would be
+	 * inflicting on the very loop it measures. The values are compared
+	 * field by field and only a real change is stored, so a steady capture
+	 * writes this exactly once.
+	 */
+	setAutoScrollConfig(
+		configuredSpeed: number,
+		configuredTriggerArea: number,
+		computedPreZone: number,
+		computedStrongZone: number,
+		hysteresisPx: number,
+	): void {
 		if (!this.active) return;
-		this.autoScrollConfig = config;
+		const prev = this.autoScrollConfig;
+		if (
+			prev !== null &&
+			prev.configuredSpeed === configuredSpeed &&
+			prev.configuredTriggerArea === configuredTriggerArea &&
+			prev.computedPreZone === computedPreZone &&
+			prev.computedStrongZone === computedStrongZone &&
+			prev.hysteresisPx === hysteresisPx
+		) {
+			this.counters.configEchoSkippedCount++;
+			return;
+		}
+		this.autoScrollConfig = {
+			configuredSpeed,
+			configuredTriggerArea,
+			computedPreZone,
+			computedStrongZone,
+			hysteresisPx,
+		};
+		this.counters.configEchoUpdateCount++;
 	}
 
 	// --- §四/§十四 range sampling ------------------------------------
@@ -725,10 +948,49 @@ export class PerfCapture {
 		this.count("gapAnchorResolveCount");
 	}
 
-	/** §十.1: overwrite the pointer-follow gauges (last write wins). */
-	setPointerFollowEcho(echo: PointerFollowEcho): void {
+	/**
+	 * §十.1/§三: refresh the pointer-follow gauges (last write wins).
+	 *
+	 * Written IN PLACE into one object allocated on first use. The old
+	 * signature took an object literal, so a running capture allocated a
+	 * fresh record every frame inside the loop it was measuring — that
+	 * allocation, not the seven field writes, was the actual cost.
+	 *
+	 * A time throttle was considered and rejected: once the allocation is
+	 * gone the throttle's own branch costs about as much as the writes it
+	 * skips, and it would make the reported gauges up to a throttle period
+	 * stale — these values exist precisely to show the LAST state of a
+	 * gesture on a machine we cannot debug interactively.
+	 */
+	setPointerFollowEcho(
+		pointerFollowStrength: number,
+		edgeMaxSpeed: number,
+		kineticMaxSpeed: number,
+		combinedMaxSpeed: number,
+		currentPointerVelocityY: number,
+		predictedPointerY: number,
+		pointerSampleCount: number,
+	): void {
 		if (!this.active) return;
-		this.pointerFollowEcho = echo;
+		const echo =
+			this.pointerFollowEcho ??
+			(this.pointerFollowEcho = {
+				pointerFollowStrength: 0,
+				edgeMaxSpeed: 0,
+				kineticMaxSpeed: 0,
+				combinedMaxSpeed: 0,
+				currentPointerVelocityY: 0,
+				predictedPointerY: 0,
+				pointerSampleCount: 0,
+			});
+		echo.pointerFollowStrength = pointerFollowStrength;
+		echo.edgeMaxSpeed = edgeMaxSpeed;
+		echo.kineticMaxSpeed = kineticMaxSpeed;
+		echo.combinedMaxSpeed = combinedMaxSpeed;
+		echo.currentPointerVelocityY = currentPointerVelocityY;
+		echo.predictedPointerY = predictedPointerY;
+		echo.pointerSampleCount = pointerSampleCount;
+		this.counters.pointerEchoUpdateCount++;
 	}
 
 	/**
@@ -803,16 +1065,153 @@ export class PerfCapture {
 		this.counters.dirtyRowsRemoved += removed;
 	}
 
-	/** §四.2: one plugin phase duration sample (ms). Ring-buffered. */
+	/**
+	 * §四.2: one plugin phase duration sample (ms). Ring-buffered.
+	 *
+	 * Used directly for NESTED (deep) samples, which deliberately re-measure
+	 * wall clock already owned by an exclusive segment. Exclusive segments
+	 * go through `markPhase` instead.
+	 *
+	 * CONTRACT: a nested sample comes from a dedicated start/stop clock
+	 * pair, so calling this books TWO `performance.now()` reads against the
+	 * capture's own overhead. That is the honest price of DEEP mode and the
+	 * reason it is not the default.
+	 */
 	addPhaseSample(phase: PluginPhase, durationMs: number): void {
 		if (!this.active) return;
+		this.counters.performanceNowCallCount += 2;
+		this.frameNowCalls += 2;
 		if (!Number.isFinite(durationMs) || durationMs < 0) return;
+		if (!this.shouldSample(phase)) {
+			this.counters.skippedPhaseSampleCount++;
+			return;
+		}
+		this.storeSample(phase, durationMs);
+	}
+
+	/** §三: is this phase sampled in the current mode? */
+	private shouldSample(phase: PluginPhase): boolean {
+		return this.mode === "deep" || LIGHT_PHASES.has(phase);
+	}
+
+	private storeSample(phase: PluginPhase, durationMs: number): void {
 		let acc = this.phases.get(phase);
 		if (!acc) {
 			acc = new PhaseAccumulator();
 			this.phases.set(phase, acc);
 		}
 		acc.add(durationMs);
+		this.counters.sampledPhaseCount++;
+		this.frameSamples++;
+	}
+
+	// --- §四 mutually exclusive frame attribution ---------------------
+
+	/**
+	 * §四: open a frame's attribution timeline. `now` is the RAF timestamp,
+	 * which is free — the caller does NOT read the clock for this.
+	 */
+	beginFrameAttribution(now: number): void {
+		if (!this.active) return;
+		this.frameOpenAt = now;
+		this.segmentOpenAt = now;
+		this.counters.performanceNowCallCount++;
+		this.frameNowCalls = 1;
+		this.frameSamples = 0;
+	}
+
+	/**
+	 * §四: close the open segment at `now`, attribute it to `phase`, and
+	 * open the next one. Exactly ONE clock read per boundary — n phases
+	 * cost n+0 reads instead of the 2n a start/stop pair per phase needs.
+	 *
+	 * Repeated marks of the same phase within a frame accumulate; the
+	 * per-frame total is stored once, by `endFrameAttribution`, so phase
+	 * stats stay per-frame rather than per-segment.
+	 *
+	 * Marking `"unattributedFrameJs"` is the deliberate "this slice belongs
+	 * to nobody" move (used for the capture's own diagnostic passes); the
+	 * reconciliation still holds because the remainder is folded into the
+	 * same bucket.
+	 */
+	markPhase(phase: PluginPhase, now: number): void {
+		if (!this.active) return;
+		this.counters.performanceNowCallCount++;
+		this.frameNowCalls++;
+		const openedAt = this.segmentOpenAt;
+		this.segmentOpenAt = now;
+		if (!Number.isFinite(openedAt)) return;
+		const durationMs = now - openedAt;
+		if (!Number.isFinite(durationMs) || durationMs < 0) return;
+		if (!this.shouldSample(phase)) {
+			this.counters.skippedPhaseSampleCount++;
+			return;
+		}
+		const slot = PHASE_SLOT.get(phase);
+		if (slot === undefined) return;
+		if (this.frameTotals[slot] === 0) this.frameTouched.push(slot);
+		this.frameTotals[slot] += durationMs;
+	}
+
+	/**
+	 * §四: close the frame. Flushes the per-frame exclusive totals, records
+	 * `pluginFrameJs`, and books the remainder as `unattributedFrameJs` so
+	 * the two always reconcile. `now` must be the SAME timestamp used for
+	 * the final `markPhase` — no extra clock read here.
+	 */
+	endFrameAttribution(now: number): void {
+		if (!this.active) return;
+		const openedAt = this.frameOpenAt;
+		this.frameOpenAt = Number.NaN;
+		this.segmentOpenAt = Number.NaN;
+		let attributed = 0;
+		for (const slot of this.frameTouched) attributed += this.frameTotals[slot];
+		const totalMs = Number.isFinite(openedAt) ? now - openedAt : Number.NaN;
+		const frameValid = Number.isFinite(totalMs) && totalMs >= 0;
+		if (frameValid) {
+			// Fold the remainder into the same bucket explicit "nobody's
+			// slice" marks use, so the report never shows the phase twice.
+			const remainder = totalMs - attributed;
+			if (remainder > 0) {
+				const slot = PHASE_SLOT.get("unattributedFrameJs");
+				if (slot !== undefined) {
+					if (this.frameTotals[slot] === 0) this.frameTouched.push(slot);
+					this.frameTotals[slot] += remainder;
+				}
+			}
+		}
+		for (const slot of this.frameTouched) {
+			const total = this.frameTotals[slot];
+			this.frameTotals[slot] = 0;
+			if (total > 0) this.storeSample(PLUGIN_PHASES[slot], total);
+		}
+		this.frameTouched.length = 0;
+		if (frameValid) this.storeSample("pluginFrameJs", totalMs);
+		// §三: model this frame's telemetry cost from the calibrated unit
+		// costs. Counting the flush's own samples would need another clock
+		// read, which is exactly the cost we refuse to pay.
+		if (this.nowCallCostMs > 0 || this.phaseSampleCostMs > 0) {
+			const modelled =
+				this.frameNowCalls * this.nowCallCostMs +
+				this.frameSamples * this.phaseSampleCostMs;
+			if (modelled > 0) this.storeSample("telemetryBookkeeping", modelled);
+		}
+		this.frameNowCalls = 0;
+		this.frameSamples = 0;
+	}
+
+	/**
+	 * §四: abandon the open frame without flushing (early return before any
+	 * segment was marked). Keeps a partial frame from leaking into the next.
+	 */
+	discardFrameAttribution(): void {
+		if (!this.active) return;
+		for (const slot of this.frameTouched) this.frameTotals[slot] = 0;
+		this.frameTouched.length = 0;
+		this.frameOpenAt = Number.NaN;
+		this.segmentOpenAt = Number.NaN;
+		this.frameNowCalls = 0;
+		this.frameSamples = 0;
 	}
 
 	/**
@@ -887,9 +1286,27 @@ export class PerfCapture {
 		const p95 = n > 0 ? sorted[Math.min(n - 1, Math.floor(n * 0.95))] : 0;
 		const c = this.counters;
 		const frameDiv = Math.max(1, c.rafCount);
+		const estimatedOverheadMs =
+			c.performanceNowCallCount * this.nowCallCostMs +
+			c.sampledPhaseCount * this.phaseSampleCostMs;
 		return {
 			capturedAt: new Date().toISOString(),
 			captureDurationMs: round2(durationMs),
+			capture: {
+				mode: this.mode,
+				deepPhaseSampling: this.mode === "deep",
+				performanceNowCallCount: c.performanceNowCallCount,
+				sampledPhaseCount: c.sampledPhaseCount,
+				skippedPhaseSampleCount: c.skippedPhaseSampleCount,
+				configEchoUpdateCount: c.configEchoUpdateCount,
+				configEchoSkippedCount: c.configEchoSkippedCount,
+				pointerEchoUpdateCount: c.pointerEchoUpdateCount,
+				nowCallsPerFrame: round2(c.performanceNowCallCount / frameDiv),
+				estimatedOverheadMs: round4(estimatedOverheadMs),
+				estimatedOverheadPerFrameMs: round4(estimatedOverheadMs / frameDiv),
+				nowCallCostUs: round4(this.nowCallCostMs * 1000),
+				phaseSampleCostUs: round4(this.phaseSampleCostMs * 1000),
+			},
 			frames: {
 				count: n,
 				intervalAvgMs: round2(n > 0 ? sum / n : 0),
@@ -1055,4 +1472,9 @@ export class PerfCapture {
 
 function round2(value: number): number {
 	return Math.round(value * 100) / 100;
+}
+
+/** Sub-microsecond values (telemetry unit costs) need more digits. */
+function round4(value: number): number {
+	return Math.round(value * 10000) / 10000;
 }

@@ -5,6 +5,9 @@
  * auto-scroll is running must show non-zero counts, and the counters must
  * classify frames/writes truthfully. 0.1.4 shipped the fields with no
  * call sites, so every value was silently 0.
+ *
+ * 0.1.6 (§三): these sub-phases are DEEP-mode samples — a light capture is
+ * deliberately blind to them — so every capture here asks for "deep".
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PerfCapture } from "../src/core/PerfCapture";
@@ -173,7 +176,7 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 	});
 
 	it("records the auto-scroll sub-phases and mode counters during an edge scroll capture", () => {
-		perf.start(window);
+		perf.start(window, "deep");
 		pointer("pointerenter", 495);
 		pointer("pointermove", 495);
 		runScrollFrames();
@@ -204,7 +207,7 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 	});
 
 	it("records scrollEventHandler / scrollOffsetUpdate / scrollFrameReschedule for an async scroll event", () => {
-		perf.start(window);
+		perf.start(window, "deep");
 		view.viewportEl.scrollTop = 260; // plain value stub — no dispatch
 		view.viewportEl.dispatchEvent(new Event("scroll"));
 		const report = perf.stop(window)!;
@@ -223,7 +226,7 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 			clamp: true,
 			syncDispatch: true,
 		});
-		perf.start(window);
+		perf.start(window, "deep");
 		pointer("pointerenter", 495);
 		pointer("pointermove", 495);
 		runScrollFrames();
@@ -243,7 +246,7 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 		pointer("pointerenter", 300);
 		pointer("pointermove", 300);
 		flushFrame(); // builds the cache (cacheDirty → false)
-		perf.start(window);
+		perf.start(window, "deep");
 		view.viewportEl.scrollTop = 300;
 		view.viewportEl.dispatchEvent(new Event("scroll")); // delta ≠ 0
 		vi.advanceTimersByTime(16);
@@ -264,7 +267,7 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 			syncDispatch: false,
 		});
 		view.updateOverflowState();
-		perf.start(window);
+		perf.start(window, "deep");
 		pointer("pointerenter", 495);
 		pointer("pointermove", 495);
 		runScrollFrames();
@@ -281,7 +284,7 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 		pointer("pointermove", 495);
 		runScrollFrames();
 		// …must not leak into a capture that starts afterwards.
-		perf.start(window);
+		perf.start(window, "deep");
 		const report = perf.stop(window)!;
 		expect(report.pluginPhases.scrollEligibility.count).toBe(0);
 		expect(report.pluginPhases.scrollTopWrite.count).toBe(0);
@@ -294,7 +297,7 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 		pointer("pointerenter", 300);
 		pointer("pointermove", 300);
 		flushFrame(); // caches viewport bounds for wheel routing
-		perf.start(window);
+		perf.start(window, "deep");
 		view.hitZoneEl.dispatchEvent(
 			new WheelEvent("wheel", {
 				deltaY: 60,
