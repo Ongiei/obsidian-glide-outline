@@ -105,6 +105,13 @@ export interface GlideOutlineSettings {
 	/** Render inline Markdown (bold, code, links…) inside labels. */
 	renderMarkdown: boolean;
 	card: LabelAppearanceSettings;
+	/**
+	 * §六: reveal the performance-capture and cold-start diagnostic
+	 * commands in the command palette. Off by default — these tools exist
+	 * to triage a specific machine, not for everyday use, and their
+	 * commands only add noise to the palette when they cannot help.
+	 */
+	developerMode: boolean;
 }
 
 export const DEFAULT_CARD: LabelAppearanceSettings = {
@@ -140,6 +147,7 @@ export const DEFAULT_SETTINGS: GlideOutlineSettings = {
 	showLevels: [true, true, true, true, true, true],
 	renderMarkdown: false,
 	card: { ...DEFAULT_CARD },
+	developerMode: false,
 };
 
 export const RANGES = {
@@ -307,6 +315,7 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 			typeof levels[i] === "boolean" ? (levels[i] as boolean) : true,
 		) as GlideOutlineSettings["showLevels"],
 		renderMarkdown: bool(data.renderMarkdown, DEFAULT_SETTINGS.renderMarkdown),
+		developerMode: bool(data.developerMode, DEFAULT_SETTINGS.developerMode),
 		// Legacy persisted fields `motionMode`, `animationEnabled`,
 		// `pointerAutoScrollStrength` (migrated above) and
 		// `card.textEffect` / `card.textShadow` are silently ignored.
@@ -920,6 +929,18 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 
 	private renderAdvanced(containerEl: HTMLElement): void {
 		const s = this.plugin.settings;
+
+		new Setting(containerEl)
+			.setName("Developer mode")
+			.setDesc(
+				"Reveal the performance-capture and cold-start tracing commands in the command palette. Leave off for everyday use; turning it off also stops and discards any capture already running.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(s.developerMode).onChange(async (value) => {
+					s.developerMode = value;
+					await this.plugin.applySettings();
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName("Level indentation (legacy)")

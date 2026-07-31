@@ -117,28 +117,37 @@ export default class GlideOutlinePlugin extends Plugin {
 		// the sub-phase breakdown and is only worth its own cost once LIGHT
 		// has shown WHERE to look; every report states which mode produced
 		// it and what that mode cost.
+		// §七: the performance-capture and cold-start commands are gated
+		// behind developer mode via checkCallback — hidden from the palette
+		// entirely when the setting is off. `copy-diagnostics` above stays
+		// ungated: it is end-user triage, not a developer tool.
 		this.addCommand({
 			id: "perf-capture-start",
 			name: "Start Glide Outline performance capture (light)",
-			callback: () => {
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
 				if (this.perf.active) {
 					new Notice("Glide Outline: capture already running.");
-					return;
+					return true;
 				}
 				this.perf.start(window, "light");
 				new Notice(
 					"Glide Outline: light performance capture started. " +
 						"Interact with the outline, then run the stop command.",
 				);
+				return true;
 			},
 		});
 		this.addCommand({
 			id: "perf-capture-start-deep",
 			name: "Start Glide Outline performance capture (deep)",
-			callback: () => {
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
 				if (this.perf.active) {
 					new Notice("Glide Outline: capture already running.");
-					return;
+					return true;
 				}
 				this.perf.start(window, "deep");
 				new Notice(
@@ -146,23 +155,17 @@ export default class GlideOutlinePlugin extends Plugin {
 						"It samples every sub-phase and costs more per " +
 						"frame — use it to localise, not to judge smoothness.",
 				);
+				return true;
 			},
 		});
 		this.addCommand({
 			id: "perf-capture-stop",
 			name: "Stop and copy Glide Outline performance capture",
-			callback: async () => {
-				const report = this.perf.stop(window);
-				if (!report) {
-					new Notice("Glide Outline: no capture is running.");
-					return;
-				}
-				await navigator.clipboard.writeText(
-					JSON.stringify(report, null, 2),
-				);
-				new Notice(
-					"Glide Outline: performance report copied to clipboard.",
-				);
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
+				void this.stopAndCopyCapture();
+				return true;
 			},
 		});
 
@@ -210,7 +213,26 @@ export default class GlideOutlinePlugin extends Plugin {
 	/** Steps 1 + 2: normalize in place and refresh the mounted outline. */
 	private applySettingsImmediately(): void {
 		normalizeSettingsInPlace(this.settings);
+		this.enforceDeveloperModeGate();
 		this.refreshUi();
+	}
+
+	/**
+	 * §七: developer mode gates the performance-capture machinery. Turning
+	 * it off must not leave a capture — and its longtask observer — running
+	 * in the background: any in-flight capture is abandoned and its samples
+	 * discarded (never copied), because the user just asked for the tooling
+	 * to go away. A no-op when developer mode is on or nothing is running.
+	 */
+	private enforceDeveloperModeGate(): void {
+		if (this.settings.developerMode) return;
+		if (this.perf.active) {
+			this.perf.abort();
+			new Notice(
+				"Glide Outline: developer mode off — performance capture " +
+					"stopped and discarded.",
+			);
+		}
 	}
 
 	private schedulePersistSettings(): void {
@@ -255,6 +277,17 @@ export default class GlideOutlinePlugin extends Plugin {
 		);
 	}
 
+	/** §七: stop a running capture and copy its report to the clipboard. */
+	private async stopAndCopyCapture(): Promise<void> {
+		const report = this.perf.stop(window);
+		if (!report) {
+			new Notice("Glide Outline: no capture is running.");
+			return;
+		}
+		await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+		new Notice("Glide Outline: performance report copied to clipboard.");
+	}
+
 	/**
 	 * Build and copy the diagnostics JSON (section 3). Runs even when no
 	 * outline is mounted — the OS motion report and settings alone already
@@ -287,6 +320,7 @@ export default class GlideOutlinePlugin extends Plugin {
 				edgeFadeSize: s.edgeFadeSize,
 				showLevels: s.showLevels,
 				renderMarkdown: s.renderMarkdown,
+				developerMode: s.developerMode,
 			},
 			outline: this.controller?.getDiagnosticsSnapshot() ?? null,
 			lastPointerActivation: this.diagnostics.lastPointerActivation,

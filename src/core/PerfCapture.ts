@@ -1027,6 +1027,27 @@ export class PerfCapture {
 		return this.buildReport(durationMs);
 	}
 
+	/**
+	 * §七: abandon a running capture WITHOUT producing a report. Used when
+	 * developer mode is switched off mid-capture — the longtask observer
+	 * and the suspension listeners are torn down exactly like `stop()`,
+	 * but no report is built or returned and the in-flight samples are
+	 * discarded. Idempotent; a no-op when nothing is running.
+	 */
+	abort(): void {
+		if (!this.active) return;
+		this.active = false;
+		this.deepActive = false;
+		this.deepFrameCalcActive = false;
+		this.deepAutoScrollIntentActive = false;
+		this.deepScrollWriteActive = false;
+		this.deepScrollEventActive = false;
+		this.longTaskObserver?.disconnect();
+		this.longTaskObserver = null;
+		this.removeSuspensionListeners?.();
+		this.removeSuspensionListeners = null;
+	}
+
 	/** Feed one RAF timestamp; consecutive calls produce intervals. */
 	recordFrame(now: number): void {
 		if (!this.active) return;
