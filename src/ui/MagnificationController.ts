@@ -515,7 +515,9 @@ export class MagnificationController {
 				// §三: the scroll-pipeline breakdown is DEEP-only — a LIGHT
 				// capture keeps the counters (they are cheap adds) but never
 				// reads the clock inside a scroll event.
-				const measureDeep = perf?.deepActive === true;
+				// §3.2: and even in DEEP, only while the "scrollEvent" group
+				// holds the rotation slot.
+				const measureDeep = perf?.deepScrollEventActive === true;
 				// §四.2: a scroll event observed while we are still inside
 				// our own scrollTop write was dispatched SYNCHRONOUSLY by
 				// that write — its cost belongs to the write, not to the
@@ -1244,16 +1246,18 @@ export class MagnificationController {
 				: this.win.performance.now();
 		const perf = this.perf;
 		const measure = perf?.active === true;
-		// §三: fine-grained sub-phase timing is a DEEP capture only. Every
-		// site below that reads the clock for a sub-phase checks THIS, not
-		// `measure` — the clock read is the cost being avoided.
-		const measureDeep = perf?.deepActive === true;
 		// §四: one exclusive attribution cursor per frame. Each boundary is
 		// a single clock read shared by the segment that closes and the one
 		// that opens, so n phases cost n+1 reads instead of 2n.
 		if (measure && perf) {
 			perf.beginFrameAttribution(this.win.performance.now());
 		}
+		// §三: fine-grained sub-phase timing is a DEEP capture only. Every
+		// site below that reads the clock for a sub-phase checks THIS, not
+		// `measure` — the clock read is the cost being avoided.
+		// §3.2: read AFTER the rotation advanced above, so the flag and the
+		// capture's own gate agree for the whole frame.
+		const measureDeep = perf?.deepFrameCalcActive === true;
 		perf?.recordFrame(now);
 
 		// ---------------- READ PHASE (DOM geometry) ----------------
@@ -1910,7 +1914,8 @@ export class MagnificationController {
 		// §三: every sub-phase below is DEEP-only. In LIGHT the whole step
 		// is one exclusive `autoScroll` segment closed by the caller, so
 		// this path adds ZERO telemetry clock reads.
-		const measureDeep = perf?.deepActive === true;
+		// §3.2: in DEEP it costs reads only while this group is armed.
+		const measureDeep = perf?.deepAutoScrollIntentActive === true;
 		const eligibilityStart = measureDeep ? this.win.performance.now() : 0;
 		if (!this.pointerExpanded || this.pressed) {
 			this.resetAllScrollIntent(this.pressed ? "pressed" : "collapsed");
@@ -2257,7 +2262,8 @@ export class MagnificationController {
 		const before = el.scrollTop;
 		// §三: timing the write itself is DEEP-only; the mutation and
 		// boundary-clamp counters below stay on in both modes.
-		const timeWrite = perf?.deepActive === true && recordPhase;
+		// §3.2: and only while the "scrollWrite" group is armed.
+		const timeWrite = perf?.deepScrollWriteActive === true && recordPhase;
 		const writeStart = timeWrite ? this.win.performance.now() : 0;
 		this.scrollTopWriteDepth++;
 		this.activeWriteSource = source;

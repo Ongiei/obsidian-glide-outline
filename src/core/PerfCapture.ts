@@ -349,6 +349,65 @@ const PHASE_SLOT: ReadonlyMap<PluginPhase, number> = new Map(
 	PLUGIN_PHASES.map((phase, index) => [phase, index] as const),
 );
 
+/**
+ * §3.2: the DEEP sub-phases, grouped by the hot path they live on.
+ *
+ * Instrumenting every sub-phase on every frame is what makes DEEP mode
+ * expensive, and most of that cost buys nothing: a phase's avg/p95 does
+ * not need EVERY frame, it needs enough frames. So only ONE group is
+ * armed at a time and the armed group rotates, dividing the steady-state
+ * DEEP instrumentation cost by the number of groups.
+ *
+ * A group is one CALL SITE, because a site cannot skip half a start/stop
+ * pair — the whole hot path either reads the clock or it does not.
+ */
+export type DeepPhaseGroup =
+	/** Sub-phases inside the RAF frame's read/calc segments. */
+	| "frameCalc"
+	/** Sub-phases inside the auto-scroll intent math. */
+	| "autoScrollIntent"
+	/** Sub-phases around the scrollTop write. */
+	| "scrollWrite"
+	/** Sub-phases inside our own scroll listener. */
+	| "scrollEvent";
+
+const DEEP_PHASE_GROUPS: readonly DeepPhaseGroup[] = [
+	"frameCalc",
+	"autoScrollIntent",
+	"scrollWrite",
+	"scrollEvent",
+];
+
+const DEEP_GROUP_OF: ReadonlyMap<PluginPhase, DeepPhaseGroup> = new Map<
+	PluginPhase,
+	DeepPhaseGroup
+>([
+	["scrollAnchorResolve", "frameCalc"],
+	["scrollEnvelopeUpdate", "frameCalc"],
+	["scrollEligibility", "autoScrollIntent"],
+	["edgeIntentMath", "autoScrollIntent"],
+	["kineticIntentMath", "autoScrollIntent"],
+	["scrollIntegrator", "autoScrollIntent"],
+	["scrollTopWrite", "scrollWrite"],
+	// Measured INSIDE the scroll listener (a write can dispatch it
+	// synchronously), so it rotates with the listener, not with the write.
+	["synchronousScrollDispatch", "scrollEvent"],
+	["scrollEventHandler", "scrollEvent"],
+	["scrollOffsetUpdate", "scrollEvent"],
+	["scrollFrameReschedule", "scrollEvent"],
+]);
+
+/**
+ * Frames one group stays armed, and — reused deliberately — the length of
+ * the opening window in which ALL groups are armed.
+ *
+ * The warm-up matters: a capture short enough to be read frame by frame
+ * (half a second) should be complete, not a lottery over which group
+ * happened to be armed. Rotation only starts once the capture is long
+ * enough that per-phase statistics, not individual frames, are the point.
+ */
+const DEEP_ROTATION_FRAMES = 30;
+
 /** Per-phase ring capacity (~17 s of frames at 60 fps — enough for p95). */
 const PHASE_RING_CAPACITY = 1024;
 
@@ -417,6 +476,31 @@ export interface PointerFollowEcho {
 }
 
 /**
+ * §3.2: how DEEP time-shared its sub-phase instrumentation.
+ *
+ * `framesPerGroup` is the denominator for a rotated group's `count`: a
+ * group armed for a third of the capture legitimately has a third of the
+ * samples. Comparing a rotated count against a frame count without this
+ * block will look like dropped data; it is not.
+ */
+export interface DeepRotationReport {
+	enabled: boolean;
+	/** Frames each group stays armed (also the warm-up length). */
+	rotationFrames: number;
+	groupCount: number;
+	/** Frames observed while all groups were armed (opening window). */
+	warmupFrames: number;
+	/** Frames observed after rotation began. */
+	rotatedFrames: number;
+	/** Completed passes over every group. */
+	completedCycles: number;
+	/** Group armed when the capture stopped (null before rotation). */
+	activeGroup: DeepPhaseGroup | null;
+	/** Frames each group was armed for, warm-up included. */
+	framesPerGroup: Record<DeepPhaseGroup, number>;
+}
+
+/**
  * §三: what the capture cost, in the capture's own words. Read this FIRST
  * when comparing two reports — a DEEP report is not comparable to a LIGHT
  * one until this block is accounted for.
@@ -431,6 +515,8 @@ export interface CaptureOverheadReport {
 	configEchoUpdateCount: number;
 	configEchoSkippedCount: number;
 	pointerEchoUpdateCount: number;
+	/** §3.2 rotation state — how the deep sub-phases were time-shared. */
+	deepRotation: DeepRotationReport;
 	/** now() reads per RAF frame — the headline light-vs-deep number. */
 	nowCallsPerFrame: number;
 	/** Modelled totals from the calibrated unit costs (see below). */
@@ -562,7 +648,26 @@ export class PerfCapture {
 	 * read `performance.now()` — that read is the cost being avoided.
 	 */
 	deepActive = false;
+	/**
+	 * §3.2 per-group hot-path guards. A sub-phase site MUST check the flag
+	 * for ITS group (not `deepActive`) before reading the clock — that is
+	 * where the rotation's saving actually happens. Plain fields, not a
+	 * map lookup, because these are read on the hottest paths we have.
+	 */
+	deepFrameCalcActive = false;
+	deepAutoScrollIntentActive = false;
+	deepScrollWriteActive = false;
+	deepScrollEventActive = false;
 	private mode: PerfCaptureMode = "light";
+	// --- §3.2 deep rotation cursor ------------------------------------
+	/** Frames left in the current group's slot (or in the warm-up). */
+	private deepRotationFramesLeft = 0;
+	/** Index into DEEP_PHASE_GROUPS; -1 while every group is armed. */
+	private deepRotationGroupIndex = -1;
+	private deepWarmupFrames = 0;
+	private deepRotatedFrames = 0;
+	private deepGroupAdvanceCount = 0;
+	private deepFramesPerGroup = new Float64Array(DEEP_PHASE_GROUPS.length);
 
 	private counters: PerfCounters = zeroCounters();
 	private readonly intervals = new Float64Array(FRAME_RING_CAPACITY);
@@ -665,6 +770,7 @@ export class PerfCapture {
 		this.startedAt = win.performance.now();
 		this.active = true;
 		this.deepActive = mode === "deep";
+		this.resetDeepRotation();
 		this.observeLongTasks(win);
 		this.observeSuspension(win);
 	}
@@ -700,6 +806,93 @@ export class PerfCapture {
 	}
 
 	/**
+	 * §3.2: back to the opening window, where every group is armed. Called
+	 * on start only — a rotation that reset mid-capture would bias the
+	 * per-group frame counts the report is read against.
+	 */
+	private resetDeepRotation(): void {
+		const deep = this.deepActive;
+		this.deepRotationGroupIndex = -1;
+		this.deepRotationFramesLeft = DEEP_ROTATION_FRAMES;
+		this.deepWarmupFrames = 0;
+		this.deepRotatedFrames = 0;
+		this.deepGroupAdvanceCount = 0;
+		this.deepFramesPerGroup.fill(0);
+		this.deepFrameCalcActive = deep;
+		this.deepAutoScrollIntentActive = deep;
+		this.deepScrollWriteActive = deep;
+		this.deepScrollEventActive = deep;
+	}
+
+	/**
+	 * §3.2: charge this frame to whatever is armed, then advance when the
+	 * slot runs out. Called once per frame from `beginFrameAttribution`,
+	 * and only in DEEP — LIGHT never touches the rotation at all.
+	 */
+	private advanceDeepRotation(): void {
+		if (this.deepRotationGroupIndex < 0) {
+			this.deepWarmupFrames++;
+			// Warm-up arms everything, so every group earns the frame.
+			for (let i = 0; i < this.deepFramesPerGroup.length; i++) {
+				this.deepFramesPerGroup[i]++;
+			}
+		} else {
+			this.deepRotatedFrames++;
+			this.deepFramesPerGroup[this.deepRotationGroupIndex]++;
+		}
+		this.deepRotationFramesLeft--;
+		if (this.deepRotationFramesLeft > 0) return;
+		this.deepRotationFramesLeft = DEEP_ROTATION_FRAMES;
+		this.deepRotationGroupIndex =
+			(this.deepRotationGroupIndex + 1) % DEEP_PHASE_GROUPS.length;
+		this.deepGroupAdvanceCount++;
+		this.armDeepGroup(DEEP_PHASE_GROUPS[this.deepRotationGroupIndex]);
+	}
+
+	/** §3.2: exactly one group armed; the other three go quiet. */
+	private armDeepGroup(group: DeepPhaseGroup): void {
+		this.deepFrameCalcActive = group === "frameCalc";
+		this.deepAutoScrollIntentActive = group === "autoScrollIntent";
+		this.deepScrollWriteActive = group === "scrollWrite";
+		this.deepScrollEventActive = group === "scrollEvent";
+	}
+
+	private isDeepGroupArmed(group: DeepPhaseGroup): boolean {
+		switch (group) {
+			case "frameCalc":
+				return this.deepFrameCalcActive;
+			case "autoScrollIntent":
+				return this.deepAutoScrollIntentActive;
+			case "scrollWrite":
+				return this.deepScrollWriteActive;
+			case "scrollEvent":
+				return this.deepScrollEventActive;
+		}
+	}
+
+	private deepRotationReport(): DeepRotationReport {
+		const framesPerGroup = {} as Record<DeepPhaseGroup, number>;
+		DEEP_PHASE_GROUPS.forEach((group, index) => {
+			framesPerGroup[group] = this.deepFramesPerGroup[index];
+		});
+		const rotating = this.deepRotationGroupIndex >= 0;
+		return {
+			enabled: this.mode === "deep",
+			rotationFrames: DEEP_ROTATION_FRAMES,
+			groupCount: DEEP_PHASE_GROUPS.length,
+			warmupFrames: this.deepWarmupFrames,
+			rotatedFrames: this.deepRotatedFrames,
+			completedCycles: Math.floor(
+				this.deepGroupAdvanceCount / DEEP_PHASE_GROUPS.length,
+			),
+			activeGroup: rotating
+				? DEEP_PHASE_GROUPS[this.deepRotationGroupIndex]
+				: null,
+			framesPerGroup,
+		};
+	}
+
+	/**
 	 * Stop and build the report. The longtask observer AND the suspension
 	 * listeners are ALWAYS removed here — sampling has zero standing cost
 	 * afterwards.
@@ -708,6 +901,10 @@ export class PerfCapture {
 		if (!this.active) return null;
 		this.active = false;
 		this.deepActive = false;
+		this.deepFrameCalcActive = false;
+		this.deepAutoScrollIntentActive = false;
+		this.deepScrollWriteActive = false;
+		this.deepScrollEventActive = false;
 		this.longTaskObserver?.disconnect();
 		this.longTaskObserver = null;
 		this.removeSuspensionListeners?.();
@@ -1089,9 +1286,18 @@ export class PerfCapture {
 		this.storeSample(phase, durationMs);
 	}
 
-	/** §三: is this phase sampled in the current mode? */
+	/**
+	 * §三/§3.2: is this phase sampled right now? Two gates — the mode, and
+	 * (in DEEP) whether the phase's group is the one currently armed.
+	 *
+	 * The group gate is defence in depth: a correctly written call site
+	 * checks its own `deep*Active` flag and never gets here, which is what
+	 * saves the clock reads. This catches the sites that forget.
+	 */
 	private shouldSample(phase: PluginPhase): boolean {
-		return this.mode === "deep" || LIGHT_PHASES.has(phase);
+		if (this.mode !== "deep") return LIGHT_PHASES.has(phase);
+		const group = DEEP_GROUP_OF.get(phase);
+		return group === undefined || this.isDeepGroupArmed(group);
 	}
 
 	private storeSample(phase: PluginPhase, durationMs: number): void {
@@ -1118,6 +1324,8 @@ export class PerfCapture {
 		this.counters.performanceNowCallCount++;
 		this.frameNowCalls = 1;
 		this.frameSamples = 0;
+		// §3.2: the frame boundary is the rotation's only clock.
+		if (this.deepActive) this.advanceDeepRotation();
 	}
 
 	/**
@@ -1301,6 +1509,7 @@ export class PerfCapture {
 				configEchoUpdateCount: c.configEchoUpdateCount,
 				configEchoSkippedCount: c.configEchoSkippedCount,
 				pointerEchoUpdateCount: c.pointerEchoUpdateCount,
+				deepRotation: this.deepRotationReport(),
 				nowCallsPerFrame: round2(c.performanceNowCallCount / frameDiv),
 				estimatedOverheadMs: round4(estimatedOverheadMs),
 				estimatedOverheadPerFrameMs: round4(estimatedOverheadMs / frameDiv),
