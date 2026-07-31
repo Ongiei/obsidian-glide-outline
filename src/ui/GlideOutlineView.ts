@@ -122,8 +122,33 @@ export class GlideOutlineView {
 		canScrollUp: false,
 		canScrollDown: false,
 	};
+	/**
+	 * §五.1: cached scroll-box geometry. `clientHeight`/`scrollHeight` are
+	 * layout reads; `scrollTop` is not. Scrolling cannot resize the scroll
+	 * box, so the scroll path reads only `scrollTop` and reuses these.
+	 * NaN = never measured (the cache is cold).
+	 */
+	private cachedClientHeight = Number.NaN;
+	private cachedScrollHeight = Number.NaN;
+	/**
+	 * §五.2: fade classes as last written. Seeded `false` because that is
+	 * exactly the freshly built root's state — a memo that starts as a
+	 * guess would be a bug, not an optimisation.
+	 */
+	private lastFadeTop = false;
+	private lastFadeBottom = false;
 	private readonly onViewportScroll = (): void => {
-		this.updateOverflowState();
+		const perf = this.perf;
+		// §3.2: same hot path as the controller's scroll listener, so the
+		// same rotation group arms it.
+		const measureDeep = perf?.deepScrollEventActive === true;
+		const start = measureDeep ? this.now() : 0;
+		perf?.count("overflowScrollEventCount");
+		// A scroll cannot change the scroll box's size — trust the cache.
+		this.evaluateOverflowState(false);
+		if (measureDeep && perf) {
+			perf.addPhaseSample("viewOverflowHandler", this.now() - start);
+		}
 	};
 
 	/** §八: last written `--glide-viewport-pad` value (px); NaN = never. */
@@ -240,6 +265,8 @@ export class GlideOutlineView {
 
 		// Empty state: hide the rail entirely when nothing is visible.
 		this.rootEl.classList.toggle("is-empty", visible.length === 0);
+		// §五.1: rows came and went — the cached scroll height is a lie now.
+		this.invalidateOverflowMetrics();
 		this.scheduleMeasure();
 	}
 
@@ -351,6 +378,7 @@ export class GlideOutlineView {
 
 		this.applyResponsiveWidth();
 		// Font size / padding / border / markdown changes alter card boxes.
+		this.invalidateOverflowMetrics();
 		this.scheduleMeasure();
 	}
 
@@ -469,26 +497,88 @@ export class GlideOutlineView {
 	}
 
 	/**
-	 * Re-evaluate overflow and toggle the edge fade classes. Runs on scroll,
-	 * after measurement passes and after responsive width changes.
+	 * Re-evaluate overflow and toggle the edge fade classes. Runs after
+	 * measurement passes and after responsive width changes.
+	 *
+	 * Always re-measures: anything that is not a scroll may have resized
+	 * the scroll box, and guessing which callers did is how stale fades
+	 * happen. The scroll path uses the cached form instead (§五.1).
 	 */
 	updateOverflowState(): void {
+		this.evaluateOverflowState(true);
+	}
+
+	/** §五.1: invalidate the cached scroll-box geometry. */
+	private invalidateOverflowMetrics(): void {
+		this.cachedClientHeight = Number.NaN;
+		this.cachedScrollHeight = Number.NaN;
+	}
+
+	/**
+	 * §五.1: the one place overflow is evaluated.
+	 *
+	 * `refresh` (or a cold cache) pays two layout reads; otherwise the
+	 * cached box geometry is reused and only `scrollTop` is read, which is
+	 * the whole point — a kinetic auto-scroll fires this on every frame.
+	 */
+	private evaluateOverflowState(refresh: boolean): void {
 		if (this.disposed) return;
 		const viewport = this.viewportEl;
+		const cold =
+			!Number.isFinite(this.cachedClientHeight) ||
+			!Number.isFinite(this.cachedScrollHeight);
+		if (refresh || cold) {
+			this.cachedClientHeight = viewport.clientHeight;
+			this.cachedScrollHeight = viewport.scrollHeight;
+			this.perf?.count("overflowMetricRefreshCount");
+		} else {
+			this.perf?.count("overflowMetricReadCount");
+		}
 		const state = computeOverflowState({
 			scrollTop: viewport.scrollTop,
-			clientHeight: viewport.clientHeight,
-			scrollHeight: viewport.scrollHeight,
+			clientHeight: this.cachedClientHeight,
+			scrollHeight: this.cachedScrollHeight,
 		});
 		this.overflowState = state;
-		this.rootEl.classList.toggle(
-			"glide-outline-root--fade-top",
-			state.canScrollUp,
-		);
-		this.rootEl.classList.toggle(
-			"glide-outline-root--fade-bottom",
-			state.canScrollDown,
-		);
+		this.applyFadeClasses(state.canScrollUp, state.canScrollDown);
+	}
+
+	/**
+	 * §五.2: write a fade class only when it actually changes.
+	 *
+	 * A `classList.toggle` to the value already present still runs the
+	 * DOMTokenList update steps and still marks the element for style
+	 * recalc on some engines. During an auto-scroll the pair is evaluated
+	 * every frame while the answer changes maybe twice per gesture, so
+	 * nearly all of those writes are pure waste.
+	 */
+	private applyFadeClasses(fadeTop: boolean, fadeBottom: boolean): void {
+		if (fadeTop === this.lastFadeTop && fadeBottom === this.lastFadeBottom) {
+			this.perf?.count("overflowClassSkippedCount");
+			return;
+		}
+		let mutations = 0;
+		if (fadeTop !== this.lastFadeTop) {
+			this.rootEl.classList.toggle("glide-outline-root--fade-top", fadeTop);
+			this.lastFadeTop = fadeTop;
+			mutations++;
+		}
+		if (fadeBottom !== this.lastFadeBottom) {
+			this.rootEl.classList.toggle(
+				"glide-outline-root--fade-bottom",
+				fadeBottom,
+			);
+			this.lastFadeBottom = fadeBottom;
+			mutations++;
+		}
+		if (mutations > 0) {
+			this.perf?.count("overflowClassMutationCount", mutations);
+		}
+	}
+
+	/** Clock helper — the view has no `win` field of its own. */
+	private now(): number {
+		return this.doc.defaultView?.performance.now() ?? 0;
 	}
 
 	/** Horizontal room reserved for the shadow in the current settings. */
@@ -535,6 +625,9 @@ export class GlideOutlineView {
 			`${labelContentWidth}px`,
 		);
 		this.rootEl.classList.toggle("glide-outline-root--compact", compact);
+		// §五.1: a width change rewraps labels, so row heights (and with
+		// them the scroll height) can move.
+		this.invalidateOverflowMetrics();
 	}
 
 	/** Coalesce measurement work into one pass per frame. */

@@ -122,6 +122,54 @@ export const AUTO_SCROLL_ACCEL = 1400;
  * solver target (see wasSnapped), so it never surfaces as a visible
  * overlap. */
 export const COLLISION_GUARD_ROWS = 2;
+/**
+ * §七: extra rows on each side of the SCALE range that may still take a
+ * GPU layer hint. The collision range spans the whole visible window, so
+ * promoting everything it touches would hand the compositor one layer
+ * per visible row for motion that is, past this guard, a sub-pixel taper
+ * settling home. Two rows cover the give-way neighbours that carry real
+ * displacement while the pointer sits between them.
+ */
+export const LAYER_PROMOTION_GUARD_ROWS = 2;
+/**
+ * §九: why a frame was requested. The distinction that matters is not
+ * the label but the CLASS: an INPUT reason means something happened and
+ * a frame is owed; a SELF reason means the loop chose to keep itself
+ * alive. Only the second kind can spin for nothing, and "spinning for
+ * nothing at 60Hz" is the most expensive shape a frame budget bug takes.
+ */
+export type ScheduleReason =
+	| "pointerMove"
+	| "pointerEnter"
+	| "pointerRelease"
+	| "scrollEvent"
+	| "envelopeCheck"
+	| "expand"
+	| "settings"
+	| "geometry"
+	| "motionConverging"
+	| "edgeIntent"
+	| "kineticIntent"
+	| "autoScrollSettling"
+	| "autoScrollDwell"
+	| "wheelCooldown"
+	| "unknown";
+
+/**
+ * §九: reasons where the loop scheduled ITSELF. A frame that arrives for
+ * one of these, finds nothing to do and then schedules again is a pure
+ * idle spin — `idleRafCount` counts exactly that, and it must stay 0.
+ */
+const SELF_SCHEDULE_REASONS: ReadonlySet<ScheduleReason> = new Set<ScheduleReason>(
+	[
+		"motionConverging",
+		"edgeIntent",
+		"kineticIntent",
+		"autoScrollSettling",
+		"autoScrollDwell",
+		"wheelCooldown",
+	],
+);
 /** §三/§十四: allowed adjacent overlap slack, px (rounding tolerance). */
 export const OVERLAP_TOLERANCE_PX = 1;
 /** §四/§六 handoff apron: when a layout has NO offscreen gap to relax
@@ -271,8 +319,9 @@ interface PressedHeadingState {
  *     a time-based exponential step, section 11); CSS transitions no
  *     longer drive the continuous transforms. CSS vars are written only
  *     past epsilon thresholds and only for rows that changed (section 14).
- *   - `will-change: transform` exists only on active-range rows and is
- *     removed on exit/convergence/collapse/dispose (section 15).
+ *   - `will-change: transform` exists only on unconverged rows inside the
+ *     SCALE range + a two-row guard (§七) — never on the far taper — and
+ *     is removed on exit/convergence/collapse/dispose (section 15).
  *
  * Coordinate system: viewport client coordinates for BOTH the pointer
  * (`event.clientY`) and cached item centers (`getBoundingClientRect()`).
@@ -329,12 +378,17 @@ export class MagnificationController {
 	private pointerExpanded = false;
 	private focusExpanded = false;
 	private rafId = 0;
+	/** §九: why the currently pending frame was requested. */
+	private pendingScheduleReason: ScheduleReason = "unknown";
 	private collapseTimer = 0;
 	private lastPointerX = Number.NaN;
 	private lastPointerY = Number.NaN;
 	// --- Pointer Envelope (geometric hover maintenance) ----------------
 	/** Union of rail hit zone + active headings' marker/card/bridge rects. */
 	private envelope: PointerEnvelope = { railRect: emptyRect(), items: [] };
+	/** §六: row index span the cached envelope was collected for; -1 = none. */
+	private envelopeRangeStart = -1;
+	private envelopeRangeEnd = -1;
 	/** Rebuild the envelope during the next frame's READ phase. Only set
 	 * on real geometry changes (section 5) — never unconditionally. */
 	private envelopeDirty = true;
@@ -512,12 +566,18 @@ export class MagnificationController {
 			() => {
 				const perf = this.perf;
 				const measure = perf?.active === true;
+				// §三: the scroll-pipeline breakdown is DEEP-only — a LIGHT
+				// capture keeps the counters (they are cheap adds) but never
+				// reads the clock inside a scroll event.
+				// §3.2: and even in DEEP, only while the "scrollEvent" group
+				// holds the rotation slot.
+				const measureDeep = perf?.deepScrollEventActive === true;
 				// §四.2: a scroll event observed while we are still inside
 				// our own scrollTop write was dispatched SYNCHRONOUSLY by
 				// that write — its cost belongs to the write, not to the
 				// ordinary async handler phase.
 				const reentrant = this.scrollTopWriteDepth > 0;
-				const handlerStart = measure
+				const handlerStart = measureDeep
 					? this.win.performance.now()
 					: 0;
 				const scrollTop = viewportEl.scrollTop;
@@ -531,6 +591,8 @@ export class MagnificationController {
 					if (reentrant) perf.count("scrollEventReentrantCount");
 					if (delta === 0) perf.count("zeroDeltaScrollEventCount");
 					perf.addScrollDeltaSample(delta, source);
+				}
+				if (measureDeep && perf) {
 					// §四.2 scrollOffsetUpdate: applying the delta to the
 					// cached content offset (the reads/writes above).
 					perf.addPhaseSample(
@@ -573,11 +635,11 @@ export class MagnificationController {
 				}
 				// User is scrolling the outline — pause active-heading follow.
 				this.view.setFollowEnabled(false);
-				const scheduleStart = measure
+				const scheduleStart = measureDeep
 					? this.win.performance.now()
 					: 0;
-				this.schedule();
-				if (measure && perf) {
+				this.schedule("scrollEvent");
+				if (measureDeep && perf) {
 					const handlerEnd = this.win.performance.now();
 					perf.addPhaseSample(
 						"scrollFrameReschedule",
@@ -638,7 +700,7 @@ export class MagnificationController {
 			if (!significant) return;
 			this.markCacheDirty("resize");
 			this.envelopeDirty = true;
-			this.schedule();
+			this.schedule("geometry");
 		});
 		resizeObserver.observe(view.listEl);
 		resizeObserver.observe(view.rootEl);
@@ -654,7 +716,7 @@ export class MagnificationController {
 		this.markCacheDirty("invalidate");
 		this.envelopeDirty = true;
 		this.perf?.count("cacheInvalidationCount");
-		if (this.isExpanded()) this.schedule();
+		if (this.isExpanded()) this.schedule("settings");
 	}
 
 	/**
@@ -703,8 +765,9 @@ export class MagnificationController {
 		// outline was collapsed, or the pointer was outside the envelope)
 		// may wipe the velocity ring; clearing it on gap re-entry killed
 		// the very gesture the follow is supposed to continue.
+		const wasExpanded = this.pointerExpanded;
 		const freshGesture =
-			!this.pointerExpanded ||
+			!wasExpanded ||
 			(!this.pointer.overElement && !this.pointer.insideEnvelope);
 		this.cancelCollapse();
 		this.pointerExpanded = true;
@@ -714,7 +777,17 @@ export class MagnificationController {
 		// identical collapsed/expanded (the reveal animates opacity and a
 		// horizontal translate only). Card rects DO move horizontally, so
 		// the envelope is refreshed on demand; the row cache is not.
-		this.envelopeDirty = true;
+		//
+		// §六: and ONLY the expansion moves them. Re-entering from a gap
+		// while already expanded changes no geometry, yet this fired
+		// several times a second mid-flick and each one queued a forced
+		// layout for the next pointerleave to pay.
+		if (!wasExpanded) {
+			this.envelopeDirty = true;
+			this.perf?.count("envelopeEnterDirtyCount");
+		} else {
+			this.perf?.count("envelopeEnterReusedCount");
+		}
 		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
 		this.pendingAnchorTarget = event.target;
@@ -728,7 +801,7 @@ export class MagnificationController {
 			this.lastSampleEventId = "";
 		}
 		this.syncExpanded();
-		this.schedule();
+		this.schedule("pointerEnter");
 	};
 
 	/**
@@ -752,7 +825,7 @@ export class MagnificationController {
 		this.lastPointerY = event.clientY;
 		this.pendingAnchorTarget = event.target;
 		this.anchorDirty = true;
-		this.schedule();
+		this.schedule("pointerMove");
 	};
 
 	/**
@@ -762,9 +835,13 @@ export class MagnificationController {
 	 * magnified neighbours, or the intra-row marker↔card gap) keep the
 	 * outline open but stop auto-scroll. Otherwise start the collapse grace.
 	 *
-	 * pointerleave is a DISCRETE event (not the per-move hot path), so a
-	 * synchronous envelope refresh here is acceptable and keeps the
-	 * collapse decision authoritative at the moment of exit.
+	 * §六: the decision must be authoritative at the moment of exit, but
+	 * "authoritative" does not mean "re-read layout". Motion is the only
+	 * thing that moves these rects between frames, and motion is pure
+	 * math on the row cache — so the warm path derives and reads nothing.
+	 * A synchronous rebuild is left ONLY for a structurally stale
+	 * envelope (rows or expansion changed), where the cached rects
+	 * describe a layout that no longer exists.
 	 */
 	private onPointerLeave = (event: PointerEvent): void => {
 		const related = event.relatedTarget;
@@ -772,6 +849,10 @@ export class MagnificationController {
 		if (this.envelopeDirty) {
 			this.activeRange = this.computeRange();
 			this.rebuildEnvelope();
+			this.perf?.count("envelopeSyncRebuildCount");
+		} else {
+			this.updateEnvelopeFromMotion();
+			this.perf?.count("envelopeDerivedLeaveCount");
 		}
 		if (
 			pointInEnvelope(
@@ -837,7 +918,7 @@ export class MagnificationController {
 			timeStamp: event.timeStamp,
 		};
 		this.windowCheckPending = true;
-		this.schedule();
+		this.schedule("envelopeCheck");
 	};
 
 	/**
@@ -914,7 +995,7 @@ export class MagnificationController {
 			now + MANUAL_WHEEL_COOLDOWN_MS;
 		this.stopEdgeIntent("manual-wheel");
 		this.stopKineticIntent("manual-wheel");
-		this.schedule();
+		this.schedule("wheelCooldown");
 	}
 
 	/**
@@ -1125,7 +1206,7 @@ export class MagnificationController {
 				accepted: true,
 			});
 			// Resume magnification / auto-scroll on the next frame.
-			this.schedule();
+			this.schedule("pointerRelease");
 			this.onJump?.(item);
 		} else {
 			this.diagnostics?.recordPointerActivation({
@@ -1140,7 +1221,7 @@ export class MagnificationController {
 				accepted: false,
 				rejectionReason: inside ? "heading-not-found" : "release-outside-target",
 			});
-			this.schedule();
+			this.schedule("pointerRelease");
 		}
 	};
 
@@ -1148,7 +1229,7 @@ export class MagnificationController {
 		const pressed = this.pressed;
 		if (!pressed || event.pointerId !== pressed.pointerId) return;
 		this.clearPressed();
-		this.schedule();
+		this.schedule("pointerRelease");
 	};
 
 	private onWindowBlur = (): void => {
@@ -1198,6 +1279,8 @@ export class MagnificationController {
 			this.envelope = { railRect: emptyRect(), items: [] };
 			this.envelopeMotionShift.clear();
 			this.envelopeMotionScale.clear();
+			this.envelopeRangeStart = -1;
+			this.envelopeRangeEnd = -1;
 			this.activeRange = emptyActiveRange();
 			this.windowCheckPending = false;
 			this.lastMotionTime = Number.NaN;
@@ -1205,12 +1288,27 @@ export class MagnificationController {
 			// §七: expanding refreshes the envelope on demand; the geometry
 			// cache stays valid (row layout is expansion-invariant).
 			this.envelopeDirty = true;
-			this.schedule();
+			this.schedule("expand");
 		}
 	}
 
-	private schedule(): void {
-		if (this.rafId !== 0 || this.pressed) return;
+	/**
+	 * §九: request one frame and record WHY. Every refusal is recorded
+	 * too — a call that finds a frame already pending is not free
+	 * information, it is the measure of how much redundant scheduling the
+	 * input handlers do (and the reason the dedup is worth keeping).
+	 */
+	private schedule(reason: ScheduleReason = "unknown"): void {
+		if (this.pressed) {
+			this.perf?.noteSchedule(reason, "suppressed");
+			return;
+		}
+		if (this.rafId !== 0) {
+			this.perf?.noteSchedule(reason, "deduped");
+			return;
+		}
+		this.pendingScheduleReason = reason;
+		this.perf?.noteSchedule(reason, "scheduled");
 		this.rafId = this.win.requestAnimationFrame(this.frame);
 	}
 
@@ -1228,6 +1326,11 @@ export class MagnificationController {
 	 */
 	private frame = (frameTs?: number): void => {
 		this.rafId = 0;
+		// §九: consume the reason this frame was asked for. Read before
+		// any early return so a reason is never carried into the NEXT
+		// frame and misattributed there.
+		const scheduleReason = this.pendingScheduleReason;
+		this.pendingScheduleReason = "unknown";
 		// While a heading is held (pointerdown) the loop is suspended so
 		// the locked target cannot slide away; auto-scroll already stopped.
 		if (this.pressed) return;
@@ -1238,17 +1341,27 @@ export class MagnificationController {
 				: this.win.performance.now();
 		const perf = this.perf;
 		const measure = perf?.active === true;
-		const frameStart = measure ? this.win.performance.now() : 0;
+		// §四: one exclusive attribution cursor per frame. Each boundary is
+		// a single clock read shared by the segment that closes and the one
+		// that opens, so n phases cost n+1 reads instead of 2n.
+		if (measure && perf) {
+			perf.beginFrameAttribution(this.win.performance.now());
+		}
+		// §三: fine-grained sub-phase timing is a DEEP capture only. Every
+		// site below that reads the clock for a sub-phase checks THIS, not
+		// `measure` — the clock read is the cost being avoided.
+		// §3.2: read AFTER the rotation advanced above, so the flag and the
+		// capture's own gate agree for the whole frame.
+		const measureDeep = perf?.deepFrameCalcActive === true;
 		perf?.recordFrame(now);
 
 		// ---------------- READ PHASE (DOM geometry) ----------------
 		if (this.cacheDirty) this.rebuildCache();
 		if (this.cache.length === 0) {
 			if (measure && perf) {
-				perf.addPhaseSample(
-					"pluginFrameJs",
-					this.win.performance.now() - frameStart,
-				);
+				const readEnd = this.win.performance.now();
+				perf.markPhase("read", readEnd);
+				perf.endFrameAttribution(readEnd);
 			}
 			this.endFrame();
 			return;
@@ -1256,6 +1369,9 @@ export class MagnificationController {
 		const settings = this.getSettings();
 		// Envelope/compat window from cached numbers (pure, O(log n)).
 		this.activeRange = this.computeRange();
+		// §六: the range slides with the pointer. Cached rects stay valid
+		// for the rows they were collected for, and only for those.
+		if (!this.envelopeCoversActiveRange()) this.envelopeDirty = true;
 		// §十四 gating: a stale envelope is only rebuilt when a containment
 		// decision actually needs it (a deferred window check is pending).
 		// Motion keeps the cached rects fresh mathematically (see the write
@@ -1267,18 +1383,14 @@ export class MagnificationController {
 		// Deferred window containment test — pure math on cached rects.
 		this.processWindowCheck();
 		if (measure && perf) {
-			perf.addPhaseSample(
-				"read",
-				this.win.performance.now() - frameStart,
-			);
+			perf.markPhase("read", this.win.performance.now());
 		}
 
 		if (Number.isNaN(this.lastPointerY)) {
 			if (measure && perf) {
-				perf.addPhaseSample(
-					"pluginFrameJs",
-					this.win.performance.now() - frameStart,
-				);
+				const idleEnd = this.win.performance.now();
+				perf.markPhase("pureCalc", idleEnd);
+				perf.endFrameAttribution(idleEnd);
 			}
 			this.endFrame();
 			return;
@@ -1292,12 +1404,13 @@ export class MagnificationController {
 		if (this.anchorScrollStale) {
 			this.anchorScrollStale = false;
 			// §四.2 scrollAnchorResolve: re-resolving the pointer anchor
-			// after the content offset moved under it.
-			const anchorResolveStart = measure
+			// after the content offset moved under it. Nested inside
+			// pureCalc — DEEP only (§三).
+			const anchorResolveStart = measureDeep
 				? this.win.performance.now()
 				: 0;
 			this.refreshPointerAnchorAfterScroll();
-			if (measure && perf) {
+			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollAnchorResolve",
 					this.win.performance.now() - anchorResolveStart,
@@ -1336,12 +1449,12 @@ export class MagnificationController {
 		// update the scroll caused (the item rects themselves are content-
 		// space and deliberately untouched by scrolling).
 		const envUpdateStart =
-			measure && scrolledSinceLastFrame
+			measureDeep && scrolledSinceLastFrame
 				? this.win.performance.now()
 				: 0;
 		const pointerContentY = this.clientYToContentY(this.lastPointerY);
 		const contentWindow = this.contentRangeForViewport();
-		if (measure && scrolledSinceLastFrame && perf) {
+		if (measureDeep && scrolledSinceLastFrame && perf) {
 			perf.addPhaseSample(
 				"scrollEnvelopeUpdate",
 				this.win.performance.now() - envUpdateStart,
@@ -1413,7 +1526,11 @@ export class MagnificationController {
 				anchorIndex >= cStart && anchorIndex <= cEnd
 					? anchorIndex - cStart
 					: -1;
+			// §四: the solver gets its own exclusive segment. Its duration
+			// comes from the two cursor boundaries that already had to be
+			// read — the solver sample costs ZERO extra clock reads.
 			const solverStart = measure ? this.win.performance.now() : 0;
+			if (measure && perf) perf.markPhase("pureCalc", solverStart);
 			results = computeCollisionFreeMagnification(
 				pointerContentY,
 				activeLayout,
@@ -1427,10 +1544,9 @@ export class MagnificationController {
 				},
 			);
 			if (measure && perf) {
-				perf.addSolverSample(
-					this.win.performance.now() - solverStart,
-					activeLayout.length,
-				);
+				const solverEnd = this.win.performance.now();
+				perf.markPhase("collisionSolve", solverEnd);
+				perf.addSolverSample(solverEnd - solverStart, activeLayout.length);
 			}
 			// §四/§六 boundary buffer — LOCKSTEP SNAP with OFFSCREEN GAP
 			// RELAXATION. The solved boundary row carries a residual push
@@ -1615,13 +1731,41 @@ export class MagnificationController {
 		}
 
 		// ---------------- WRITE PHASE (styles only) ----------------
-		const writeStart = measure ? this.win.performance.now() : 0;
+		if (measure && perf) {
+			perf.markPhase("pureCalc", this.win.performance.now());
+		}
 		let converging = false;
 		let writes = 0;
 		// §九 churn / skip diagnostics for this frame.
 		let dirtyAdded = 0;
 		let dirtyRemoved = 0;
 		let identitySkipped = 0;
+		// §七 LAYER PROMOTION BUDGET. The collision range is Visible ∪
+		// Scale — i.e. essentially the whole on-screen list — and every
+		// row in it carries some displacement while the cascade settles.
+		// Promoting on displacement alone therefore scales the compositor
+		// layer count with the viewport, which is exactly the standing
+		// cost Windows cannot afford. Promotion is bounded to the rows
+		// whose motion is actually worth a layer: the scale range (the
+		// magnification disc) plus a two-row guard for the give-way
+		// neighbours. Rows outside it still animate — their transform is
+		// written exactly as before — they simply do it on the paint path.
+		const promotionEmpty = isEmptyActiveRange(this.scaleRange);
+		const pStart = promotionEmpty
+			? 0
+			: Math.max(0, this.scaleRange.start - LAYER_PROMOTION_GUARD_ROWS);
+		const pEnd = promotionEmpty
+			? -1
+			: Math.min(
+					rowCount - 1,
+					this.scaleRange.end + LAYER_PROMOTION_GUARD_ROWS,
+				);
+		// §七 layer telemetry, tallied as plain locals and flushed once
+		// after the loop — a counter call per row would itself be a cost.
+		let promotedShiftLayers = 0;
+		let promotedScaleLayers = 0;
+		let promotionMutations = 0;
+		let promotionSkips = 0;
 		for (const i of order) {
 			const entry = this.cache[i];
 			const state = entry.motion;
@@ -1656,10 +1800,12 @@ export class MagnificationController {
 					if (entry.shifting) {
 						entry.el.classList.remove(MOTION_SHIFT_CLASS);
 						entry.shifting = false;
+						promotionMutations++;
 					}
 					if (entry.scaling) {
 						entry.el.classList.remove(MOTION_SCALE_CLASS);
 						entry.scaling = false;
+						promotionMutations++;
 					}
 					entry.contentVisualCenter = entry.contentCenter;
 					this.shifts[i] = 0;
@@ -1680,22 +1826,35 @@ export class MagnificationController {
 				motionStateConverged(state) &&
 				state.targetScale === 1 &&
 				state.targetShift === 0;
+			// §七: outside the promotion band a row is never a layer,
+			// however far from identity it currently is.
+			const promotable = i >= pStart && i <= pEnd;
 			const shifting =
+				promotable &&
 				!atIdentity &&
 				(state.targetShift !== 0 ||
 					Math.abs(state.displayedShift) >= SHIFT_EPSILON);
 			const scaling =
+				promotable &&
 				!atIdentity &&
 				(state.targetScale !== 1 ||
 					Math.abs(state.displayedScale - 1) >= SCALE_EPSILON);
 			if (shifting !== entry.shifting) {
 				entry.el.classList.toggle(MOTION_SHIFT_CLASS, shifting);
 				entry.shifting = shifting;
+				promotionMutations++;
+			} else {
+				promotionSkips++;
 			}
 			if (scaling !== entry.scaling) {
 				entry.el.classList.toggle(MOTION_SCALE_CLASS, scaling);
 				entry.scaling = scaling;
+				promotionMutations++;
+			} else {
+				promotionSkips++;
 			}
+			if (shifting) promotedShiftLayers++;
+			if (scaling) promotedScaleLayers++;
 			// Keep the visual model in lockstep with what is on screen.
 			entry.contentVisualCenter =
 				entry.contentCenter + state.displayedShift;
@@ -1717,10 +1876,7 @@ export class MagnificationController {
 			}
 		}
 		if (measure && perf) {
-			perf.addPhaseSample(
-				"styleWrite",
-				this.win.performance.now() - writeStart,
-			);
+			perf.markPhase("styleWrite", this.win.performance.now());
 			// §十四 range statistics. WRITE range = rows still dirty
 			// (unconverged / carrying vars or layer classes) — now the
 			// true sparse count, not the span it happens to occupy.
@@ -1730,6 +1886,18 @@ export class MagnificationController {
 			const collisionRows = collisionEmpty ? 0 : cEnd - cStart + 1;
 			const writeRows = this.dirtyRows.size;
 			perf.addRangeSample(scaleRows, collisionRows, writeRows);
+			// §七: standing compositor layers this frame, and how much of
+			// the class work was avoided by remembering the last value.
+			perf.addLayerPromotionSample(
+				promotedShiftLayers,
+				promotedScaleLayers,
+			);
+			if (promotionMutations > 0) {
+				perf.count("promotionClassMutationCount", promotionMutations);
+			}
+			if (promotionSkips > 0) {
+				perf.count("promotionClassSkippedCount", promotionSkips);
+			}
 			// §九 sparse dirty-row telemetry: how many rows the next frame
 			// must revisit, how many were visited only to be skipped at
 			// identity, and how much the set churns frame over frame.
@@ -1757,6 +1925,10 @@ export class MagnificationController {
 					OVERLAP_TOLERANCE_PX,
 				);
 			}
+			// §四: this whole block exists only because a capture is
+			// running. Book it to nobody rather than letting it inflate
+			// the phase that happens to follow it.
+			perf.markPhase("unattributedFrameJs", this.win.performance.now());
 		}
 		if (writes > 0) {
 			perf?.count("cssVarWriteCount", writes);
@@ -1765,30 +1937,48 @@ export class MagnificationController {
 			// shift/scale deltas instead of re-reading layout. Only rows
 			// whose item is missing from the cache fall back to a dirty
 			// flag (→ full rebuild on the next needed containment check).
-			const envStart = measure ? this.win.performance.now() : 0;
 			this.updateEnvelopeFromMotion();
 			if (measure && perf) {
-				perf.addPhaseSample(
+				perf.markPhase(
 					"envelopeMotionUpdate",
-					this.win.performance.now() - envStart,
+					this.win.performance.now(),
 				);
 			}
 		}
 		// Keep the loop alive until every displayed value converged.
-		if (converging) this.schedule();
+		if (converging) this.schedule("motionConverging");
 
 		// Pointer edge auto-scroll + pointer-follow share this frame.
 		// Scrolling shifts the cached geometry by delta (scroll handler),
 		// so the next frame sees correct centers without any rect reads.
-		const autoScrollStart = measure ? this.win.performance.now() : 0;
 		this.stepAutoScroll(settings);
 		if (measure && perf) {
-			const autoScrollEnd = this.win.performance.now();
-			perf.addPhaseSample(
-				"autoScroll",
-				autoScrollEnd - autoScrollStart,
-			);
-			perf.addPhaseSample("pluginFrameJs", autoScrollEnd - frameStart);
+			// §四: closing mark and frame close share one clock read; the
+			// remainder (RAF entry glue, the capture's own bookkeeping)
+			// lands in unattributedFrameJs and the two reconcile exactly.
+			const frameEnd = this.win.performance.now();
+			perf.markPhase("autoScroll", frameEnd);
+			perf.endFrameAttribution(frameEnd);
+			// §九 IDLE FRAME DIAGNOSIS. Counted after the attribution
+			// window closes — this is the capture accounting for itself,
+			// not part of the frame being measured.
+			//
+			// "Did work" is deliberately narrow: something was written to
+			// the DOM, either a row style or the scroller. A frame that
+			// wrote neither produced no visible change, whatever else it
+			// computed.
+			const didWork = writes > 0 || this.integrator.appliedVelocity !== 0;
+			if (!didWork) {
+				perf.count("frameWithoutMotionOrIntentCount");
+				// The pathology is narrower still: the loop woke ITSELF,
+				// found nothing to do, and asked for another frame anyway.
+				// One trailing no-op frame is unavoidable (something has
+				// to notice the motion ended); a loop that keeps going
+				// after noticing is the bug. This must stay 0.
+				if (SELF_SCHEDULE_REASONS.has(scheduleReason) && this.rafId !== 0) {
+					perf.count("idleRafCount");
+				}
+			}
 		}
 		this.endFrame();
 	};
@@ -1890,12 +2080,17 @@ export class MagnificationController {
 		const measure = perf?.active === true;
 		// §四.2 scrollEligibility: everything that decides whether this
 		// frame may auto-scroll at all — expansion/press gate, manual-wheel
-		// cooldown, dt bookkeeping and ring-velocity decay. Capture-off →
-		// zero performance.now() calls on this path.
-		const eligibilityStart = measure ? this.win.performance.now() : 0;
+		// cooldown, dt bookkeeping and ring-velocity decay.
+		//
+		// §三: every sub-phase below is DEEP-only. In LIGHT the whole step
+		// is one exclusive `autoScroll` segment closed by the caller, so
+		// this path adds ZERO telemetry clock reads.
+		// §3.2: in DEEP it costs reads only while this group is armed.
+		const measureDeep = perf?.deepAutoScrollIntentActive === true;
+		const eligibilityStart = measureDeep ? this.win.performance.now() : 0;
 		if (!this.pointerExpanded || this.pressed) {
 			this.resetAllScrollIntent(this.pressed ? "pressed" : "collapsed");
-			if (measure && perf) {
+			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollEligibility",
 					this.win.performance.now() - eligibilityStart,
@@ -1914,8 +2109,8 @@ export class MagnificationController {
 			integ.combinedTargetVelocity = 0;
 			integ.appliedVelocity = 0;
 			integ.lastFrameTime = Number.NaN;
-			this.schedule();
-			if (measure && perf) {
+			this.schedule("wheelCooldown");
+			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollEligibility",
 					this.win.performance.now() - eligibilityStart,
@@ -1939,7 +2134,7 @@ export class MagnificationController {
 			);
 			if (Math.abs(kin.velocityY) < 1) kin.velocityY = 0;
 		}
-		if (measure && perf) {
+		if (measureDeep && perf) {
 			perf.addPhaseSample(
 				"scrollEligibility",
 				this.win.performance.now() - eligibilityStart,
@@ -1963,7 +2158,7 @@ export class MagnificationController {
 		// ---- EDGE intent (§八: position-only; §十二: own eligibility) ----
 		// §四.2 edgeIntentMath: the whole edge decision — zone math, dwell
 		// gate, latch bookkeeping.
-		const edgeMathStart = measure ? this.win.performance.now() : 0;
+		const edgeMathStart = measureDeep ? this.win.performance.now() : 0;
 		const edge = this.edgeIntent;
 		const edgeEligible =
 			pointer.overElement || (edge.latched && pointer.insideEnvelope);
@@ -1990,7 +2185,7 @@ export class MagnificationController {
 						edge.dwellTimer = 0;
 						edge.dwellPassed = true;
 						integ.lastFrameTime = Number.NaN;
-						this.schedule();
+						this.schedule("autoScrollDwell");
 					}, AUTO_SCROLL_DWELL_MS);
 				}
 				edgeTarget = 0;
@@ -2010,7 +2205,7 @@ export class MagnificationController {
 		) {
 			this.stopEdgeIntent("pointer-left");
 		}
-		if (measure && perf) {
+		if (measureDeep && perf) {
 			perf.addPhaseSample(
 				"edgeIntentMath",
 				this.win.performance.now() - edgeMathStart,
@@ -2019,7 +2214,7 @@ export class MagnificationController {
 
 		// ---- KINETIC intent (§九/§十二: independent eligibility) --------
 		// §四.2 kineticIntentMath: pointer-follow velocity math.
-		const kineticMathStart = measure ? this.win.performance.now() : 0;
+		const kineticMathStart = measureDeep ? this.win.performance.now() : 0;
 		const kineticEligible =
 			pointer.overElement || pointer.insideEnvelope;
 		let kineticTarget = 0;
@@ -2051,7 +2246,7 @@ export class MagnificationController {
 		} else if (this.kineticActive || kin.velocityY !== 0) {
 			this.stopKineticIntent("pointer-left");
 		}
-		if (measure && perf) {
+		if (measureDeep && perf) {
 			perf.addPhaseSample(
 				"kineticIntentMath",
 				this.win.performance.now() - kineticMathStart,
@@ -2059,37 +2254,44 @@ export class MagnificationController {
 		}
 
 		// §十八 config echo — only while a capture is running.
+		//
+		// §三: both echoes are LAST-VALUE-WINS gauges, so rewriting them
+		// every frame bought nothing while allocating two objects a frame
+		// inside the very loop being measured. They now take primitives
+		// (nothing is allocated on the skip path); the config is stored
+		// only when it actually changes, the pointer gauges at most every
+		// 100 ms.
 		if (perf?.active === true) {
 			const zones = resolveEdgeZones(
 				this.viewportBottom - this.viewportTop,
 				zonePx,
 			);
-			perf.setAutoScrollConfig({
-				configuredSpeed: speed,
-				configuredTriggerArea: zonePx,
-				computedPreZone: zones.preZone,
-				computedStrongZone: zones.strongZone,
-				hysteresisPx: AUTO_SCROLL_EXIT_HYSTERESIS_PX,
-			});
+			perf.setAutoScrollConfig(
+				speed,
+				zonePx,
+				zones.preZone,
+				zones.strongZone,
+				AUTO_SCROLL_EXIT_HYSTERESIS_PX,
+			);
 			// §十.1 pointer-follow echo: the two caps side by side plus the
 			// live gauges. `pointerSampleCount` is the honest tell for gap
 			// starvation — a healthy flick keeps the ring at capacity, a
 			// starved one collapses to 0–1 and takes the velocity with it.
-			perf.setPointerFollowEcho({
-				pointerFollowStrength: followStrength,
+			perf.setPointerFollowEcho(
+				followStrength,
 				edgeMaxSpeed,
 				kineticMaxSpeed,
 				combinedMaxSpeed,
-				currentPointerVelocityY: kin.velocityY,
-				predictedPointerY: kin.predictedY,
-				pointerSampleCount: kin.samples.length,
-			});
+				kin.velocityY,
+				kin.predictedY,
+				kin.samples.length,
+			);
 		}
 
 		// ---- Shared integrator (§七): combine, clamp, damp --------------
 		// §四.2 scrollIntegrator: combine + clamp + acceleration-capped
 		// damping — everything between the intents and the actual write.
-		const integratorStart = measure ? this.win.performance.now() : 0;
+		const integratorStart = measureDeep ? this.win.performance.now() : 0;
 		integ.edgeIntentVelocity = edgeTarget;
 		integ.kineticIntentVelocity = kineticTarget;
 		const combined = Math.min(
@@ -2099,7 +2301,7 @@ export class MagnificationController {
 		integ.combinedTargetVelocity = combined;
 
 		if (combined === 0 && integ.appliedVelocity === 0) {
-			if (measure && perf) {
+			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollIntegrator",
 					this.win.performance.now() - integratorStart,
@@ -2139,7 +2341,7 @@ export class MagnificationController {
 			if (combined === 0 && Math.abs(integ.appliedVelocity) < 4) {
 				integ.appliedVelocity = 0;
 			}
-			if (measure && perf) {
+			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollIntegrator",
 					this.win.performance.now() - integratorStart,
@@ -2183,14 +2385,23 @@ export class MagnificationController {
 					perf?.count("combinedIntentFrameCount");
 				}
 			}
-		} else if (measure && perf) {
+		} else if (measureDeep && perf) {
 			perf.addPhaseSample(
 				"scrollIntegrator",
 				this.win.performance.now() - integratorStart,
 			);
 		}
 		// Keep the loop alive while there is motion or a pending target.
-		this.schedule();
+		// (The fully-idle case returned above, so reaching here always
+		// means one of the three is genuinely non-zero — §九 attributes
+		// which, so an unexpected self-spin names its own cause.)
+		this.schedule(
+			edgeTarget !== 0
+				? "edgeIntent"
+				: kineticTarget !== 0
+					? "kineticIntent"
+					: "autoScrollSettling",
+		);
 	}
 
 	/**
@@ -2229,8 +2440,11 @@ export class MagnificationController {
 	): void {
 		const el = this.view.viewportEl;
 		const before = el.scrollTop;
-		const writeStart =
-			perf && recordPhase ? this.win.performance.now() : 0;
+		// §三: timing the write itself is DEEP-only; the mutation and
+		// boundary-clamp counters below stay on in both modes.
+		// §3.2: and only while the "scrollWrite" group is armed.
+		const timeWrite = perf?.deepScrollWriteActive === true && recordPhase;
+		const writeStart = timeWrite ? this.win.performance.now() : 0;
 		this.scrollTopWriteDepth++;
 		this.activeWriteSource = source;
 		try {
@@ -2243,7 +2457,7 @@ export class MagnificationController {
 		// leave a short-lived note so that event still attributes to us.
 		this.scrollAttribution = { source, ttl: 2 };
 		if (!perf) return;
-		if (recordPhase) {
+		if (timeWrite) {
 			perf.addPhaseSample(
 				"scrollTopWrite",
 				this.win.performance.now() - writeStart,
@@ -2614,6 +2828,12 @@ export class MagnificationController {
 			start = 0;
 			end = this.view.getItems().length - 1;
 		}
+		// §六: remember what this envelope actually covers. Without it the
+		// cached rects silently stop describing the rows under the pointer
+		// as the active range slides, and a containment test on rows the
+		// envelope never held reads as "outside".
+		this.envelopeRangeStart = start;
+		this.envelopeRangeEnd = end;
 		this.envelope = this.view.collectEnvelope(
 			ENVELOPE_H_TOLERANCE,
 			ENVELOPE_V_TOLERANCE,
@@ -2641,6 +2861,20 @@ export class MagnificationController {
 		const rows = this.envelope.items.length;
 		this.perf?.addEnvelopeSample(rows);
 		this.perf?.count("markerCardRectReadCount", rows * 2);
+	}
+
+	/**
+	 * §六: does the cached envelope still span every row the active range
+	 * needs? An empty range asks for nothing and is always covered.
+	 */
+	private envelopeCoversActiveRange(): boolean {
+		const range = this.activeRange;
+		if (range.end < range.start) return true;
+		return (
+			this.envelopeRangeStart >= 0 &&
+			this.envelopeRangeStart <= range.start &&
+			this.envelopeRangeEnd >= range.end
+		);
 	}
 
 	/**

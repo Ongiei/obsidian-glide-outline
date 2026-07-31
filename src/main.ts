@@ -111,18 +111,40 @@ export default class GlideOutlinePlugin extends Plugin {
 		// On-demand performance capture (perf spec section 3). Sampling is
 		// NEVER always-on: hot paths check a plain boolean and every buffer
 		// is a fixed-size ring. Start → interact → Stop copies the report.
+		//
+		// §三 two depths. LIGHT is the everyday capture — six clock reads a
+		// frame, safe to leave running while judging smoothness. DEEP adds
+		// the sub-phase breakdown and is only worth its own cost once LIGHT
+		// has shown WHERE to look; every report states which mode produced
+		// it and what that mode cost.
 		this.addCommand({
 			id: "perf-capture-start",
-			name: "Start Glide Outline performance capture",
+			name: "Start Glide Outline performance capture (light)",
 			callback: () => {
 				if (this.perf.active) {
 					new Notice("Glide Outline: capture already running.");
 					return;
 				}
-				this.perf.start(window);
+				this.perf.start(window, "light");
 				new Notice(
-					"Glide Outline: performance capture started. " +
+					"Glide Outline: light performance capture started. " +
 						"Interact with the outline, then run the stop command.",
+				);
+			},
+		});
+		this.addCommand({
+			id: "perf-capture-start-deep",
+			name: "Start Glide Outline performance capture (deep)",
+			callback: () => {
+				if (this.perf.active) {
+					new Notice("Glide Outline: capture already running.");
+					return;
+				}
+				this.perf.start(window, "deep");
+				new Notice(
+					"Glide Outline: DEEP performance capture started. " +
+						"It samples every sub-phase and costs more per " +
+						"frame — use it to localise, not to judge smoothness.",
 				);
 			},
 		});
