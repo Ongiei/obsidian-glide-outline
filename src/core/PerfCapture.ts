@@ -121,6 +121,17 @@ export interface PerfCounters {
 	/** Layer-class toggles written vs. skipped as no-ops. */
 	promotionClassMutationCount: number;
 	promotionClassSkippedCount: number;
+	// --- §九 Frame scheduling ---
+	/** Frames actually requested from requestAnimationFrame. */
+	scheduledRafCount: number;
+	/** schedule() calls that found a frame already pending. */
+	dedupedRafCount: number;
+	/** schedule() calls refused because a heading is held. */
+	suppressedRafCount: number;
+	/** Frames that wrote neither a row style nor the scroller. */
+	frameWithoutMotionOrIntentCount: number;
+	/** Self-scheduled frames that did nothing and scheduled again. */
+	idleRafCount: number;
 	// --- §六/§十四 Correctness diagnostics ---
 	visibleOverlapViolationCount: number;
 	maxVisibleOverlapPx: number;
@@ -241,6 +252,11 @@ function zeroCounters(): PerfCounters {
 		promotedScaleLayerRows: 0,
 		promotionClassMutationCount: 0,
 		promotionClassSkippedCount: 0,
+		scheduledRafCount: 0,
+		dedupedRafCount: 0,
+		suppressedRafCount: 0,
+		frameWithoutMotionOrIntentCount: 0,
+		idleRafCount: 0,
 		visibleOverlapViolationCount: 0,
 		maxVisibleOverlapPx: 0,
 		staleAnchorResetCount: 0,
@@ -642,6 +658,20 @@ export interface PerfReport {
 		classSkippedCount: number;
 		classSkippedShare: number;
 	};
+	/**
+	 * §九: where frames come from. `idleRafCount` is the one that must be
+	 * 0 — anything else is description, that one is a verdict.
+	 */
+	frameScheduling: {
+		scheduledRafCount: number;
+		scheduledRafByReason: Record<string, number>;
+		dedupedRafCount: number;
+		dedupedRafByReason: Record<string, number>;
+		suppressedRafCount: number;
+		frameWithoutMotionOrIntentCount: number;
+		idleRafCount: number;
+		idleFrameShare: number;
+	};
 	/** §六/§十四: overlap + scroll-anchor correctness diagnostics. */
 	correctness: {
 		visibleOverlapViolationCount: number;
@@ -825,6 +855,8 @@ export class PerfCapture {
 		this.layerSampleCount = 0;
 		this.maxPromotedShiftLayers = 0;
 		this.maxPromotedScaleLayers = 0;
+		this.scheduledRafByReason = {};
+		this.dedupedRafByReason = {};
 		this.edgeStopReasons = {};
 		this.kineticStopReasons = {};
 		this.edgeSampleSum = 0;
@@ -1154,6 +1186,36 @@ export class PerfCapture {
 			scaleLayers,
 		);
 		this.layerSampleCount++;
+	}
+
+	// --- §九 frame scheduling attribution ----------------------------
+	private scheduledRafByReason: Record<string, number> = {};
+	private dedupedRafByReason: Record<string, number> = {};
+
+	/**
+	 * §九: one schedule() call and what became of it. Refusals are
+	 * recorded by reason too — knowing WHICH handler over-schedules is
+	 * the difference between "the dedup is earning its keep" and "this
+	 * handler should not be asking".
+	 */
+	noteSchedule(
+		reason: string,
+		outcome: "scheduled" | "deduped" | "suppressed",
+	): void {
+		if (!this.active) return;
+		if (outcome === "scheduled") {
+			this.counters.scheduledRafCount++;
+			this.scheduledRafByReason[reason] =
+				(this.scheduledRafByReason[reason] ?? 0) + 1;
+			return;
+		}
+		if (outcome === "deduped") {
+			this.counters.dedupedRafCount++;
+			this.dedupedRafByReason[reason] =
+				(this.dedupedRafByReason[reason] ?? 0) + 1;
+			return;
+		}
+		this.counters.suppressedRafCount++;
 	}
 
 	/** §四: one dynamic collision-boundary expansion (extra rows pulled in). */
@@ -1725,6 +1787,19 @@ export class PerfCapture {
 								(c.promotionClassMutationCount +
 									c.promotionClassSkippedCount)
 						: 0,
+				),
+			},
+			frameScheduling: {
+				scheduledRafCount: c.scheduledRafCount,
+				scheduledRafByReason: { ...this.scheduledRafByReason },
+				dedupedRafCount: c.dedupedRafCount,
+				dedupedRafByReason: { ...this.dedupedRafByReason },
+				suppressedRafCount: c.suppressedRafCount,
+				frameWithoutMotionOrIntentCount:
+					c.frameWithoutMotionOrIntentCount,
+				idleRafCount: c.idleRafCount,
+				idleFrameShare: round2(
+					c.frameWithoutMotionOrIntentCount / frameDiv,
 				),
 			},
 			correctness: {

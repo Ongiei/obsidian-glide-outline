@@ -131,6 +131,45 @@ export const COLLISION_GUARD_ROWS = 2;
  * displacement while the pointer sits between them.
  */
 export const LAYER_PROMOTION_GUARD_ROWS = 2;
+/**
+ * §九: why a frame was requested. The distinction that matters is not
+ * the label but the CLASS: an INPUT reason means something happened and
+ * a frame is owed; a SELF reason means the loop chose to keep itself
+ * alive. Only the second kind can spin for nothing, and "spinning for
+ * nothing at 60Hz" is the most expensive shape a frame budget bug takes.
+ */
+export type ScheduleReason =
+	| "pointerMove"
+	| "pointerEnter"
+	| "pointerRelease"
+	| "scrollEvent"
+	| "envelopeCheck"
+	| "expand"
+	| "settings"
+	| "geometry"
+	| "motionConverging"
+	| "edgeIntent"
+	| "kineticIntent"
+	| "autoScrollSettling"
+	| "autoScrollDwell"
+	| "wheelCooldown"
+	| "unknown";
+
+/**
+ * §九: reasons where the loop scheduled ITSELF. A frame that arrives for
+ * one of these, finds nothing to do and then schedules again is a pure
+ * idle spin — `idleRafCount` counts exactly that, and it must stay 0.
+ */
+const SELF_SCHEDULE_REASONS: ReadonlySet<ScheduleReason> = new Set<ScheduleReason>(
+	[
+		"motionConverging",
+		"edgeIntent",
+		"kineticIntent",
+		"autoScrollSettling",
+		"autoScrollDwell",
+		"wheelCooldown",
+	],
+);
 /** §三/§十四: allowed adjacent overlap slack, px (rounding tolerance). */
 export const OVERLAP_TOLERANCE_PX = 1;
 /** §四/§六 handoff apron: when a layout has NO offscreen gap to relax
@@ -339,6 +378,8 @@ export class MagnificationController {
 	private pointerExpanded = false;
 	private focusExpanded = false;
 	private rafId = 0;
+	/** §九: why the currently pending frame was requested. */
+	private pendingScheduleReason: ScheduleReason = "unknown";
 	private collapseTimer = 0;
 	private lastPointerX = Number.NaN;
 	private lastPointerY = Number.NaN;
@@ -597,7 +638,7 @@ export class MagnificationController {
 				const scheduleStart = measureDeep
 					? this.win.performance.now()
 					: 0;
-				this.schedule();
+				this.schedule("scrollEvent");
 				if (measureDeep && perf) {
 					const handlerEnd = this.win.performance.now();
 					perf.addPhaseSample(
@@ -659,7 +700,7 @@ export class MagnificationController {
 			if (!significant) return;
 			this.markCacheDirty("resize");
 			this.envelopeDirty = true;
-			this.schedule();
+			this.schedule("geometry");
 		});
 		resizeObserver.observe(view.listEl);
 		resizeObserver.observe(view.rootEl);
@@ -675,7 +716,7 @@ export class MagnificationController {
 		this.markCacheDirty("invalidate");
 		this.envelopeDirty = true;
 		this.perf?.count("cacheInvalidationCount");
-		if (this.isExpanded()) this.schedule();
+		if (this.isExpanded()) this.schedule("settings");
 	}
 
 	/**
@@ -760,7 +801,7 @@ export class MagnificationController {
 			this.lastSampleEventId = "";
 		}
 		this.syncExpanded();
-		this.schedule();
+		this.schedule("pointerEnter");
 	};
 
 	/**
@@ -784,7 +825,7 @@ export class MagnificationController {
 		this.lastPointerY = event.clientY;
 		this.pendingAnchorTarget = event.target;
 		this.anchorDirty = true;
-		this.schedule();
+		this.schedule("pointerMove");
 	};
 
 	/**
@@ -877,7 +918,7 @@ export class MagnificationController {
 			timeStamp: event.timeStamp,
 		};
 		this.windowCheckPending = true;
-		this.schedule();
+		this.schedule("envelopeCheck");
 	};
 
 	/**
@@ -954,7 +995,7 @@ export class MagnificationController {
 			now + MANUAL_WHEEL_COOLDOWN_MS;
 		this.stopEdgeIntent("manual-wheel");
 		this.stopKineticIntent("manual-wheel");
-		this.schedule();
+		this.schedule("wheelCooldown");
 	}
 
 	/**
@@ -1165,7 +1206,7 @@ export class MagnificationController {
 				accepted: true,
 			});
 			// Resume magnification / auto-scroll on the next frame.
-			this.schedule();
+			this.schedule("pointerRelease");
 			this.onJump?.(item);
 		} else {
 			this.diagnostics?.recordPointerActivation({
@@ -1180,7 +1221,7 @@ export class MagnificationController {
 				accepted: false,
 				rejectionReason: inside ? "heading-not-found" : "release-outside-target",
 			});
-			this.schedule();
+			this.schedule("pointerRelease");
 		}
 	};
 
@@ -1188,7 +1229,7 @@ export class MagnificationController {
 		const pressed = this.pressed;
 		if (!pressed || event.pointerId !== pressed.pointerId) return;
 		this.clearPressed();
-		this.schedule();
+		this.schedule("pointerRelease");
 	};
 
 	private onWindowBlur = (): void => {
@@ -1247,12 +1288,27 @@ export class MagnificationController {
 			// §七: expanding refreshes the envelope on demand; the geometry
 			// cache stays valid (row layout is expansion-invariant).
 			this.envelopeDirty = true;
-			this.schedule();
+			this.schedule("expand");
 		}
 	}
 
-	private schedule(): void {
-		if (this.rafId !== 0 || this.pressed) return;
+	/**
+	 * §九: request one frame and record WHY. Every refusal is recorded
+	 * too — a call that finds a frame already pending is not free
+	 * information, it is the measure of how much redundant scheduling the
+	 * input handlers do (and the reason the dedup is worth keeping).
+	 */
+	private schedule(reason: ScheduleReason = "unknown"): void {
+		if (this.pressed) {
+			this.perf?.noteSchedule(reason, "suppressed");
+			return;
+		}
+		if (this.rafId !== 0) {
+			this.perf?.noteSchedule(reason, "deduped");
+			return;
+		}
+		this.pendingScheduleReason = reason;
+		this.perf?.noteSchedule(reason, "scheduled");
 		this.rafId = this.win.requestAnimationFrame(this.frame);
 	}
 
@@ -1270,6 +1326,11 @@ export class MagnificationController {
 	 */
 	private frame = (frameTs?: number): void => {
 		this.rafId = 0;
+		// §九: consume the reason this frame was asked for. Read before
+		// any early return so a reason is never carried into the NEXT
+		// frame and misattributed there.
+		const scheduleReason = this.pendingScheduleReason;
+		this.pendingScheduleReason = "unknown";
 		// While a heading is held (pointerdown) the loop is suspended so
 		// the locked target cannot slide away; auto-scroll already stopped.
 		if (this.pressed) return;
@@ -1885,7 +1946,7 @@ export class MagnificationController {
 			}
 		}
 		// Keep the loop alive until every displayed value converged.
-		if (converging) this.schedule();
+		if (converging) this.schedule("motionConverging");
 
 		// Pointer edge auto-scroll + pointer-follow share this frame.
 		// Scrolling shifts the cached geometry by delta (scroll handler),
@@ -1898,6 +1959,26 @@ export class MagnificationController {
 			const frameEnd = this.win.performance.now();
 			perf.markPhase("autoScroll", frameEnd);
 			perf.endFrameAttribution(frameEnd);
+			// §九 IDLE FRAME DIAGNOSIS. Counted after the attribution
+			// window closes — this is the capture accounting for itself,
+			// not part of the frame being measured.
+			//
+			// "Did work" is deliberately narrow: something was written to
+			// the DOM, either a row style or the scroller. A frame that
+			// wrote neither produced no visible change, whatever else it
+			// computed.
+			const didWork = writes > 0 || this.integrator.appliedVelocity !== 0;
+			if (!didWork) {
+				perf.count("frameWithoutMotionOrIntentCount");
+				// The pathology is narrower still: the loop woke ITSELF,
+				// found nothing to do, and asked for another frame anyway.
+				// One trailing no-op frame is unavoidable (something has
+				// to notice the motion ended); a loop that keeps going
+				// after noticing is the bug. This must stay 0.
+				if (SELF_SCHEDULE_REASONS.has(scheduleReason) && this.rafId !== 0) {
+					perf.count("idleRafCount");
+				}
+			}
 		}
 		this.endFrame();
 	};
@@ -2028,7 +2109,7 @@ export class MagnificationController {
 			integ.combinedTargetVelocity = 0;
 			integ.appliedVelocity = 0;
 			integ.lastFrameTime = Number.NaN;
-			this.schedule();
+			this.schedule("wheelCooldown");
 			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollEligibility",
@@ -2104,7 +2185,7 @@ export class MagnificationController {
 						edge.dwellTimer = 0;
 						edge.dwellPassed = true;
 						integ.lastFrameTime = Number.NaN;
-						this.schedule();
+						this.schedule("autoScrollDwell");
 					}, AUTO_SCROLL_DWELL_MS);
 				}
 				edgeTarget = 0;
@@ -2311,7 +2392,16 @@ export class MagnificationController {
 			);
 		}
 		// Keep the loop alive while there is motion or a pending target.
-		this.schedule();
+		// (The fully-idle case returned above, so reaching here always
+		// means one of the three is genuinely non-zero — §九 attributes
+		// which, so an unexpected self-spin names its own cause.)
+		this.schedule(
+			edgeTarget !== 0
+				? "edgeIntent"
+				: kineticTarget !== 0
+					? "kineticIntent"
+					: "autoScrollSettling",
+		);
 	}
 
 	/**
