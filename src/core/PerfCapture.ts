@@ -85,6 +85,9 @@ export interface PerfCounters {
 	overflowScrollEventCount: number;
 	overflowMetricRefreshCount: number;
 	overflowMetricReadCount: number;
+	/** §五.2: fade-class toggles actually written vs. skipped as no-ops. */
+	overflowClassMutationCount: number;
+	overflowClassSkippedCount: number;
 	/** §十一: wheel routing outcome histogram. */
 	wheelEventCount: number;
 	wheelOutlineCount: number;
@@ -197,6 +200,8 @@ function zeroCounters(): PerfCounters {
 		overflowScrollEventCount: 0,
 		overflowMetricRefreshCount: 0,
 		overflowMetricReadCount: 0,
+		overflowClassMutationCount: 0,
+		overflowClassSkippedCount: 0,
 		wheelEventCount: 0,
 		wheelOutlineCount: 0,
 		wheelEditorHandoffCount: 0,
@@ -639,6 +644,10 @@ export interface PerfReport {
 		metricReadCount: number;
 		/** Share of overflow evaluations served without a layout read. */
 		cachedMetricShare: number;
+		classMutationCount: number;
+		classSkippedCount: number;
+		/** Share of evaluations that wrote no class at all. */
+		classSkippedShare: number;
 	};
 	/** §八: how pointer anchors were resolved (fallbackScanCount must be 0). */
 	anchorResolve: {
@@ -1674,6 +1683,15 @@ export class PerfCapture {
 						? c.overflowMetricReadCount /
 								(c.overflowMetricReadCount +
 									c.overflowMetricRefreshCount)
+						: 0,
+				),
+				classMutationCount: c.overflowClassMutationCount,
+				classSkippedCount: c.overflowClassSkippedCount,
+				classSkippedShare: round2(
+					c.overflowClassSkippedCount + c.overflowClassMutationCount > 0
+						? c.overflowClassSkippedCount /
+								(c.overflowClassSkippedCount +
+									c.overflowClassMutationCount)
 						: 0,
 				),
 			},

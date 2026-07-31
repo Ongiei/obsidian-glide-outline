@@ -130,6 +130,13 @@ export class GlideOutlineView {
 	 */
 	private cachedClientHeight = Number.NaN;
 	private cachedScrollHeight = Number.NaN;
+	/**
+	 * §五.2: fade classes as last written. Seeded `false` because that is
+	 * exactly the freshly built root's state — a memo that starts as a
+	 * guess would be a bug, not an optimisation.
+	 */
+	private lastFadeTop = false;
+	private lastFadeBottom = false;
 	private readonly onViewportScroll = (): void => {
 		const perf = this.perf;
 		// §3.2: same hot path as the controller's scroll listener, so the
@@ -533,14 +540,40 @@ export class GlideOutlineView {
 			scrollHeight: this.cachedScrollHeight,
 		});
 		this.overflowState = state;
-		this.rootEl.classList.toggle(
-			"glide-outline-root--fade-top",
-			state.canScrollUp,
-		);
-		this.rootEl.classList.toggle(
-			"glide-outline-root--fade-bottom",
-			state.canScrollDown,
-		);
+		this.applyFadeClasses(state.canScrollUp, state.canScrollDown);
+	}
+
+	/**
+	 * §五.2: write a fade class only when it actually changes.
+	 *
+	 * A `classList.toggle` to the value already present still runs the
+	 * DOMTokenList update steps and still marks the element for style
+	 * recalc on some engines. During an auto-scroll the pair is evaluated
+	 * every frame while the answer changes maybe twice per gesture, so
+	 * nearly all of those writes are pure waste.
+	 */
+	private applyFadeClasses(fadeTop: boolean, fadeBottom: boolean): void {
+		if (fadeTop === this.lastFadeTop && fadeBottom === this.lastFadeBottom) {
+			this.perf?.count("overflowClassSkippedCount");
+			return;
+		}
+		let mutations = 0;
+		if (fadeTop !== this.lastFadeTop) {
+			this.rootEl.classList.toggle("glide-outline-root--fade-top", fadeTop);
+			this.lastFadeTop = fadeTop;
+			mutations++;
+		}
+		if (fadeBottom !== this.lastFadeBottom) {
+			this.rootEl.classList.toggle(
+				"glide-outline-root--fade-bottom",
+				fadeBottom,
+			);
+			this.lastFadeBottom = fadeBottom;
+			mutations++;
+		}
+		if (mutations > 0) {
+			this.perf?.count("overflowClassMutationCount", mutations);
+		}
 	}
 
 	/** Clock helper — the view has no `win` field of its own. */
