@@ -77,6 +77,14 @@ export interface PerfCounters {
 	measureRowsReadCount: number;
 	measureRowsWriteCount: number;
 	measureRowsSkippedWriteCount: number;
+	/**
+	 * §五.1: edge-fade overflow bookkeeping. The ratio that matters is
+	 * `overflowMetricReadCount : overflowMetricRefreshCount` — reads are
+	 * served from cache, refreshes force layout.
+	 */
+	overflowScrollEventCount: number;
+	overflowMetricRefreshCount: number;
+	overflowMetricReadCount: number;
 	/** §十一: wheel routing outcome histogram. */
 	wheelEventCount: number;
 	wheelOutlineCount: number;
@@ -186,6 +194,9 @@ function zeroCounters(): PerfCounters {
 		measureRowsReadCount: 0,
 		measureRowsWriteCount: 0,
 		measureRowsSkippedWriteCount: 0,
+		overflowScrollEventCount: 0,
+		overflowMetricRefreshCount: 0,
+		overflowMetricReadCount: 0,
 		wheelEventCount: 0,
 		wheelOutlineCount: 0,
 		wheelEditorHandoffCount: 0,
@@ -296,7 +307,9 @@ export type PluginPhase =
 	/** Envelope geometry update caused by the scroll. */
 	| "scrollEnvelopeUpdate"
 	/** Scheduling the next frame from inside the scroll path. */
-	| "scrollFrameReschedule";
+	| "scrollFrameReschedule"
+	/** §五.1: the view's own scroll listener (edge-fade bookkeeping). */
+	| "viewOverflowHandler";
 
 const PLUGIN_PHASES: readonly PluginPhase[] = [
 	"pluginFrameJs",
@@ -319,6 +332,7 @@ const PLUGIN_PHASES: readonly PluginPhase[] = [
 	"scrollAnchorResolve",
 	"scrollEnvelopeUpdate",
 	"scrollFrameReschedule",
+	"viewOverflowHandler",
 ];
 
 /**
@@ -358,8 +372,9 @@ const PHASE_SLOT: ReadonlyMap<PluginPhase, number> = new Map(
  * armed at a time and the armed group rotates, dividing the steady-state
  * DEEP instrumentation cost by the number of groups.
  *
- * A group is one CALL SITE, because a site cannot skip half a start/stop
- * pair — the whole hot path either reads the clock or it does not.
+ * A group is one HOT PATH — the sites that run together on the same
+ * event — because a site cannot skip half a start/stop pair: it either
+ * reads the clock or it does not.
  */
 export type DeepPhaseGroup =
 	/** Sub-phases inside the RAF frame's read/calc segments. */
@@ -395,6 +410,9 @@ const DEEP_GROUP_OF: ReadonlyMap<PluginPhase, DeepPhaseGroup> = new Map<
 	["scrollEventHandler", "scrollEvent"],
 	["scrollOffsetUpdate", "scrollEvent"],
 	["scrollFrameReschedule", "scrollEvent"],
+	// A different listener, but the SAME hot path: one scroll event runs
+	// both, so they arm and go quiet together.
+	["viewOverflowHandler", "scrollEvent"],
 ]);
 
 /**
@@ -613,6 +631,14 @@ export interface PerfReport {
 		maxScrollDeltaPx: number;
 		/** §十: sample count per attributed scroll source. */
 		scrollDeltaBySource: Record<string, number>;
+	};
+	/** §五.1: how often a scroll had to re-measure the scroll box. */
+	overflow: {
+		scrollEventCount: number;
+		metricRefreshCount: number;
+		metricReadCount: number;
+		/** Share of overflow evaluations served without a layout read. */
+		cachedMetricShare: number;
 	};
 	/** §八: how pointer anchors were resolved (fallbackScanCount must be 0). */
 	anchorResolve: {
@@ -1638,6 +1664,18 @@ export class PerfCapture {
 				),
 				maxScrollDeltaPx: round2(c.maxScrollDeltaPx),
 				scrollDeltaBySource: { ...this.scrollDeltaBySource },
+			},
+			overflow: {
+				scrollEventCount: c.overflowScrollEventCount,
+				metricRefreshCount: c.overflowMetricRefreshCount,
+				metricReadCount: c.overflowMetricReadCount,
+				cachedMetricShare: round2(
+					c.overflowMetricReadCount + c.overflowMetricRefreshCount > 0
+						? c.overflowMetricReadCount /
+								(c.overflowMetricReadCount +
+									c.overflowMetricRefreshCount)
+						: 0,
+				),
 			},
 			anchorResolve: {
 				localHitCount: c.anchorLocalHitCount,
