@@ -1,7 +1,7 @@
 {
 	"id": "glide-outline",
 	"name": "Glide Outline",
-	"version": "0.1.5",
+	"version": "0.1.6",
 	"minAppVersion": "1.5.0",
 	"description": "A fluid editor-margin outline with dock-style proximity magnification.",
 	"author": "Ongiei",
