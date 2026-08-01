@@ -9,6 +9,7 @@ import type { OverflowState } from "../utils/overflow";
 import { bridgeRectFor } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
 import type { PerfCapture } from "../core/PerfCapture";
+import { markColdStart } from "../core/ColdStartTrace";
 import { createOutlineMount } from "./mount";
 import type { MountHostMutationDiagnostics, OutlineMount } from "./mount";
 
@@ -450,6 +451,7 @@ export class GlideOutlineView {
 		const settings = this.getSettings();
 		const visible = items.filter((item) => settings.showLevels[item.level - 1]);
 		this.items = visible;
+		markColdStart("firstItemsSet"); // §十三
 
 		const nextKeys = new Set(visible.map((item) => item.key));
 		for (const [key, record] of this.itemRecords) {
@@ -490,6 +492,7 @@ export class GlideOutlineView {
 
 		// §十三: the row list is now in the document — the first commit is
 		// the earliest instant anything of the outline is on screen.
+		if (visible.length > 0) markColdStart("firstOutlineDomCommit");
 
 		// Empty state: hide the rail entirely when nothing is visible.
 		this.rootEl.classList.toggle("is-empty", visible.length === 0);
@@ -938,6 +941,7 @@ export class GlideOutlineView {
 	 */
 	private measureRows(): void {
 		if (this.disposed) return;
+		markColdStart("firstMeasureRowsStart"); // §十三
 		const s = this.getSettings();
 		const records = [...this.itemRecords.values()];
 		this.perf?.count("measureRowsRunCount");
@@ -1008,6 +1012,7 @@ export class GlideOutlineView {
 			// deferred by setItems (rows finally have a real height).
 			this.requestActiveFollow("metrics-change");
 		}
+		markColdStart("firstMeasureRowsEnd"); // §十三
 	}
 
 	/**
@@ -1028,6 +1033,7 @@ export class GlideOutlineView {
 		const key = this.activeKey;
 		// Nothing is active — there is no target worth remembering.
 		if (key === null) return;
+		markColdStart("firstActiveFollowRequest"); // §十三
 
 		// §三: record the target FIRST, unconditionally. The old code
 		// returned here when the gate was shut, which threw the request
@@ -1209,6 +1215,7 @@ export class GlideOutlineView {
 			source: "active-follow",
 		});
 		if (applied) {
+			markColdStart("firstActiveFollowApplied"); // §十三
 			this.activeFollowDiag.appliedCount++;
 			this.activeFollowDiag.lastLatencyMs = Math.max(
 				0,

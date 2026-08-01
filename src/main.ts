@@ -3,7 +3,7 @@ import type { Editor, MarkdownView, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { Diagnostics } from "./core/Diagnostics";
 import { PerfCapture } from "./core/PerfCapture";
-import { ColdStartTrace } from "./core/ColdStartTrace";
+import { ColdStartTrace, setActiveColdStartTrace } from "./core/ColdStartTrace";
 import { FULL_MOTION_STATE } from "./utils/motion";
 import {
 	DEFAULT_SETTINGS,
@@ -221,6 +221,7 @@ export default class GlideOutlinePlugin extends Plugin {
 		if (this.perf.active) this.perf.stop(window);
 		// §八: never leave the cold-start frame watch running.
 		this.coldStart?.dispose();
+		setActiveColdStartTrace(null);
 		if (this.saveTimer !== 0) {
 			window.clearTimeout(this.saveTimer);
 			this.saveTimer = 0;
@@ -277,6 +278,33 @@ export default class GlideOutlinePlugin extends Plugin {
 			new Notice(
 				"Glide Outline: developer mode off — performance capture " +
 					"stopped and discarded.",
+			);
+		}
+		// §十四: the cold-start machinery is part of the same surface, and
+		// it has two pieces the old gate ignored. A RUNNING trace holds a
+		// RAF loop and a longtask observer for up to 30 s — leaving it
+		// alive means the user switched the tooling off and kept paying
+		// for it. An ARMED latch is worse: it survives in settings and
+		// silently starts a trace on the NEXT reload, long after developer
+		// mode was turned off.
+		let armedCleared = false;
+		if (this.settings.coldStartCaptureArmed) {
+			this.settings.coldStartCaptureArmed = false;
+			armedCleared = true;
+		}
+		const traceRunning = this.coldStart !== null;
+		if (traceRunning) {
+			this.coldStart?.dispose();
+			this.coldStart = null;
+		}
+		setActiveColdStartTrace(null);
+		if (armedCleared || traceRunning) {
+			// Persist the cleared latch immediately — a reload must not be
+			// able to observe the armed state we just revoked.
+			void this.saveData(this.settings);
+			new Notice(
+				"Glide Outline: developer mode off — cold-start capture " +
+					"disarmed and discarded.",
 			);
 		}
 	}
@@ -344,8 +372,20 @@ export default class GlideOutlinePlugin extends Plugin {
 	 */
 	private maybeArmColdStart(coldStartAt: number): void {
 		if (!this.settings.coldStartCaptureArmed) return;
+		// §十四: developer mode is the gate for the whole diagnostic
+		// surface. A latch armed before the user switched it off must not
+		// resurrect the trace on the next reload.
+		if (!this.settings.developerMode) {
+			this.settings.coldStartCaptureArmed = false;
+			void this.saveData(this.settings);
+			return;
+		}
 		this.coldStart = new ColdStartTrace(window, coldStartAt);
 		this.coldStart.mark("settingsLoaded");
+		// §十三: publish the trace so the first-use milestones fired from
+		// the view / magnification hot paths can reach it without those
+		// modules taking a trace parameter they would keep forever.
+		setActiveColdStartTrace(this.coldStart);
 		this.settings.coldStartCaptureArmed = false;
 		void this.saveData(this.settings);
 	}
