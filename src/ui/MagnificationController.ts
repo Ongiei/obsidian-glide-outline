@@ -18,6 +18,10 @@ import {
 } from "../utils/wheelRouting";
 import { DisposableStore } from "../utils/disposable";
 import {
+	markColdStart,
+	noteColdStartInteraction,
+} from "../core/ColdStartTrace";
+import {
 	bridgeRectFor,
 	emptyRect,
 	pointInEnvelope,
@@ -53,7 +57,10 @@ import type { Diagnostics, ScrollDeltaSource } from "../core/Diagnostics";
 import type { PerfCapture, PerfCounters } from "../core/PerfCapture";
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
-import type { GlideOutlineView } from "./GlideOutlineView";
+import type {
+	GlideOutlineView,
+	OutlineInteractionState,
+} from "./GlideOutlineView";
 
 interface CachedItem {
 	el: HTMLElement;
@@ -633,8 +640,15 @@ export class MagnificationController {
 				) {
 					this.anchorScrollStale = true;
 				}
-				// User is scrolling the outline — pause active-heading follow.
-				this.view.setFollowEnabled(false);
+				// Only a USER scroll pauses follow. The active-follow's own
+				// scrollTop write fires this handler synchronously, and
+				// pausing on it would lock follow off after the first
+				// positioning — syncExpanded only re-enables it on the
+				// next pointer move, which may never come if the user is
+				// scrolling the editor, not the outline.
+				if (source === "external") {
+					this.view.setFollowEnabled(false);
+				}
 				const scheduleStart = measureDeep
 					? this.win.performance.now()
 					: 0;
@@ -729,6 +743,9 @@ export class MagnificationController {
 		this.scrollAttribution = { source: reason, ttl: 3 };
 		if (reason === "file-change") this.fileChangeTtl = 3;
 		else this.modeChangeTtl = 3;
+		// §四: a file/mode swap can land on the same active heading with a
+		// different row offset — re-center it (no-op unless collapsed).
+		this.view.requestActiveFollow(reason);
 	}
 
 	dispose(): void {
@@ -758,6 +775,10 @@ export class MagnificationController {
 	}
 
 	private onPointerEnter = (event: PointerEvent): void => {
+		// §十二: the first pointer that reaches the rail is the moment the
+		// cold-start trace has been waiting for — an untouched outline is
+		// idle, not fast, so stability is only judged from here on.
+		noteColdStartInteraction("firstPointerEnter");
 		// §十: is this a FRESH gesture, or a re-entry from a transparent
 		// gap? `pointerenter` fires on the rail AND on the list, so gliding
 		// off a card into the gap and onto the next one re-fires it several
@@ -1161,6 +1182,7 @@ export class MagnificationController {
 		};
 		// Stop ALL scroll intents while the target is held (§十一).
 		this.pressed = pressed;
+		this.view.setInteractionState("pressed");
 		this.resetAllScrollIntent("pressed");
 		// Section 12: freezing is structural — the frame loop is suspended
 		// while pressed (schedule() refuses, frame() early-returns), and no
@@ -1179,6 +1201,9 @@ export class MagnificationController {
 		const pressed = this.pressed;
 		if (!pressed || event.pointerId !== pressed.pointerId) return;
 		this.pressed = null;
+		// §四: press released — fall back to the ambient pointer/keyboard
+		// state (still expanded while the pointer stays over the outline).
+		this.view.setInteractionState(this.currentInteractionState());
 		if (pressed.captured) {
 			try {
 				pressed.captured.releasePointerCapture(event.pointerId);
@@ -1254,6 +1279,8 @@ export class MagnificationController {
 			}
 		}
 		this.pressed = null;
+		// §四: press cleared — reflect the ambient interaction state.
+		this.view.setInteractionState(this.currentInteractionState());
 	}
 
 	private cancelCollapse(): void {
@@ -1263,15 +1290,39 @@ export class MagnificationController {
 		}
 	}
 
+	/**
+	 * §四: the outline's interaction state as the view should see it.
+	 * `pressed` and pointer hover both imply the user is driving, so both
+	 * suppress active-follow; a lone keyboard focus is its own variant.
+	 */
+	private currentInteractionState(): OutlineInteractionState {
+		if (this.pressed) return "pressed";
+		if (this.pointerExpanded) return "expanded-pointer";
+		if (this.focusExpanded) return "expanded-keyboard";
+		return "collapsed";
+	}
+
 	private syncExpanded(): void {
 		const expanded = this.isExpanded();
+		const state = this.currentInteractionState();
 		if (expanded === this.view.isExpanded()) {
 			// Still update follow state: pointer inside ⇒ follow paused.
 			this.view.setFollowEnabled(!expanded);
+			this.view.setInteractionState(state);
 			return;
 		}
+		// §十二: the first real reveal. Recorded before the write so the
+		// milestone brackets the expansion rather than trailing it.
+		if (expanded) noteColdStartInteraction("firstExpand");
+		// §十一: snap the newest active heading to the centre BEFORE the
+		// rail expands. The user must see the current heading the instant
+		// the cards appear — never a stale row that then slides into place
+		// under the pointer, and never magnification spinning up around
+		// the wrong heading.
+		if (expanded) this.view.finishActiveFollowImmediately();
 		this.view.setExpanded(expanded);
 		this.view.setFollowEnabled(!expanded);
+		this.view.setInteractionState(state);
 		if (!expanded) {
 			this.cancelFrame();
 			this.resetAllScrollIntent("collapsed");
@@ -1284,6 +1335,9 @@ export class MagnificationController {
 			this.activeRange = emptyActiveRange();
 			this.windowCheckPending = false;
 			this.lastMotionTime = Number.NaN;
+			// §四: now collapsed — pre-position the active heading so the
+			// next expand starts already centred on it.
+			this.view.requestActiveFollow("collapse");
 		} else {
 			// §七: expanding refreshes the envelope on demand; the geometry
 			// cache stays valid (row layout is expansion-invariant).
@@ -1875,6 +1929,17 @@ export class MagnificationController {
 				dirtyAdded++;
 			}
 		}
+		// §十三: first-use milestones, read off counters the write phase
+		// already produced. Two optional-chained no-ops per frame when no
+		// trace is armed — the promotion logic itself is untouched.
+		if (promotedShiftLayers > 0) {
+			markColdStart("firstShiftLayerPromotion");
+			noteColdStartInteraction("firstMotionFrame");
+		}
+		if (promotedScaleLayers > 0) {
+			markColdStart("firstScaleLayerPromotion");
+			noteColdStartInteraction("firstMotionFrame");
+		}
 		if (measure && perf) {
 			perf.markPhase("styleWrite", this.win.performance.now());
 			// §十四 range statistics. WRITE range = rows still dirty
@@ -2361,6 +2426,8 @@ export class MagnificationController {
 							: "kinetic",
 				);
 				perf?.count("autoScrollFrameCount");
+				// §十二: the outline scrolled itself under the pointer.
+				noteColdStartInteraction("firstAutoScrollFrame");
 				perf?.addAutoScrollSample(combined, integ.appliedVelocity);
 				perf?.addCombinedIntentSample(combined);
 				perf?.addAppliedVelocitySample(integ.appliedVelocity);
@@ -2699,6 +2766,7 @@ export class MagnificationController {
 	 */
 	private rebuildCache(): void {
 		this.cacheDirty = false;
+		markColdStart("firstGeometryBuild"); // §十三
 		this.perf?.count("geometryRebuildCount");
 		this.perf?.countRebuildReason(this.cacheDirtyReason);
 		// Viewport bounds are cached here (not per frame) — they only move
@@ -2821,6 +2889,7 @@ export class MagnificationController {
 	 */
 	private rebuildEnvelope(): void {
 		this.envelopeDirty = false;
+		markColdStart("firstEnvelopeBuild"); // §十三
 		let start = this.activeRange.start;
 		let end = this.activeRange.end;
 		if (this.cache.length === 0) {

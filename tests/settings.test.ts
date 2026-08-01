@@ -337,3 +337,38 @@ describe("resetAppearanceInPlace (P1-6)", () => {
 		expect(settings.card).toEqual(DEFAULT_CARD);
 	});
 });
+
+describe("developerMode + cold-start latch (§六/§八)", () => {
+	it("defaults both new fields to false", () => {
+		expect(DEFAULT_SETTINGS.developerMode).toBe(false);
+		expect(DEFAULT_SETTINGS.coldStartCaptureArmed).toBe(false);
+		const s = normalizeSettings({});
+		expect(s.developerMode).toBe(false);
+		expect(s.coldStartCaptureArmed).toBe(false);
+	});
+
+	it("persists an explicit developerMode choice without clearing the latch", () => {
+		const s = normalizeSettings({
+			developerMode: true,
+			coldStartCaptureArmed: true,
+		});
+		expect(s.developerMode).toBe(true);
+		// Arming is independent of developer mode: the one-shot latch must
+		// survive a reload even with dev mode off (the copy command re-gates).
+		expect(s.coldStartCaptureArmed).toBe(true);
+	});
+
+	it("resets the latch on a clear reload (one-shot, not sticky)", () => {
+		const s = normalizeSettings({ coldStartCaptureArmed: false });
+		expect(s.coldStartCaptureArmed).toBe(false);
+	});
+
+	it("coerces non-boolean inputs to the default false", () => {
+		const s = normalizeSettings({
+			developerMode: "yes",
+			coldStartCaptureArmed: 1,
+		});
+		expect(s.developerMode).toBe(false);
+		expect(s.coldStartCaptureArmed).toBe(false);
+	});
+});

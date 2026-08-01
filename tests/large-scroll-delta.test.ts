@@ -220,13 +220,28 @@ describe("large scroll delta snapshots + source attribution (§十)", () => {
 		expect(snap.modeChangePending).toBe(false);
 	});
 
-	it("attributes a programmatic active-heading reveal as jump", () => {
+	it("attributes a programmatic active-heading reveal as active-follow", () => {
 		settleFrames(4);
-		// The reveal leaves its note BEFORE the (stubbed) scrollIntoView.
+		// §四: the collapsed reveal is a coalesced, purely numeric
+		// scrollTop write. Restore the collapsed state (settleFrames'
+		// pointermoves expanded it), give the active row a measured height
+		// + a far offset, then let the follow frame run. The reveal leaves
+		// its "active-follow" note before writing scrollTop.
+		view.setInteractionState("collapsed");
 		view.setFollowEnabled(true);
+		const rec = view.getItemRecord(HEADINGS[25]!.key)!;
+		Object.defineProperty(rec.rowEl, "offsetHeight", {
+			configurable: true,
+			value: 30,
+		});
+		Object.defineProperty(rec.rowEl, "offsetTop", {
+			configurable: true,
+			value: 30,
+		});
 		view.setActiveKey(HEADINGS[25]!.key);
+		flushFrame(); // run the coalesced active-follow RAF
 		scrollTo(850);
-		expect(diagnostics.largeScrollDeltas[0]?.source).toBe("jump");
+		expect(diagnostics.largeScrollDeltas[0]?.source).toBe("active-follow");
 	});
 
 	it("falls back to external once every note has expired", () => {

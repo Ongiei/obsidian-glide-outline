@@ -3,6 +3,7 @@ import type { Editor, MarkdownView, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { Diagnostics } from "./core/Diagnostics";
 import { PerfCapture } from "./core/PerfCapture";
+import { ColdStartTrace, setActiveColdStartTrace } from "./core/ColdStartTrace";
 import { FULL_MOTION_STATE } from "./utils/motion";
 import {
 	DEFAULT_SETTINGS,
@@ -38,10 +39,21 @@ export default class GlideOutlinePlugin extends Plugin {
 	private readonly diagnostics = new Diagnostics();
 	/** On-demand performance capture (section 3) — zero cost while off. */
 	private readonly perf = new PerfCapture();
+	/**
+	 * §八/§九: one-shot cold-start trace. Non-null only for the single
+	 * reload after the arm command ran; null (and therefore zero cost)
+	 * otherwise.
+	 */
+	private coldStart: ColdStartTrace | null = null;
 
 	override async onload(): Promise<void> {
+		// §八: t0 — the FIRST thing onload does, before any await, so the
+		// milestones are measured from the real start of the plugin's load.
+		const coldStartAt = window.performance.now();
 		this.settings = normalizeSettings(await this.loadData());
+		this.maybeArmColdStart(coldStartAt);
 		this.provider = new HeadingProvider(this.app);
+		this.coldStart?.mark("providerReady");
 		this.addSettingTab(new GlideOutlineSettingTab(this.app, this));
 
 		// P0-2: a single updateListener for every editor in the workspace.
@@ -77,6 +89,7 @@ export default class GlideOutlinePlugin extends Plugin {
 				this.controller?.handleContextChange("mode-change");
 			}),
 		);
+		this.coldStart?.mark("eventsRegistered");
 
 		// Command names deliberately avoid the plugin name and the word
 		// "command" — Obsidian already prefixes them with "Glide Outline:".
@@ -117,28 +130,37 @@ export default class GlideOutlinePlugin extends Plugin {
 		// the sub-phase breakdown and is only worth its own cost once LIGHT
 		// has shown WHERE to look; every report states which mode produced
 		// it and what that mode cost.
+		// §七: the performance-capture and cold-start commands are gated
+		// behind developer mode via checkCallback — hidden from the palette
+		// entirely when the setting is off. `copy-diagnostics` above stays
+		// ungated: it is end-user triage, not a developer tool.
 		this.addCommand({
 			id: "perf-capture-start",
 			name: "Start Glide Outline performance capture (light)",
-			callback: () => {
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
 				if (this.perf.active) {
 					new Notice("Glide Outline: capture already running.");
-					return;
+					return true;
 				}
 				this.perf.start(window, "light");
 				new Notice(
 					"Glide Outline: light performance capture started. " +
 						"Interact with the outline, then run the stop command.",
 				);
+				return true;
 			},
 		});
 		this.addCommand({
 			id: "perf-capture-start-deep",
 			name: "Start Glide Outline performance capture (deep)",
-			callback: () => {
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
 				if (this.perf.active) {
 					new Notice("Glide Outline: capture already running.");
-					return;
+					return true;
 				}
 				this.perf.start(window, "deep");
 				new Notice(
@@ -146,32 +168,60 @@ export default class GlideOutlinePlugin extends Plugin {
 						"It samples every sub-phase and costs more per " +
 						"frame — use it to localise, not to judge smoothness.",
 				);
+				return true;
 			},
 		});
 		this.addCommand({
 			id: "perf-capture-stop",
 			name: "Stop and copy Glide Outline performance capture",
-			callback: async () => {
-				const report = this.perf.stop(window);
-				if (!report) {
-					new Notice("Glide Outline: no capture is running.");
-					return;
-				}
-				await navigator.clipboard.writeText(
-					JSON.stringify(report, null, 2),
-				);
-				new Notice(
-					"Glide Outline: performance report copied to clipboard.",
-				);
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
+				void this.stopAndCopyCapture();
+				return true;
 			},
 		});
+		// §八/§九: one-shot cold-start tracing. Arming persists a latch that
+		// the next onload consumes; the copy command reads back whatever the
+		// last consumed trace recorded.
+		this.addCommand({
+			id: "cold-start-arm",
+			name: "Arm cold-start performance capture for next reload",
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
+				void this.armColdStartCapture();
+				return true;
+			},
+		});
+		this.addCommand({
+			id: "cold-start-copy",
+			name: "Copy latest cold-start performance report",
+			checkCallback: (checking: boolean): boolean => {
+				if (!this.settings.developerMode) return false;
+				if (checking) return true;
+				void this.copyColdStartReport();
+				return true;
+			},
+		});
+		this.coldStart?.mark("commandsRegistered");
 
-		this.app.workspace.onLayoutReady(() => this.lifecycle.start());
+		this.app.workspace.onLayoutReady(() => {
+			this.coldStart?.mark("layoutReady");
+			this.lifecycle.start();
+			// Begin the post-load frame watch only once the outline has had
+			// its first chance to mount.
+			this.coldStart?.beginSettleWatch();
+		});
+		this.coldStart?.mark("onloadEnd");
 	}
 
 	override onunload(): void {
 		// Never leave a longtask observer behind (section 3).
 		if (this.perf.active) this.perf.stop(window);
+		// §八: never leave the cold-start frame watch running.
+		this.coldStart?.dispose();
+		setActiveColdStartTrace(null);
 		if (this.saveTimer !== 0) {
 			window.clearTimeout(this.saveTimer);
 			this.saveTimer = 0;
@@ -210,7 +260,53 @@ export default class GlideOutlinePlugin extends Plugin {
 	/** Steps 1 + 2: normalize in place and refresh the mounted outline. */
 	private applySettingsImmediately(): void {
 		normalizeSettingsInPlace(this.settings);
+		this.enforceDeveloperModeGate();
 		this.refreshUi();
+	}
+
+	/**
+	 * §七: developer mode gates the performance-capture machinery. Turning
+	 * it off must not leave a capture — and its longtask observer — running
+	 * in the background: any in-flight capture is abandoned and its samples
+	 * discarded (never copied), because the user just asked for the tooling
+	 * to go away. A no-op when developer mode is on or nothing is running.
+	 */
+	private enforceDeveloperModeGate(): void {
+		if (this.settings.developerMode) return;
+		if (this.perf.active) {
+			this.perf.abort();
+			new Notice(
+				"Glide Outline: developer mode off — performance capture " +
+					"stopped and discarded.",
+			);
+		}
+		// §十四: the cold-start machinery is part of the same surface, and
+		// it has two pieces the old gate ignored. A RUNNING trace holds a
+		// RAF loop and a longtask observer for up to 30 s — leaving it
+		// alive means the user switched the tooling off and kept paying
+		// for it. An ARMED latch is worse: it survives in settings and
+		// silently starts a trace on the NEXT reload, long after developer
+		// mode was turned off.
+		let armedCleared = false;
+		if (this.settings.coldStartCaptureArmed) {
+			this.settings.coldStartCaptureArmed = false;
+			armedCleared = true;
+		}
+		const traceRunning = this.coldStart !== null;
+		if (traceRunning) {
+			this.coldStart?.dispose();
+			this.coldStart = null;
+		}
+		setActiveColdStartTrace(null);
+		if (armedCleared || traceRunning) {
+			// Persist the cleared latch immediately — a reload must not be
+			// able to observe the armed state we just revoked.
+			void this.saveData(this.settings);
+			new Notice(
+				"Glide Outline: developer mode off — cold-start capture " +
+					"disarmed and discarded.",
+			);
+		}
 	}
 
 	private schedulePersistSettings(): void {
@@ -255,6 +351,70 @@ export default class GlideOutlinePlugin extends Plugin {
 		);
 	}
 
+	/** §七: stop a running capture and copy its report to the clipboard. */
+	private async stopAndCopyCapture(): Promise<void> {
+		const report = this.perf.stop(window);
+		if (!report) {
+			new Notice("Glide Outline: no capture is running.");
+			return;
+		}
+		await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+		new Notice("Glide Outline: performance report copied to clipboard.");
+	}
+
+	/**
+	 * §八: consume the one-shot cold-start latch. If the previous session
+	 * armed it, build the trace at the captured t0, record the first
+	 * milestone and clear the latch immediately (persisting the clear) so
+	 * the trace fires exactly once per arm — even if this onload throws
+	 * later. When the latch is unset this does nothing and `coldStart`
+	 * stays null, so an un-armed reload pays zero cost.
+	 */
+	private maybeArmColdStart(coldStartAt: number): void {
+		if (!this.settings.coldStartCaptureArmed) return;
+		// §十四: developer mode is the gate for the whole diagnostic
+		// surface. A latch armed before the user switched it off must not
+		// resurrect the trace on the next reload.
+		if (!this.settings.developerMode) {
+			this.settings.coldStartCaptureArmed = false;
+			void this.saveData(this.settings);
+			return;
+		}
+		this.coldStart = new ColdStartTrace(window, coldStartAt);
+		this.coldStart.mark("settingsLoaded");
+		// §十三: publish the trace so the first-use milestones fired from
+		// the view / magnification hot paths can reach it without those
+		// modules taking a trace parameter they would keep forever.
+		setActiveColdStartTrace(this.coldStart);
+		this.settings.coldStartCaptureArmed = false;
+		void this.saveData(this.settings);
+	}
+
+	/** §八: arm the one-shot cold-start latch and persist it immediately. */
+	private async armColdStartCapture(): Promise<void> {
+		this.settings.coldStartCaptureArmed = true;
+		await this.saveData(this.settings);
+		new Notice(
+			"Glide Outline: cold-start capture armed. Reload Obsidian (or " +
+				"toggle the plugin off and on) to record the next startup, " +
+				"then run the copy command.",
+		);
+	}
+
+	/** §九: copy the latest consumed cold-start trace to the clipboard. */
+	private async copyColdStartReport(): Promise<void> {
+		if (!this.coldStart) {
+			new Notice(
+				"Glide Outline: no cold-start report. Arm the capture and " +
+					"reload first.",
+			);
+			return;
+		}
+		const report = this.coldStart.buildReport();
+		await navigator.clipboard.writeText(JSON.stringify(report, null, 2));
+		new Notice("Glide Outline: cold-start report copied to clipboard.");
+	}
+
 	/**
 	 * Build and copy the diagnostics JSON (section 3). Runs even when no
 	 * outline is mounted — the OS motion report and settings alone already
@@ -287,6 +447,7 @@ export default class GlideOutlinePlugin extends Plugin {
 				edgeFadeSize: s.edgeFadeSize,
 				showLevels: s.showLevels,
 				renderMarkdown: s.renderMarkdown,
+				developerMode: s.developerMode,
 			},
 			outline: this.controller?.getDiagnosticsSnapshot() ?? null,
 			lastPointerActivation: this.diagnostics.lastPointerActivation,
