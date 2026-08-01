@@ -640,8 +640,15 @@ export class MagnificationController {
 				) {
 					this.anchorScrollStale = true;
 				}
-				// User is scrolling the outline — pause active-heading follow.
-				this.view.setFollowEnabled(false);
+				// Only a USER scroll pauses follow. The active-follow's own
+				// scrollTop write fires this handler synchronously, and
+				// pausing on it would lock follow off after the first
+				// positioning — syncExpanded only re-enables it on the
+				// next pointer move, which may never come if the user is
+				// scrolling the editor, not the outline.
+				if (source === "external") {
+					this.view.setFollowEnabled(false);
+				}
 				const scheduleStart = measureDeep
 					? this.win.performance.now()
 					: 0;
