@@ -325,6 +325,10 @@ export class GlideOutlineView {
 	 * magnification controller's scroll handler for source attribution.
 	 * §四: widened to distinguish an active-follow reveal from a jump. */
 	private programmaticScrollNote: "jump" | "active-follow" | null = null;
+	/** §六: frames the note stays valid (covers a smooth-scroll animation). */
+	private programmaticScrollNoteFrames = 0;
+	/** §六: true when the last active-follow write used scrollTo(smooth). */
+	private lastScrollWasSmooth = false;
 
 	/** §四: current interaction state; only `collapsed` pre-positions. */
 	private interactionState: OutlineInteractionState = "collapsed";
@@ -529,18 +533,18 @@ export class GlideOutlineView {
 			prev?.buttonEl.classList.remove("is-active");
 			prev?.buttonEl.removeAttribute("aria-current");
 		}
-		this.activeKey = key;
-		if (key) {
-			const record = this.itemRecords.get(key);
-			if (record) {
-				record.buttonEl.classList.add("is-active");
-				record.buttonEl.setAttribute("aria-current", "true");
-			}
+	this.activeKey = key;
+	if (key) {
+		const record = this.itemRecords.get(key);
+		if (record) {
+			record.buttonEl.classList.add("is-active");
+			record.buttonEl.setAttribute("aria-current", "true");
 		}
-		// §四: keep the active heading positioned inside the outline's own
-		// scroll viewport — but only while collapsed, so the pointer/keyboard
-		// user is never fought (requestActiveFollow enforces that gate).
-		this.requestActiveFollow("active-change");
+	}
+	// §四: keep the active heading positioned inside the outline's own
+	// scroll viewport — but only while collapsed, so the pointer/keyboard
+	// user is never fought (requestActiveFollow enforces that gate).
+	this.requestActiveFollow("active-change");
 	}
 
 	/**
@@ -671,9 +675,12 @@ export class GlideOutlineView {
 	 * never mis-attributed.
 	 */
 	takeProgrammaticScrollNote(): "jump" | "active-follow" | null {
-		const note = this.programmaticScrollNote;
+		if (this.programmaticScrollNoteFrames > 0) {
+			this.programmaticScrollNoteFrames--;
+			return this.programmaticScrollNote;
+		}
 		this.programmaticScrollNote = null;
-		return note;
+		return null;
 	}
 
 	dispose(): void {
@@ -1211,7 +1218,7 @@ export class GlideOutlineView {
 		const requestedAt = pending?.requestedAt ?? this.now();
 		const applied = this.scrollActiveRowIntoPosition({
 			alignment: "center",
-			behavior: "auto",
+			behavior: "smooth",
 			source: "active-follow",
 		});
 		if (applied) {
@@ -1326,7 +1333,7 @@ export class GlideOutlineView {
 	 */
 	scrollActiveRowIntoPosition(options: {
 		alignment: "center" | "nearest";
-		behavior: "auto";
+		behavior: "auto" | "smooth";
 		source: "active-follow" | "jump";
 	}): boolean {
 		if (this.disposed || this.activeKey === null) return false;
@@ -1396,9 +1403,25 @@ export class GlideOutlineView {
 		// §十: attribute the scroll BEFORE the write — the event may be
 		// delivered synchronously. active-follow reveals are their own
 		// source so the histogram never blames them on a user gesture.
+		// §六: smooth scroll fires scroll events over ~300ms; the note
+		// must survive the whole animation so the MagnificationController's
+		// scroll handler doesn't treat later frames as user scrolls and
+		// pause follow. A frame TTL of 30 (~500ms at 60fps) covers it.
+		// The TTL is only set when scrollTo is actually used — in jsdom
+		// scrollTo is absent and the fallback (scrollTop = target) is
+		// instant, so the TTL stays at 1 and the correction frame runs.
+		const useSmoothScroll =
+			options.behavior === "smooth" &&
+			typeof viewport.scrollTo === "function";
 		this.programmaticScrollNote =
 			options.source === "active-follow" ? "active-follow" : "jump";
-		viewport.scrollTop = target;
+		this.programmaticScrollNoteFrames = useSmoothScroll ? 30 : 1;
+		this.lastScrollWasSmooth = useSmoothScroll;
+		if (useSmoothScroll) {
+			viewport.scrollTo({ top: target, behavior: "smooth" });
+		} else {
+			viewport.scrollTop = target;
+		}
 		diag.lastScrollTopAfter = viewport.scrollTop;
 		diag.scrollMutationCount++;
 		this.perf?.count("activeFollowScrollMutationCount");
@@ -1477,9 +1500,20 @@ export class GlideOutlineView {
 			diag.lastScrollTopAfter = scrollTop;
 			return;
 		}
+		// §六: a smooth scroll (behavior: "smooth") animates over ~300ms.
+		// On the next rAF the row is still mid-flight: scrollTop is between
+		// the old and new positions, so target !== scrollTop. Issuing a
+		// corrective write here would fight the animation. In jsdom
+		// scrollTo is absent (scrollTop = target is instant), so
+		// lastScrollWasSmooth is false and the correction proceeds normally.
+		if (this.lastScrollWasSmooth) {
+			this.lastScrollWasSmooth = false; // one-shot
+			return; // smooth scroll still settling — let it finish
+		}
 		diag.correctionCount++;
 		this.perf?.count("activeFollowCorrectionCount");
 		this.programmaticScrollNote = "active-follow";
+		this.programmaticScrollNoteFrames = 1;
 		viewport.scrollTop = target;
 		diag.scrollMutationCount++;
 		this.perf?.count("activeFollowScrollMutationCount");

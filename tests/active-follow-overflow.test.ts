@@ -85,6 +85,14 @@ describe("active-follow in a 126-row overflowing outline (§九)", () => {
 			writable: true,
 			value: scrollTop,
 		});
+		// jsdom's scrollTo is instant (no animation). Shadow it so the
+		// code falls back to scrollTop = target — matching jsdom's actual
+		// behavior and keeping the correction frame active for assertions.
+		// In Chromium the real scrollTo animates smoothly.
+		Object.defineProperty(el, "scrollTo", {
+			configurable: true,
+			value: undefined,
+		});
 	}
 
 	/**
