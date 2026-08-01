@@ -139,17 +139,74 @@ describe("active marker accent (§十)", () => {
 		}
 	});
 
-	it("is the LAST marker paint in the sheet — nothing can outrank it later", () => {
+	/**
+	 * §六: exactly one rule is allowed to come after the accent block and
+	 * repaint an active marker — the playhead-visible quiet override. It is
+	 * the single state where the accent block's premise (the row marker IS
+	 * the active indicator) is false, because the fixed playhead is.
+	 */
+	const PLAYHEAD_QUIET = MARKER_RULES.filter((rule) =>
+		rule.selectors.every((s) => s.includes("--playhead-visible")),
+	);
+
+	it("is the LAST marker paint in the sheet — bar the sanctioned playhead override", () => {
 		const accentAt = ACCENT_RULE?.at ?? -1;
 		expect(accentAt).toBeGreaterThan(0);
 		const later = MARKER_RULES.filter(
 			(rule) =>
 				rule.at > accentAt &&
+				!PLAYHEAD_QUIET.includes(rule) &&
 				/(^|[;{\s])(background-color|background|opacity|color)\s*:/.test(
 					rule.body,
 				),
 		);
 		expect(later.map((r) => r.selectors.join(", "))).toEqual([]);
+	});
+
+	it("§六: hands the accent to the playhead by quieting the row marker", () => {
+		// Exactly one such block — two would mean the state is decided in
+		// more than one place, which is the bug class this file guards.
+		expect(PLAYHEAD_QUIET).toHaveLength(1);
+		const quiet = PLAYHEAD_QUIET[0];
+		// It must come AFTER the accent block: both are class-only
+		// selectors, so source order is what settles the tie.
+		expect(quiet.at).toBeGreaterThan(ACCENT_RULE?.at ?? Number.NaN);
+		// Quiet means the shared base colour — not a hard-coded grey, and
+		// certainly not a second accent.
+		expect(quiet.body).toMatch(/background-color:\s*var\(--text-faint\)/);
+		expect(quiet.body).not.toMatch(/var\(--interactive-accent\)/);
+		expect(quiet.body).not.toMatch(/#[0-9a-fA-F]{3,8}\b/);
+		expect(quiet.body).not.toMatch(/!important/);
+		// …and the active dot loses its 1.3x emphasis, so the playhead is
+		// unmistakably the larger of the two marks.
+		expect(quiet.body).toMatch(/scale:\s*1\s*;/);
+		// Semantics are untouched: it still keys off the active state.
+		for (const selector of quiet.selectors) {
+			expect(selector).toMatch(/\.is-active|\[aria-current="true"\]/);
+			expect(selector.startsWith(OWNER_SCOPE)).toBe(true);
+		}
+	});
+
+	it("§三: the playhead never escapes the marker rail", () => {
+		const playhead = ALL_RULES.find(
+			(rule) =>
+				rule.selectors.length === 1 &&
+				rule.selectors[0] === `${OWNER_SCOPE} .glide-outline-playhead`,
+		);
+		expect(playhead).toBeDefined();
+		const body = playhead?.body ?? "";
+		// One rail wide — the bug was `left: 0; right: 0`, which spanned the
+		// whole editor pane and painted a dot in the middle of the prose.
+		expect(body).toMatch(/width:\s*var\(--glide-rail-width/);
+		expect(body).not.toMatch(/(^|[;{\s])left:\s*0/);
+		expect(body).not.toMatch(/(^|[;{\s])right:\s*0/);
+		expect(body).not.toMatch(/justify-content:\s*center/);
+		// §四: vertical placement comes from the measured root-space value,
+		// never a bare 50% of the root (the viewport is inset inside it).
+		expect(body).toMatch(/top:\s*var\(--glide-playhead-y/);
+		// §五: hidden by default; only the root class reveals it.
+		expect(body).toMatch(/display:\s*none/);
+		expect(body).toMatch(/pointer-events:\s*none/);
 	});
 
 	it("keeps the dot's active rule geometry-only", () => {
