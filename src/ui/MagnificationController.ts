@@ -1314,6 +1314,12 @@ export class MagnificationController {
 		// §十二: the first real reveal. Recorded before the write so the
 		// milestone brackets the expansion rather than trailing it.
 		if (expanded) noteColdStartInteraction("firstExpand");
+		// §十一: snap the newest active heading to the centre BEFORE the
+		// rail expands. The user must see the current heading the instant
+		// the cards appear — never a stale row that then slides into place
+		// under the pointer, and never magnification spinning up around
+		// the wrong heading.
+		if (expanded) this.view.finishActiveFollowImmediately();
 		this.view.setExpanded(expanded);
 		this.view.setFollowEnabled(!expanded);
 		this.view.setInteractionState(state);
