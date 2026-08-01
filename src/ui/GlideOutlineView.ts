@@ -79,6 +79,62 @@ export type ActiveFollowReason =
  */
 const ACTIVE_FOLLOW_RETRY_BUDGET = 3;
 
+/**
+ * §六: outcome of one positioning attempt. Reported verbatim in the
+ * diagnostics payload so a failed follow can be told apart from a follow
+ * that never ran.
+ */
+export type ActiveFollowResult =
+	| "already-visible"
+	| "centered"
+	| "top-boundary"
+	| "bottom-boundary"
+	| "corrected"
+	| "deferred-no-layout"
+	| "suppressed-expanded"
+	| "failed-after-correction";
+
+/**
+ * §三: the latest follow target. Kept across expanded / pressed / paused
+ * states instead of being dropped, so the outline can catch up the moment
+ * the gate reopens.
+ */
+export interface PendingActiveFollow {
+	key: string;
+	reason: ActiveFollowReason;
+	generation: number;
+	requestedAt: number;
+}
+
+/** §八: full active-follow diagnostics payload. */
+export interface ActiveFollowDiagnostics {
+	interactionState: OutlineInteractionState;
+	followEnabled: boolean;
+	activeKey: string | null;
+	requestCount: number;
+	appliedCount: number;
+	deferredCount: number;
+	suppressedCount: number;
+	coalescedCount: number;
+	/** §三: requests parked because the gate was shut. */
+	pendingRetainedCount: number;
+	/** §三: a newer request replaced an unconsumed pending one. */
+	supersededCount: number;
+	/** §四: pending targets consumed because the gate reopened. */
+	flushCount: number;
+	/** §三: pending target no longer matched the live active key. */
+	staleRetargetCount: number;
+	pendingGeneration: number;
+	lastAppliedGeneration: number;
+	pendingKey: string | null;
+	pendingReason: ActiveFollowReason | "";
+	pendingAgeMs: number;
+	lastReason: ActiveFollowReason | "";
+	lastResult: ActiveFollowResult | "";
+	lastKey: string | null;
+	lastLatencyMs: number;
+}
+
 export interface ItemRecord {
 	rowEl: HTMLElement;
 	buttonEl: HTMLButtonElement;
@@ -197,14 +253,32 @@ export class GlideOutlineView {
 	private activeFollowPending = false;
 	/** §四: retry frames left while the active row is still unmeasured. */
 	private activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
-	/** §四: coalescing + outcome counters for tests and diagnostics. */
+	/**
+	 * §三: the newest follow target, retained until it is consumed. A
+	 * request that arrives while the outline is expanded/pressed or while
+	 * follow is paused is NOT discarded — it lands here and is flushed the
+	 * moment the gate reopens.
+	 */
+	private pendingActiveFollow: PendingActiveFollow | null = null;
+	/** §三: monotonic id of the newest request. */
+	private activeFollowGeneration = 0;
+	/** §三: generation of the last request that actually positioned. */
+	private lastAppliedActiveFollowGeneration = 0;
+	/** §四/§八: coalescing + outcome counters for tests and diagnostics. */
 	private readonly activeFollowDiag = {
 		requestCount: 0,
 		appliedCount: 0,
 		deferredCount: 0,
 		suppressedCount: 0,
 		coalescedCount: 0,
+		pendingRetainedCount: 0,
+		supersededCount: 0,
+		flushCount: 0,
+		staleRetargetCount: 0,
 		lastReason: "" as ActiveFollowReason | "",
+		lastResult: "" as ActiveFollowResult | "",
+		lastKey: null as string | null,
+		lastLatencyMs: Number.NaN,
 	};
 
 	constructor(
@@ -364,22 +438,35 @@ export class GlideOutlineView {
 
 	/**
 	 * While the pointer is inside the outline (or the user scrolls it),
-	 * automatic follow of the active heading is paused. §四: this only
-	 * flips the flag now; positioning is driven by requestActiveFollow,
-	 * which is gated on both this flag and the collapsed interaction state.
+	 * automatic follow of the active heading is paused.
+	 *
+	 * §四: re-enabling is a *resume*, not just a flag flip. Anything the
+	 * active heading did while follow was paused is still sitting in
+	 * `pendingActiveFollow`, and it is consumed here — otherwise the
+	 * outline would stay parked wherever the user left it until some
+	 * unrelated event happened to request a follow again.
 	 */
 	setFollowEnabled(enabled: boolean): void {
+		if (this.disposed) return;
+		const previous = this.followEnabled;
 		this.followEnabled = enabled;
+		if (!previous && enabled) this.flushPendingActiveFollow();
 	}
 
 	/**
-	 * §四: record how the user is interacting with the outline. Pure
-	 * setter — the controller pairs a collapse transition with an explicit
-	 * requestActiveFollow, so this never schedules work on its own.
+	 * §四: record how the user is interacting with the outline.
+	 *
+	 * Returning to `collapsed` hands control back to automatic follow, so
+	 * the newest pending target is consumed immediately (after the state
+	 * is written, so the gate sees the new value).
 	 */
 	setInteractionState(state: OutlineInteractionState): void {
 		if (this.disposed) return;
+		const previous = this.interactionState;
 		this.interactionState = state;
+		if (previous !== "collapsed" && state === "collapsed") {
+			this.flushPendingActiveFollow();
+		}
 	}
 
 	/** §四: current interaction state (diagnostics / tests). */
@@ -501,6 +588,7 @@ export class GlideOutlineView {
 			this.activeFollowFrame = 0;
 		}
 		this.activeFollowPending = false;
+		this.pendingActiveFollow = null;
 		this.metricsScheduled = false;
 		this.itemRecords.clear();
 		this.rootEl.remove();
@@ -823,57 +911,146 @@ export class GlideOutlineView {
 	 */
 	requestActiveFollow(reason: ActiveFollowReason): void {
 		if (this.disposed) return;
-		this.activeFollowDiag.requestCount++;
-		this.activeFollowDiag.lastReason = reason;
-		if (!this.followEnabled || this.interactionState !== "collapsed") {
-			this.activeFollowDiag.suppressedCount++;
+		const diag = this.activeFollowDiag;
+		diag.requestCount++;
+		diag.lastReason = reason;
+		const key = this.activeKey;
+		// Nothing is active — there is no target worth remembering.
+		if (key === null) return;
+
+		// §三: record the target FIRST, unconditionally. The old code
+		// returned here when the gate was shut, which threw the request
+		// away for good: the active heading had already changed, so
+		// nothing would ever ask again and a collapsed outline stayed
+		// parked on a stale row.
+		this.activeFollowGeneration++;
+		if (this.pendingActiveFollow !== null) diag.supersededCount++;
+		this.pendingActiveFollow = {
+			key,
+			reason,
+			generation: this.activeFollowGeneration,
+			requestedAt: this.now(),
+		};
+
+		if (!this.canRunActiveFollow()) {
+			diag.suppressedCount++;
+			diag.pendingRetainedCount++;
+			diag.lastResult = "suppressed-expanded";
 			return;
 		}
-		if (this.activeKey === null) return;
 		if (this.activeFollowFrame !== 0) {
 			// A frame is already queued — remember that a fresh reason
 			// arrived so it runs once more against the latest geometry.
 			this.activeFollowPending = true;
-			this.activeFollowDiag.coalescedCount++;
+			diag.coalescedCount++;
 			return;
 		}
 		this.scheduleActiveFollowFrame();
 	}
 
-	/** §四: coalescing + outcome counters for tests and diagnostics. */
-	getActiveFollowDiagnostics(): {
-		interactionState: OutlineInteractionState;
-		requestCount: number;
-		appliedCount: number;
-		deferredCount: number;
-		suppressedCount: number;
-		coalescedCount: number;
-		lastReason: ActiveFollowReason | "";
-	} {
+	/** §三: is automatic positioning allowed to run right now? */
+	private canRunActiveFollow(): boolean {
+		return this.followEnabled && this.interactionState === "collapsed";
+	}
+
+	/**
+	 * §四: consume the newest retained follow target now that the gate has
+	 * reopened (collapse, or follow re-enabled).
+	 *
+	 * If the active heading moved on while the request was parked, the
+	 * pending entry is re-targeted at the live key rather than dropped —
+	 * the user cares about where the outline ends up, not about which
+	 * event asked for it.
+	 */
+	private flushPendingActiveFollow(): void {
+		if (this.disposed) return;
+		const pending = this.pendingActiveFollow;
+		if (pending === null) return;
+		if (!this.canRunActiveFollow()) return;
+		const key = this.activeKey;
+		if (key === null) {
+			this.pendingActiveFollow = null;
+			return;
+		}
+		const diag = this.activeFollowDiag;
+		if (pending.key !== key) {
+			diag.staleRetargetCount++;
+			this.activeFollowGeneration++;
+			this.pendingActiveFollow = {
+				key,
+				reason: pending.reason,
+				generation: this.activeFollowGeneration,
+				requestedAt: pending.requestedAt,
+			};
+		}
+		diag.flushCount++;
+		if (this.activeFollowFrame !== 0) {
+			this.activeFollowPending = true;
+			diag.coalescedCount++;
+			return;
+		}
+		// A fresh chance deserves a fresh retry budget: the geometry that
+		// was unmeasured last time is very likely laid out by now.
+		this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
+		this.scheduleActiveFollowFrame();
+	}
+
+	/** §八: full active-follow diagnostics for tests and the report. */
+	getActiveFollowDiagnostics(): ActiveFollowDiagnostics {
+		const d = this.activeFollowDiag;
+		const pending = this.pendingActiveFollow;
 		return {
 			interactionState: this.interactionState,
-			requestCount: this.activeFollowDiag.requestCount,
-			appliedCount: this.activeFollowDiag.appliedCount,
-			deferredCount: this.activeFollowDiag.deferredCount,
-			suppressedCount: this.activeFollowDiag.suppressedCount,
-			coalescedCount: this.activeFollowDiag.coalescedCount,
-			lastReason: this.activeFollowDiag.lastReason,
+			followEnabled: this.followEnabled,
+			activeKey: this.activeKey,
+			requestCount: d.requestCount,
+			appliedCount: d.appliedCount,
+			deferredCount: d.deferredCount,
+			suppressedCount: d.suppressedCount,
+			coalescedCount: d.coalescedCount,
+			pendingRetainedCount: d.pendingRetainedCount,
+			supersededCount: d.supersededCount,
+			flushCount: d.flushCount,
+			staleRetargetCount: d.staleRetargetCount,
+			pendingGeneration: this.activeFollowGeneration,
+			lastAppliedGeneration: this.lastAppliedActiveFollowGeneration,
+			pendingKey: pending?.key ?? null,
+			pendingReason: pending?.reason ?? "",
+			pendingAgeMs:
+				pending === null
+					? Number.NaN
+					: Math.max(0, this.now() - pending.requestedAt),
+			lastReason: d.lastReason,
+			lastResult: d.lastResult,
+			lastKey: d.lastKey,
+			lastLatencyMs: d.lastLatencyMs,
 		};
 	}
 
+	/** §八: the retained follow target, if any (tests / diagnostics). */
+	getPendingActiveFollow(): PendingActiveFollow | null {
+		return this.pendingActiveFollow;
+	}
+
 	private scheduleActiveFollowFrame(): void {
+		if (this.disposed || this.activeFollowFrame !== 0) return;
 		const win = this.doc.defaultView;
 		const run = (): void => {
 			this.activeFollowFrame = 0;
 			const hadPending = this.activeFollowPending;
 			this.activeFollowPending = false;
-			const applied = this.runActiveFollow();
 			// The gate may have closed (user grabbed the outline) between
-			// the request and this frame — stop and reset the budget.
-			if (!this.followEnabled || this.interactionState !== "collapsed") {
+			// the request and this frame. §三: the target stays pending, so
+			// the next collapse picks it straight back up instead of the
+			// outline forgetting where it was supposed to go.
+			if (!this.canRunActiveFollow()) {
 				this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
+				this.activeFollowDiag.suppressedCount++;
+				this.activeFollowDiag.pendingRetainedCount++;
+				this.activeFollowDiag.lastResult = "suppressed-expanded";
 				return;
 			}
+			const applied = this.runActiveFollow();
 			let reschedule = false;
 			// A fresh reason arrived mid-flight — honour the latest geometry.
 			if (hadPending) reschedule = true;
@@ -893,13 +1070,28 @@ export class GlideOutlineView {
 	}
 
 	private runActiveFollow(): boolean {
+		const pending = this.pendingActiveFollow;
+		const generation = pending?.generation ?? this.activeFollowGeneration;
+		const requestedAt = pending?.requestedAt ?? this.now();
 		const applied = this.scrollActiveRowIntoPosition({
 			alignment: "center",
 			behavior: "auto",
 			source: "active-follow",
 		});
-		if (applied) this.activeFollowDiag.appliedCount++;
-		else this.activeFollowDiag.deferredCount++;
+		if (applied) {
+			this.activeFollowDiag.appliedCount++;
+			this.activeFollowDiag.lastLatencyMs = Math.max(
+				0,
+				this.now() - requestedAt,
+			);
+			this.lastAppliedActiveFollowGeneration = generation;
+			// Consumed — unless something newer arrived while we worked.
+			if (this.pendingActiveFollow?.generation === generation) {
+				this.pendingActiveFollow = null;
+			}
+		} else {
+			this.activeFollowDiag.deferredCount++;
+		}
 		return applied;
 	}
 
