@@ -98,15 +98,19 @@ export interface PerfCounters {
 	overflowClassMutationCount: number;
 	overflowClassSkippedCount: number;
 	/**
-	 * §八: collapsed active-heading follow. `failedVisibility` is the one
-	 * that matters — it counts rows that were STILL outside the safe band
-	 * after the single allowed correction, i.e. the bug this section
-	 * exists to catch.
+	 * §十五: collapsed active-heading follow against the fixed centre
+	 * playhead. `centerFollowTimeoutCount` is the one that matters — it
+	 * counts sessions that hit the hard duration ceiling instead of
+	 * converging, i.e. a follow that could not keep up with the target.
 	 */
 	activeFollowScrollMutationCount: number;
 	activeFollowNoMutationCount: number;
-	activeFollowCorrectionCount: number;
-	activeFollowFailedVisibilityCount: number;
+	centerFollowFrameCount: number;
+	centerFollowScrollMutationCount: number;
+	centerFollowRectFallbackCount: number;
+	centerFollowRetargetCount: number;
+	centerFollowSnapCount: number;
+	centerFollowTimeoutCount: number;
 	/** §十一: wheel routing outcome histogram. */
 	wheelEventCount: number;
 	wheelOutlineCount: number;
@@ -249,8 +253,12 @@ function zeroCounters(): PerfCounters {
 		overflowClassSkippedCount: 0,
 		activeFollowScrollMutationCount: 0,
 		activeFollowNoMutationCount: 0,
-		activeFollowCorrectionCount: 0,
-		activeFollowFailedVisibilityCount: 0,
+		centerFollowFrameCount: 0,
+		centerFollowScrollMutationCount: 0,
+		centerFollowRectFallbackCount: 0,
+		centerFollowRetargetCount: 0,
+		centerFollowSnapCount: 0,
+		centerFollowTimeoutCount: 0,
 		wheelEventCount: 0,
 		wheelOutlineCount: 0,
 		wheelEditorHandoffCount: 0,
@@ -738,14 +746,19 @@ export interface PerfReport {
 		classSkippedShare: number;
 	};
 	/**
-	 * §八: collapsed active-heading follow. `failedVisibilityCount` must
-	 * be 0 — anything else means a row stayed off-band after correction.
+	 * §十五: collapsed active-heading follow against the fixed centre
+	 * playhead. `timeoutCount` should stay at 0 in normal use — a session
+	 * that hits the duration ceiling could not converge on the target.
 	 */
 	activeFollow: {
 		scrollMutationCount: number;
 		noMutationCount: number;
-		correctionCount: number;
-		failedVisibilityCount: number;
+		frameCount: number;
+		centerScrollMutationCount: number;
+		rectFallbackCount: number;
+		retargetCount: number;
+		snapCount: number;
+		timeoutCount: number;
 	};
 	/** §八: how pointer anchors were resolved (fallbackScanCount must be 0). */
 	anchorResolve: {
@@ -1926,8 +1939,12 @@ export class PerfCapture {
 			activeFollow: {
 				scrollMutationCount: c.activeFollowScrollMutationCount,
 				noMutationCount: c.activeFollowNoMutationCount,
-				correctionCount: c.activeFollowCorrectionCount,
-				failedVisibilityCount: c.activeFollowFailedVisibilityCount,
+				frameCount: c.centerFollowFrameCount,
+				centerScrollMutationCount: c.centerFollowScrollMutationCount,
+				rectFallbackCount: c.centerFollowRectFallbackCount,
+				retargetCount: c.centerFollowRetargetCount,
+				snapCount: c.centerFollowSnapCount,
+				timeoutCount: c.centerFollowTimeoutCount,
 			},
 			anchorResolve: {
 				localHitCount: c.anchorLocalHitCount,

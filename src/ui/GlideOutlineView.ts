@@ -81,24 +81,54 @@ export type ActiveFollowReason =
 const ACTIVE_FOLLOW_RETRY_BUDGET = 3;
 
 /**
- * §六: outcome of one positioning attempt. Reported verbatim in the
- * diagnostics payload so a failed follow can be told apart from a follow
- * that never ran.
+ * §四: center alignment tolerance. Sub-pixel layouts and device-pixel-ratio
+ * scaling make an exact-zero requirement unreachable, so the session
+ * declares success when the active row's center is within this many pixels
+ * of the playhead's center.
  */
-export type ActiveFollowResult =
-	| "already-visible"
-	| "centered"
-	| "top-boundary"
-	| "bottom-boundary"
-	| "corrected"
-	| "deferred-no-layout"
-	| "suppressed-expanded"
-	| "failed-after-correction";
+const CENTER_ALIGNMENT_TOLERANCE_PX = 0.75;
 
 /**
- * §三: the latest follow target. Kept across expanded / pressed / paused
- * states instead of being dropped, so the outline can catch up the moment
- * the gate reopens.
+ * §八: time constant for the exponential approach. Lower = snappier,
+ * higher = smoother. 110ms feels responsive without overshooting.
+ */
+const CENTER_FOLLOW_TAU_MS = 110;
+
+/** §八: hard ceiling on follow duration before a forced snap. */
+const CENTER_FOLLOW_MAX_DURATION_MS = 700;
+
+/** §五: a sane ceiling on the offsetParent walk (cycle / detach guard). */
+const OFFSET_CHAIN_MAX_DEPTH = 32;
+
+/**
+ * §七: the lifecycle of a single center-follow animation. Only one session
+ * exists at a time — a new active key retargets the current session rather
+ * than starting a second animation.
+ */
+export type ActiveFollowSessionState =
+	| "idle"
+	| "following"
+	| "retargeting"
+	| "snapping"
+	| "verifying"
+	| "aligned"
+	| "cancelled";
+
+/** §七: a single center-follow animation. */
+export interface ActiveFollowSession {
+	generation: number;
+	targetKey: string;
+	targetScrollTop: number;
+	state: ActiveFollowSessionState;
+	startedAt: number;
+	lastFrameAt: number;
+	lastErrorPx: number;
+	source: ActiveFollowReason;
+}
+
+/**
+ * §三: the latest follow target, retained across expanded / pressed /
+ * paused states. Flushed the moment the gate reopens.
  */
 export interface PendingActiveFollow {
 	key: string;
@@ -107,42 +137,11 @@ export interface PendingActiveFollow {
 	requestedAt: number;
 }
 
-/** §六: safe-band inset bounds (px) and the viewport-height ratio. */
-const ACTIVE_FOLLOW_MIN_MARGIN_PX = 16;
-const ACTIVE_FOLLOW_MAX_MARGIN_PX = 48;
-const ACTIVE_FOLLOW_MARGIN_RATIO = 0.15;
-
-/** §五: a sane ceiling on the offsetParent walk (cycle / detach guard). */
-const OFFSET_CHAIN_MAX_DEPTH = 32;
-
-/** §六: the safe-band inset for a given scroll-box height. */
-export function activeFollowMarginPx(clientHeight: number): number {
-	if (!(clientHeight > 0)) return ACTIVE_FOLLOW_MIN_MARGIN_PX;
-	return Math.max(
-		ACTIVE_FOLLOW_MIN_MARGIN_PX,
-		Math.min(
-			ACTIVE_FOLLOW_MAX_MARGIN_PX,
-			clientHeight * ACTIVE_FOLLOW_MARGIN_RATIO,
-		),
-	);
-}
-
 /**
  * §五: layout offset of `element` inside the scrolling content of
- * `scrollViewport`.
- *
- * `element.offsetTop` alone is only correct when `offsetParent ===
- * scrollViewport`. The outline puts a `<nav>` list (and, with a card
- * shadow, a padded box) between the row and the viewport, and any of
- * those can become the offsetParent, so the raw value silently measures
- * from the wrong origin — which is exactly how a collapsed outline ends
- * up scrolling to the wrong place. Accumulating along the offsetParent
- * chain is the only reading that is right in every nesting.
- *
- * `resolved: false` means the chain terminated before the viewport
- * (a `position: fixed` ancestor, `display: none`, a detached subtree, or
- * a static viewport that is not itself an offsetParent). The caller then
- * falls back to rectangles for the single active row.
+ * `scrollViewport`. Accumulates along the offsetParent chain instead of
+ * trusting a bare `offsetTop` (which is only correct when the viewport
+ * is the direct offsetParent).
  */
 export function getOffsetWithinScrollContent(
 	element: HTMLElement,
@@ -164,56 +163,47 @@ export function getOffsetWithinScrollContent(
 	return { top, left, depth, resolved: node === scrollViewport };
 }
 
-/** §八: full active-follow diagnostics payload. */
+/** §十三: center-alignment diagnostics payload. */
 export interface ActiveFollowDiagnostics {
 	interactionState: OutlineInteractionState;
 	followEnabled: boolean;
 	activeKey: string | null;
+	pendingKey: string | null;
+	pendingGeneration: number;
+	sessionGeneration: number;
+	sessionState: ActiveFollowSessionState;
+	sessionTargetKey: string | null;
 	requestCount: number;
-	appliedCount: number;
-	deferredCount: number;
+	retargetCount: number;
+	alignedCount: number;
+	snapCount: number;
+	timeoutCount: number;
+	cancelledCount: number;
+	userInterruptedCount: number;
 	suppressedCount: number;
-	coalescedCount: number;
-	/** §三: requests parked because the gate was shut. */
-	pendingRetainedCount: number;
-	/** §三: a newer request replaced an unconsumed pending one. */
-	supersededCount: number;
-	/** §四: pending targets consumed because the gate reopened. */
 	flushCount: number;
-	/** §三: pending target no longer matched the live active key. */
-	staleRetargetCount: number;
-	/** §六: second-pass corrections issued. */
-	correctionCount: number;
-	/** §六: still outside the safe band after the one allowed correction. */
-	failedAfterCorrectionCount: number;
-	alreadyVisibleCount: number;
-	centeredCount: number;
-	topBoundaryCount: number;
-	bottomBoundaryCount: number;
-	/** §五: offset-chain vs. rect-fallback measurement mix. */
-	offsetChainCount: number;
-	rectFallbackCount: number;
-	maxOffsetChainDepth: number;
-	/** §六: scrollTop writes actually issued vs. skipped as no-ops. */
+	frameCount: number;
 	scrollMutationCount: number;
 	noMutationCount: number;
-	pendingGeneration: number;
-	lastAppliedGeneration: number;
-	pendingKey: string | null;
-	pendingReason: ActiveFollowReason | "";
-	pendingAgeMs: number;
-	lastReason: ActiveFollowReason | "";
-	lastResult: ActiveFollowResult | "";
-	lastKey: string | null;
-	lastMeasureSource: "offset-chain" | "rect" | "";
-	lastRowTop: number;
-	lastRowHeight: number;
-	lastClientHeight: number;
-	lastMarginPx: number;
+	lastCoordinateSource: "offset-chain" | "rect" | "";
+	lastRowContentCenter: number;
+	lastPlayheadY: number;
 	lastTargetScrollTop: number;
 	lastScrollTopBefore: number;
 	lastScrollTopAfter: number;
-	lastLatencyMs: number;
+	lastAlignmentErrorPx: number;
+	maxAlignmentErrorPx: number;
+	lastDurationMs: number;
+	topCenterSpacerPx: number;
+	bottomCenterSpacerPx: number;
+	/** §六: the row heights the spacers were sized from. */
+	firstRowHeight: number;
+	lastRowHeight: number;
+	/** §六: the playhead's y in viewport client space (clientHeight / 2). */
+	playheadClientY: number;
+	/** §六: how many times the spacers have been re-measured. */
+	centerSpacerRefreshCount: number;
+	playheadVisible: boolean;
 }
 
 export interface ItemRecord {
@@ -325,15 +315,9 @@ export class GlideOutlineView {
 	 * magnification controller's scroll handler for source attribution.
 	 * §四: widened to distinguish an active-follow reveal from a jump. */
 	private programmaticScrollNote: "jump" | "active-follow" | null = null;
-	/** §六: frames the note stays valid (covers a smooth-scroll animation). */
-	private programmaticScrollNoteFrames = 0;
-	/** §六: true when the last active-follow write used scrollTo(smooth). */
-	private lastScrollWasSmooth = false;
 
 	/** §四: current interaction state; only `collapsed` pre-positions. */
 	private interactionState: OutlineInteractionState = "collapsed";
-	/** §四: rAF handle for the queued active-follow pass; 0 = none. */
-	private activeFollowFrame = 0;
 	/** §四: a follow request arrived while a frame was already in flight. */
 	private activeFollowPending = false;
 	/** §四: retry frames left while the active row is still unmeasured. */
@@ -347,44 +331,49 @@ export class GlideOutlineView {
 	private pendingActiveFollow: PendingActiveFollow | null = null;
 	/** §三: monotonic id of the newest request. */
 	private activeFollowGeneration = 0;
-	/** §三: generation of the last request that actually positioned. */
-	private lastAppliedActiveFollowGeneration = 0;
-	/** §六: rAF handle for the single allowed correction pass; 0 = none. */
-	private activeFollowCorrectionFrame = 0;
-	/** §四/§八: coalescing + outcome counters for tests and diagnostics. */
+	/** §七: the single active center-follow session (null = idle). */
+	private activeFollowSession: ActiveFollowSession | null = null;
+	/** §七: rAF handle driving the session; 0 = none. */
+	private activeFollowFrame = 0;
+	/** §七: last timestamp from the rAF callback (for dt computation). */
+	private activeFollowLastTimestamp = 0;
+	/** §五: the fixed center playhead element. */
+	private playheadEl: HTMLElement | null = null;
+	/** §六: top spacer element inside the scroll content. */
+	private topSpacerEl: HTMLElement | null = null;
+	/** §六: bottom spacer element inside the scroll content. */
+	private bottomSpacerEl: HTMLElement | null = null;
+	/** §六: last measured spacer heights (diagnostics). */
+	private topCenterSpacerPx = 0;
+	private bottomCenterSpacerPx = 0;
+	private firstRowHeightPx = 0;
+	private lastRowHeightPx = 0;
+	private centerSpacerRefreshCount = 0;
+	/** §四/§十三: counters for tests and diagnostics. */
 	private readonly activeFollowDiag = {
 		requestCount: 0,
-		appliedCount: 0,
-		deferredCount: 0,
+		retargetCount: 0,
+		alignedCount: 0,
+		snapCount: 0,
+		timeoutCount: 0,
+		cancelledCount: 0,
+		userInterruptedCount: 0,
 		suppressedCount: 0,
-		coalescedCount: 0,
-		pendingRetainedCount: 0,
-		supersededCount: 0,
 		flushCount: 0,
-		staleRetargetCount: 0,
-		correctionCount: 0,
-		failedAfterCorrectionCount: 0,
-		alreadyVisibleCount: 0,
-		centeredCount: 0,
-		topBoundaryCount: 0,
-		bottomBoundaryCount: 0,
-		offsetChainCount: 0,
-		rectFallbackCount: 0,
-		maxOffsetChainDepth: 0,
+		frameCount: 0,
 		scrollMutationCount: 0,
 		noMutationCount: 0,
-		lastReason: "" as ActiveFollowReason | "",
-		lastResult: "" as ActiveFollowResult | "",
-		lastKey: null as string | null,
-		lastMeasureSource: "" as "offset-chain" | "rect" | "",
-		lastRowTop: Number.NaN,
-		lastRowHeight: Number.NaN,
-		lastClientHeight: Number.NaN,
-		lastMarginPx: Number.NaN,
+		rectFallbackCount: 0,
+		maxOffsetChainDepth: 0,
+		lastCoordinateSource: "" as "offset-chain" | "rect" | "",
+		lastRowContentCenter: Number.NaN,
+		lastPlayheadY: Number.NaN,
 		lastTargetScrollTop: Number.NaN,
 		lastScrollTopBefore: Number.NaN,
 		lastScrollTopAfter: Number.NaN,
-		lastLatencyMs: Number.NaN,
+		lastAlignmentErrorPx: Number.NaN,
+		maxAlignmentErrorPx: 0,
+		lastDurationMs: Number.NaN,
 	};
 
 	constructor(
@@ -423,6 +412,31 @@ export class GlideOutlineView {
 		this.rootEl.appendChild(listLabel);
 		this.rootEl.appendChild(this.hitZoneEl);
 		this.rootEl.appendChild(this.viewportEl);
+
+		// §六: center spacers inside the scroll content so the first and
+		// last rows can reach the playhead at the vertical center.
+		this.topSpacerEl = this.doc.createElement("div");
+		this.topSpacerEl.className = "glide-outline-center-spacer glide-outline-center-spacer--top";
+		this.topSpacerEl.setAttribute("aria-hidden", "true");
+		this.viewportEl.insertBefore(this.topSpacerEl, this.listEl);
+
+		this.bottomSpacerEl = this.doc.createElement("div");
+		this.bottomSpacerEl.className = "glide-outline-center-spacer glide-outline-center-spacer--bottom";
+		this.bottomSpacerEl.setAttribute("aria-hidden", "true");
+		this.viewportEl.appendChild(this.bottomSpacerEl);
+
+		// §五: fixed center playhead. Lives in the root (not the scroll
+		// viewport) so it never moves with the content. pointer-events:
+		// none, no tooltip, no hit area.
+		this.playheadEl = this.doc.createElement("div");
+		this.playheadEl.className = "glide-outline-playhead";
+		this.playheadEl.setAttribute("aria-hidden", "true");
+		const playheadMarker = this.doc.createElement("span");
+		playheadMarker.className = "glide-outline-playhead-marker";
+		this.playheadEl.appendChild(playheadMarker);
+		this.rootEl.appendChild(this.playheadEl);
+		markColdStart("firstPlayheadMounted");
+
 		this.mount.mountEl.appendChild(this.rootEl);
 
 		// Edge fades track the scroll position (passive — no work per frame
@@ -503,6 +517,8 @@ export class GlideOutlineView {
 		// §五.1: rows came and went — the cached scroll height is a lie now.
 		this.invalidateOverflowMetrics();
 		this.scheduleMeasure();
+		// §六: row count / order changed — spacers depend on first/last row.
+		this.refreshCenterSpacers();
 		// §四: the list changed, so the active row's offset moved. Re-center
 		// it (retries until the queued measure pass gives it a real height).
 		this.requestActiveFollow("items-change");
@@ -565,19 +581,35 @@ export class GlideOutlineView {
 	}
 
 	/**
-	 * §四: record how the user is interacting with the outline.
+	 * §十二: record how the user is interacting with the outline.
 	 *
-	 * Returning to `collapsed` hands control back to automatic follow, so
-	 * the newest pending target is consumed immediately (after the state
-	 * is written, so the gate sees the new value).
+	 * Returning to `collapsed` hands control back to automatic follow:
+	 * show the playhead, flush the pending target, start a new session.
+	 * Leaving `collapsed` (expand/press) cancels the session and hides
+	 * the playhead so the row's own active marker takes over.
 	 */
 	setInteractionState(state: OutlineInteractionState): void {
 		if (this.disposed) return;
 		const previous = this.interactionState;
 		this.interactionState = state;
+		if (previous === "collapsed" && state !== "collapsed") {
+			// §十一: an EXPANSION must show the current heading straight
+			// away, so the in-flight follow is finished instantly rather
+			// than left to slide under the pointer.
+			//
+			// §十二: `pressed` is different — it freezes. The list stays
+			// exactly where the user grabbed it; snapping under a held
+			// pointer would yank the row out from under them. The session
+			// is only cancelled, and the pending target survives for the
+			// next collapse.
+			if (state !== "pressed") this.finishActiveFollowImmediately();
+			this.cancelActiveFollowSession();
+		}
 		if (previous !== "collapsed" && state === "collapsed") {
+			this.refreshCenterSpacers();
 			this.flushPendingActiveFollow();
 		}
+		this.updatePlayheadVisibility();
 	}
 
 	/** §四: current interaction state (diagnostics / tests). */
@@ -675,12 +707,13 @@ export class GlideOutlineView {
 	 * never mis-attributed.
 	 */
 	takeProgrammaticScrollNote(): "jump" | "active-follow" | null {
-		if (this.programmaticScrollNoteFrames > 0) {
-			this.programmaticScrollNoteFrames--;
-			return this.programmaticScrollNote;
-		}
+		// §十: while a center-follow session is active, every scroll event
+		// is attributed to "active-follow" — the session owns the scroll
+		// until it aligns or is cancelled.
+		if (this.activeFollowSession !== null) return "active-follow";
+		const note = this.programmaticScrollNote;
 		this.programmaticScrollNote = null;
-		return null;
+		return note;
 	}
 
 	dispose(): void {
@@ -701,13 +734,7 @@ export class GlideOutlineView {
 			this.doc.defaultView?.cancelAnimationFrame(this.activeFollowFrame);
 			this.activeFollowFrame = 0;
 		}
-		// §六: and the correction pass queued behind it.
-		if (this.activeFollowCorrectionFrame !== 0) {
-			this.doc.defaultView?.cancelAnimationFrame(
-				this.activeFollowCorrectionFrame,
-			);
-			this.activeFollowCorrectionFrame = 0;
-		}
+		this.activeFollowSession = null;
 		this.activeFollowPending = false;
 		this.pendingActiveFollow = null;
 		this.metricsScheduled = false;
@@ -917,6 +944,8 @@ export class GlideOutlineView {
 		// §五.1: a width change rewraps labels, so row heights (and with
 		// them the scroll height) can move.
 		this.invalidateOverflowMetrics();
+		// §六: viewport height changed — spacers depend on clientHeight.
+		this.refreshCenterSpacers();
 		// §四: a viewport-size change shifts the active row's centred
 		// position — re-request a follow (no-op unless collapsed).
 		this.requestActiveFollow("resize");
@@ -1019,6 +1048,8 @@ export class GlideOutlineView {
 			// deferred by setItems (rows finally have a real height).
 			this.requestActiveFollow("metrics-change");
 		}
+		// §六: row heights changed — spacers depend on first/last row height.
+		this.refreshCenterSpacers();
 		markColdStart("firstMeasureRowsEnd"); // §十三
 	}
 
@@ -1036,19 +1067,13 @@ export class GlideOutlineView {
 		if (this.disposed) return;
 		const diag = this.activeFollowDiag;
 		diag.requestCount++;
-		diag.lastReason = reason;
 		const key = this.activeKey;
-		// Nothing is active — there is no target worth remembering.
 		if (key === null) return;
-		markColdStart("firstActiveFollowRequest"); // §十三
+		markColdStart("firstActiveFollowRequest");
 
-		// §三: record the target FIRST, unconditionally. The old code
-		// returned here when the gate was shut, which threw the request
-		// away for good: the active heading had already changed, so
-		// nothing would ever ask again and a collapsed outline stayed
-		// parked on a stale row.
+		// §三: record the target unconditionally — even when the gate is
+		// shut, the newest target is retained for the next collapse.
 		this.activeFollowGeneration++;
-		if (this.pendingActiveFollow !== null) diag.supersededCount++;
 		this.pendingActiveFollow = {
 			key,
 			reason,
@@ -1058,18 +1083,9 @@ export class GlideOutlineView {
 
 		if (!this.canRunActiveFollow()) {
 			diag.suppressedCount++;
-			diag.pendingRetainedCount++;
-			diag.lastResult = "suppressed-expanded";
 			return;
 		}
-		if (this.activeFollowFrame !== 0) {
-			// A frame is already queued — remember that a fresh reason
-			// arrived so it runs once more against the latest geometry.
-			this.activeFollowPending = true;
-			diag.coalescedCount++;
-			return;
-		}
-		this.scheduleActiveFollowFrame();
+		this.startOrRetargetActiveFollowSession(key, reason);
 	}
 
 	/** §三: is automatic positioning allowed to run right now? */
@@ -1079,12 +1095,8 @@ export class GlideOutlineView {
 
 	/**
 	 * §四: consume the newest retained follow target now that the gate has
-	 * reopened (collapse, or follow re-enabled).
-	 *
-	 * If the active heading moved on while the request was parked, the
-	 * pending entry is re-targeted at the live key rather than dropped —
-	 * the user cares about where the outline ends up, not about which
-	 * event asked for it.
+	 * reopened (collapse, or follow re-enabled). Re-targets at the live
+	 * active key if the pending entry was for a different heading.
 	 */
 	private flushPendingActiveFollow(): void {
 		if (this.disposed) return;
@@ -1096,9 +1108,7 @@ export class GlideOutlineView {
 			this.pendingActiveFollow = null;
 			return;
 		}
-		const diag = this.activeFollowDiag;
 		if (pending.key !== key) {
-			diag.staleRetargetCount++;
 			this.activeFollowGeneration++;
 			this.pendingActiveFollow = {
 				key,
@@ -1107,144 +1117,311 @@ export class GlideOutlineView {
 				requestedAt: pending.requestedAt,
 			};
 		}
-		diag.flushCount++;
-		if (this.activeFollowFrame !== 0) {
-			this.activeFollowPending = true;
-			diag.coalescedCount++;
-			return;
-		}
-		// A fresh chance deserves a fresh retry budget: the geometry that
-		// was unmeasured last time is very likely laid out by now.
+		this.activeFollowDiag.flushCount++;
 		this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
-		this.scheduleActiveFollowFrame();
+		this.startOrRetargetActiveFollowSession(key, pending.reason);
 	}
 
-	/** §八: full active-follow diagnostics for tests and the report. */
+	/** §十三: center-alignment diagnostics for tests and the report. */
 	getActiveFollowDiagnostics(): ActiveFollowDiagnostics {
 		const d = this.activeFollowDiag;
-		const pending = this.pendingActiveFollow;
+		const s = this.activeFollowSession;
+		const p = this.pendingActiveFollow;
 		return {
 			interactionState: this.interactionState,
 			followEnabled: this.followEnabled,
 			activeKey: this.activeKey,
+			pendingKey: p?.key ?? null,
+			pendingGeneration: this.activeFollowGeneration,
+			sessionGeneration: s?.generation ?? 0,
+			sessionState: s?.state ?? "idle",
+			sessionTargetKey: s?.targetKey ?? null,
 			requestCount: d.requestCount,
-			appliedCount: d.appliedCount,
-			deferredCount: d.deferredCount,
+			retargetCount: d.retargetCount,
+			alignedCount: d.alignedCount,
+			snapCount: d.snapCount,
+			timeoutCount: d.timeoutCount,
+			cancelledCount: d.cancelledCount,
+			userInterruptedCount: d.userInterruptedCount,
 			suppressedCount: d.suppressedCount,
-			coalescedCount: d.coalescedCount,
-			pendingRetainedCount: d.pendingRetainedCount,
-			supersededCount: d.supersededCount,
 			flushCount: d.flushCount,
-			staleRetargetCount: d.staleRetargetCount,
-			correctionCount: d.correctionCount,
-			failedAfterCorrectionCount: d.failedAfterCorrectionCount,
-			alreadyVisibleCount: d.alreadyVisibleCount,
-			centeredCount: d.centeredCount,
-			topBoundaryCount: d.topBoundaryCount,
-			bottomBoundaryCount: d.bottomBoundaryCount,
-			offsetChainCount: d.offsetChainCount,
-			rectFallbackCount: d.rectFallbackCount,
-			maxOffsetChainDepth: d.maxOffsetChainDepth,
+			frameCount: d.frameCount,
 			scrollMutationCount: d.scrollMutationCount,
 			noMutationCount: d.noMutationCount,
-			pendingGeneration: this.activeFollowGeneration,
-			lastAppliedGeneration: this.lastAppliedActiveFollowGeneration,
-			pendingKey: pending?.key ?? null,
-			pendingReason: pending?.reason ?? "",
-			pendingAgeMs:
-				pending === null
-					? Number.NaN
-					: Math.max(0, this.now() - pending.requestedAt),
-			lastReason: d.lastReason,
-			lastResult: d.lastResult,
-			lastKey: d.lastKey,
-			lastMeasureSource: d.lastMeasureSource,
-			lastRowTop: d.lastRowTop,
-			lastRowHeight: d.lastRowHeight,
-			lastClientHeight: d.lastClientHeight,
-			lastMarginPx: d.lastMarginPx,
+			lastCoordinateSource: d.lastCoordinateSource,
+			lastRowContentCenter: d.lastRowContentCenter,
+			lastPlayheadY: d.lastPlayheadY,
 			lastTargetScrollTop: d.lastTargetScrollTop,
 			lastScrollTopBefore: d.lastScrollTopBefore,
 			lastScrollTopAfter: d.lastScrollTopAfter,
-			lastLatencyMs: d.lastLatencyMs,
+			lastAlignmentErrorPx: d.lastAlignmentErrorPx,
+			maxAlignmentErrorPx: d.maxAlignmentErrorPx,
+			lastDurationMs: d.lastDurationMs,
+			topCenterSpacerPx: this.topCenterSpacerPx,
+			bottomCenterSpacerPx: this.bottomCenterSpacerPx,
+			firstRowHeight: this.firstRowHeightPx,
+			lastRowHeight: this.lastRowHeightPx,
+			playheadClientY: this.viewportEl.clientHeight / 2,
+			centerSpacerRefreshCount: this.centerSpacerRefreshCount,
+			playheadVisible: this.playheadEl !== null && this.playheadEl.style.display !== "none",
 		};
 	}
 
-	/** §八: the retained follow target, if any (tests / diagnostics). */
+	/** §三: the retained follow target, if any (tests / diagnostics). */
 	getPendingActiveFollow(): PendingActiveFollow | null {
 		return this.pendingActiveFollow;
 	}
 
-	private scheduleActiveFollowFrame(): void {
-		if (this.disposed || this.activeFollowFrame !== 0) return;
-		const win = this.doc.defaultView;
-		const run = (): void => {
-			this.activeFollowFrame = 0;
-			const hadPending = this.activeFollowPending;
-			this.activeFollowPending = false;
-			// The gate may have closed (user grabbed the outline) between
-			// the request and this frame. §三: the target stays pending, so
-			// the next collapse picks it straight back up instead of the
-			// outline forgetting where it was supposed to go.
-			if (!this.canRunActiveFollow()) {
-				this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
-				this.activeFollowDiag.suppressedCount++;
-				this.activeFollowDiag.pendingRetainedCount++;
-				this.activeFollowDiag.lastResult = "suppressed-expanded";
-				return;
-			}
-			const applied = this.runActiveFollow();
-			let reschedule = false;
-			// A fresh reason arrived mid-flight — honour the latest geometry.
-			if (hadPending) reschedule = true;
-			// Geometry was not ready — retry, bounded, until it is.
-			if (!applied && this.activeFollowRetryBudget > 0) {
+	// ── §七: single Active Follow Session ───────────────────────────
+
+	/**
+	 * §七: start a new session or retarget the existing one. A retarget
+	 * does NOT create a second animation — it updates the target and lets
+	 * the current RAF naturally steer toward the new position.
+	 */
+	private startOrRetargetActiveFollowSession(
+		key: string,
+		reason: ActiveFollowReason,
+	): void {
+		if (this.disposed) return;
+		markColdStart("firstCenterFollowRequested");
+		const target = this.computeCenterTargetScrollTop(key);
+		if (!Number.isFinite(target)) {
+			// Geometry not ready — retry on the next frame.
+			if (this.activeFollowFrame === 0 && this.activeFollowRetryBudget > 0) {
 				this.activeFollowRetryBudget--;
-				reschedule = true;
+				this.scheduleActiveFollowFrame();
 			}
-			if (applied) this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
-			if (reschedule) this.scheduleActiveFollowFrame();
+			return;
+		}
+		this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
+		const now = this.now();
+		const existing = this.activeFollowSession;
+		if (existing !== null && existing.state !== "aligned" && existing.state !== "cancelled") {
+			// §七: retarget — update the existing session.
+			existing.targetKey = key;
+			existing.targetScrollTop = target;
+			existing.state = "retargeting";
+			existing.source = reason;
+			this.activeFollowDiag.retargetCount++;
+			this.perf?.count("centerFollowRetargetCount");
+			return;
+		}
+		this.activeFollowSession = {
+			generation: this.activeFollowGeneration,
+			targetKey: key,
+			targetScrollTop: target,
+			state: "following",
+			startedAt: now,
+			lastFrameAt: now,
+			lastErrorPx: Number.NaN,
+			source: reason,
 		};
-		if (win && typeof win.requestAnimationFrame === "function") {
-			this.activeFollowFrame = win.requestAnimationFrame(run);
-		} else {
-			run();
+		if (this.activeFollowFrame === 0) {
+			this.scheduleActiveFollowFrame();
 		}
 	}
 
-	private runActiveFollow(): boolean {
-		const pending = this.pendingActiveFollow;
-		const generation = pending?.generation ?? this.activeFollowGeneration;
-		const requestedAt = pending?.requestedAt ?? this.now();
-		const applied = this.scrollActiveRowIntoPosition({
-			alignment: "center",
-			behavior: "smooth",
-			source: "active-follow",
-		});
-		if (applied) {
-			markColdStart("firstActiveFollowApplied"); // §十三
-			this.activeFollowDiag.appliedCount++;
-			this.activeFollowDiag.lastLatencyMs = Math.max(
-				0,
-				this.now() - requestedAt,
-			);
-			this.lastAppliedActiveFollowGeneration = generation;
-			// Consumed — unless something newer arrived while we worked.
-			if (this.pendingActiveFollow?.generation === generation) {
-				this.pendingActiveFollow = null;
-			}
-		} else {
-			this.activeFollowDiag.deferredCount++;
+	/** §七: cancel the current session (expanded / pressed / dispose / file / mode). */
+	private cancelActiveFollowSession(): void {
+		if (this.activeFollowSession !== null) {
+			this.activeFollowSession.state = "cancelled";
+			this.activeFollowDiag.cancelledCount++;
 		}
-		return applied;
+		this.activeFollowSession = null;
+		this.cancelActiveFollowFrame();
 	}
 
 	/**
-	 * §五: where the active row sits inside the outline's scrolling
-	 * content, plus the scroll-box geometry needed to place it.
-	 *
-	 * Returns null when the row (or the box) has no layout yet, so the
-	 * caller retries after a measure pass rather than scrolling to 0.
+	 * §十一: snap the latest active heading to the center immediately,
+	 * bypassing the smooth animation. Called on pointer-enter so the user
+	 * sees the correct heading before expansion begins.
+	 */
+	finishActiveFollowImmediately(): void {
+		if (this.disposed) return;
+		const key = this.activeKey;
+		if (key === null) {
+			this.cancelActiveFollowFrame();
+			return;
+		}
+		this.cancelActiveFollowFrame();
+		const target = this.computeCenterTargetScrollTop(key);
+		if (!Number.isFinite(target)) return;
+		const viewport = this.viewportEl;
+		const diag = this.activeFollowDiag;
+		const before = viewport.scrollTop;
+		if (before !== target) {
+			this.programmaticScrollNote = "active-follow";
+			viewport.scrollTop = target;
+			diag.scrollMutationCount++;
+			diag.snapCount++;
+			this.perf?.count("centerFollowScrollMutationCount");
+			this.perf?.count("centerFollowSnapCount");
+		}
+		diag.lastScrollTopBefore = before;
+		diag.lastScrollTopAfter = viewport.scrollTop;
+		diag.lastTargetScrollTop = target;
+		diag.lastAlignmentErrorPx = Math.abs(viewport.scrollTop - target);
+		if (diag.lastAlignmentErrorPx > diag.maxAlignmentErrorPx) {
+			diag.maxAlignmentErrorPx = diag.lastAlignmentErrorPx;
+		}
+		// Mark aligned and clear pending.
+		if (this.activeFollowSession !== null) {
+			this.activeFollowSession.state = "aligned";
+		}
+		this.activeFollowSession = null;
+		if (this.pendingActiveFollow !== null) {
+			this.pendingActiveFollow = null;
+		}
+		diag.alignedCount++;
+		markColdStart("firstCenterFollowAligned");
+	}
+
+	// ── §八: custom RAF smooth scroll ───────────────────────────────
+
+	private scheduleActiveFollowFrame(): void {
+		if (this.disposed || this.activeFollowFrame !== 0) return;
+		const win = this.doc.defaultView;
+		const step = (timestamp: number): void => {
+			this.activeFollowFrame = 0;
+			this.centerFollowFrameStep(timestamp);
+		};
+		if (win && typeof win.requestAnimationFrame === "function") {
+			this.activeFollowFrame = win.requestAnimationFrame(step);
+		}
+	}
+
+	private cancelActiveFollowFrame(): void {
+		if (this.activeFollowFrame !== 0) {
+			this.doc.defaultView?.cancelAnimationFrame(this.activeFollowFrame);
+			this.activeFollowFrame = 0;
+		}
+		this.activeFollowPending = false;
+	}
+
+	/**
+	 * §八: per-frame exponential approach. Frame-rate independent:
+	 * alpha = 1 - exp(-dt / tau). No overshoot, no oscillation. Snaps
+	 * when the error falls below tolerance or the max duration elapses.
+	 */
+	private centerFollowFrameStep(timestamp: number): void {
+		if (this.disposed) return;
+		const session = this.activeFollowSession;
+		if (session === null || session.state === "aligned" || session.state === "cancelled") {
+			return;
+		}
+		if (!this.canRunActiveFollow()) {
+			this.cancelActiveFollowSession();
+			return;
+		}
+		const diag = this.activeFollowDiag;
+		const viewport = this.viewportEl;
+		const current = viewport.scrollTop;
+		const target = session.targetScrollTop;
+
+		// Recompute target in case the layout shifted (spacer resize, etc.)
+		const recomputed = this.computeCenterTargetScrollTop(session.targetKey);
+		if (Number.isFinite(recomputed) && Math.abs(recomputed - target) > 1) {
+			session.targetScrollTop = recomputed;
+		}
+
+		const dt = Math.max(1, timestamp - session.lastFrameAt);
+		const elapsed = timestamp - session.startedAt;
+		session.lastFrameAt = timestamp;
+		diag.frameCount++;
+		this.perf?.count("centerFollowFrameCount");
+		markColdStart("firstCenterFollowFrame");
+
+		const error = session.targetScrollTop - current;
+		session.lastErrorPx = Math.abs(error);
+		diag.lastAlignmentErrorPx = session.lastErrorPx;
+		if (session.lastErrorPx > diag.maxAlignmentErrorPx) {
+			diag.maxAlignmentErrorPx = session.lastErrorPx;
+		}
+		diag.lastScrollTopBefore = current;
+		diag.lastTargetScrollTop = session.targetScrollTop;
+
+		// §四: tolerance check — aligned.
+		if (session.lastErrorPx <= CENTER_ALIGNMENT_TOLERANCE_PX) {
+			this.alignSession(current, session);
+			return;
+		}
+
+		// §八: hard timeout — snap.
+		if (elapsed >= CENTER_FOLLOW_MAX_DURATION_MS) {
+			this.programmaticScrollNote = "active-follow";
+			viewport.scrollTop = session.targetScrollTop;
+			diag.scrollMutationCount++;
+			diag.timeoutCount++;
+			this.perf?.count("centerFollowScrollMutationCount");
+			this.perf?.count("centerFollowTimeoutCount");
+			diag.lastScrollTopAfter = viewport.scrollTop;
+			this.alignSession(viewport.scrollTop, session);
+			return;
+		}
+
+		// §八: exponential approach. alpha = 1 - exp(-dt / tau).
+		const alpha = 1 - Math.exp(-dt / CENTER_FOLLOW_TAU_MS);
+		const next = current + error * alpha;
+
+		this.programmaticScrollNote = "active-follow";
+		viewport.scrollTop = next;
+		diag.scrollMutationCount++;
+		this.perf?.count("centerFollowScrollMutationCount");
+		diag.lastScrollTopAfter = viewport.scrollTop;
+		session.state = "following";
+
+		this.perf?.count("activeFollowScrollMutationCount");
+		this.scheduleActiveFollowFrame();
+	}
+
+	/** §八: mark the session aligned, clear pending, stop the RAF. */
+	private alignSession(finalScrollTop: number, session: ActiveFollowSession): void {
+		const diag = this.activeFollowDiag;
+		session.state = "aligned";
+		diag.lastScrollTopAfter = finalScrollTop;
+		diag.lastAlignmentErrorPx = Math.abs(finalScrollTop - session.targetScrollTop);
+		diag.lastDurationMs = this.now() - session.startedAt;
+		diag.alignedCount++;
+		markColdStart("firstCenterFollowAligned");
+		// §七: pending is cleared ONLY on alignment, not on scroll request.
+		if (this.pendingActiveFollow?.generation === session.generation) {
+			this.pendingActiveFollow = null;
+		}
+		this.activeFollowSession = null;
+		this.cancelActiveFollowFrame();
+	}
+
+	// ── §九: target position calculation ────────────────────────────
+
+	/**
+	 * §九: compute the scrollTop that puts the active row's content center
+	 * at the playhead (viewport.clientHeight / 2). Returns NaN when the
+	 * row or viewport has no layout yet.
+	 */
+	private computeCenterTargetScrollTop(key: string): number {
+		const record = this.itemRecords.get(key);
+		if (!record) return Number.NaN;
+		const measured = this.measureActiveRow(record.rowEl);
+		if (measured === null) return Number.NaN;
+		const viewport = this.viewportEl;
+		const playheadY = viewport.clientHeight / 2;
+		const activeCenter = measured.rowTop + measured.rowHeight / 2;
+		const maxScrollTop = Math.max(0, measured.scrollHeight - measured.clientHeight);
+		const target = Math.max(0, Math.min(maxScrollTop, activeCenter - playheadY));
+		const diag = this.activeFollowDiag;
+		diag.lastRowContentCenter = activeCenter;
+		diag.lastPlayheadY = playheadY;
+		diag.lastTargetScrollTop = target;
+		diag.lastCoordinateSource = measured.source;
+		return target;
+	}
+
+	/**
+	 * §五: measure the active row's content-coordinate position. Uses the
+	 * offsetParent chain (correct for every nesting); falls back to
+	 * getBoundingClientRect for the single active row only when the chain
+	 * cannot reach the viewport.
 	 */
 	private measureActiveRow(rowEl: HTMLElement): {
 		rowTop: number;
@@ -1264,276 +1441,91 @@ export class GlideOutlineView {
 			diag.maxOffsetChainDepth = chain.depth;
 		}
 		if (chain.resolved) {
-			diag.offsetChainCount++;
-			return {
-				rowTop: chain.top,
-				rowHeight,
-				clientHeight,
-				scrollHeight,
-				source: "offset-chain",
-			};
+			return { rowTop: chain.top, rowHeight, clientHeight, scrollHeight, source: "offset-chain" };
 		}
-		// §五: rect fallback. Two extra getBoundingClientRect calls, and
-		// only ever for the ONE active row — never a sweep over the list.
+		// §五: rect fallback — single active row only, never a sweep.
 		const rowRect = rowEl.getBoundingClientRect();
 		const viewportRect = viewport.getBoundingClientRect();
-		const rowTop =
-			rowRect.top - viewportRect.top - viewport.clientTop + viewport.scrollTop;
+		const rowTop = rowRect.top - viewportRect.top - viewport.clientTop + viewport.scrollTop;
 		if (!Number.isFinite(rowTop)) return null;
 		diag.rectFallbackCount++;
-		return {
-			rowTop,
-			rowHeight,
-			clientHeight,
-			scrollHeight,
-			source: "rect",
-		};
+		this.perf?.count("centerFollowRectFallbackCount");
+		return { rowTop, rowHeight, clientHeight, scrollHeight, source: "rect" };
 	}
 
 	/**
-	 * §六: is the row inside the safe band — the viewport inset by
-	 * `activeFollowMarginPx` at both ends? A row taller than the band can
-	 * never fit inside it, so for those "spans the whole band" counts.
-	 */
-	private isRowInSafeBand(
-		rowTop: number,
-		rowHeight: number,
-		scrollTop: number,
-		clientHeight: number,
-		margin: number,
-	): boolean {
-		const safeTop = scrollTop + margin;
-		const safeBottom = scrollTop + clientHeight - margin;
-		const rowBottom = rowTop + rowHeight;
-		if (rowHeight >= safeBottom - safeTop) {
-			return rowTop <= safeTop && rowBottom >= safeBottom;
-		}
-		return rowTop >= safeTop && rowBottom <= safeBottom;
-	}
-
-	private countActiveFollowResult(result: ActiveFollowResult): void {
-		const d = this.activeFollowDiag;
-		if (result === "centered") d.centeredCount++;
-		else if (result === "top-boundary") d.topBoundaryCount++;
-		else if (result === "bottom-boundary") d.bottomBoundaryCount++;
-	}
-
-	/**
-	 * §六: put the active row inside the safe visible band of the outline
-	 * viewport — and then check that it actually got there.
-	 *
-	 * Deliberately NOT `Element.scrollIntoView`: that walks ancestor
-	 * scroll containers (it would scroll the *editor*) and, with
-	 * `behavior:"smooth"`, animates against the outline's own motion. We
-	 * compute the exact `scrollTop`, clamp it to the scrollable range, and
-	 * verify on the next frame.
-	 *
-	 * Returns false only when the row has no layout yet (never laid out /
-	 * display:none), so the caller can retry after a measure.
+	 * §九: snap the active row to the center. Used by jump corrections and
+	 * other callers that need instant positioning (not the smooth session).
+	 * The smooth session writes scrollTop directly via centerFollowFrameStep.
 	 */
 	scrollActiveRowIntoPosition(options: {
-		alignment: "center" | "nearest";
-		behavior: "auto" | "smooth";
+		alignment: "center";
+		behavior: "auto";
 		source: "active-follow" | "jump";
 	}): boolean {
 		if (this.disposed || this.activeKey === null) return false;
 		const record = this.itemRecords.get(this.activeKey);
 		if (!record) return false;
-		const diag = this.activeFollowDiag;
-		diag.lastKey = this.activeKey;
-		const measured = this.measureActiveRow(record.rowEl);
-		if (measured === null) {
-			diag.lastResult = "deferred-no-layout";
-			return false;
-		}
-		const { rowTop, rowHeight, clientHeight, scrollHeight } = measured;
-		diag.lastMeasureSource = measured.source;
-		diag.lastRowTop = rowTop;
-		diag.lastRowHeight = rowHeight;
-		diag.lastClientHeight = clientHeight;
-
+		const target = this.computeCenterTargetScrollTop(this.activeKey);
+		if (!Number.isFinite(target)) return false;
 		const viewport = this.viewportEl;
-		const scrollTop = viewport.scrollTop;
-		diag.lastScrollTopBefore = scrollTop;
-		const margin = activeFollowMarginPx(clientHeight);
-		diag.lastMarginPx = margin;
-
-		if (
-			this.isRowInSafeBand(rowTop, rowHeight, scrollTop, clientHeight, margin)
-		) {
-			diag.alreadyVisibleCount++;
+		const diag = this.activeFollowDiag;
+		const before = viewport.scrollTop;
+		diag.lastScrollTopBefore = before;
+		if (Math.abs(before - target) <= CENTER_ALIGNMENT_TOLERANCE_PX) {
 			diag.noMutationCount++;
-			diag.lastResult = "already-visible";
-			diag.lastTargetScrollTop = scrollTop;
-			diag.lastScrollTopAfter = scrollTop;
-			this.perf?.count("activeFollowNoMutationCount");
+			diag.lastScrollTopAfter = before;
 			return true;
 		}
-
-		const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
-		let desired: number;
-		if (options.alignment === "center") {
-			desired = rowTop + rowHeight / 2 - clientHeight / 2;
-		} else {
-			// Minimal move that brings the row inside the safe band.
-			desired =
-				rowTop < scrollTop + margin
-					? rowTop - margin
-					: rowTop + rowHeight + margin - clientHeight;
-		}
-		const target = Math.max(0, Math.min(maxScrollTop, desired));
-		// A boundary result means the clamp bit — the row genuinely cannot
-		// be centred because the list ends there.
-		let result: ActiveFollowResult;
-		if (desired < 0) result = "top-boundary";
-		else if (desired > maxScrollTop) result = "bottom-boundary";
-		else result = "centered";
-		diag.lastTargetScrollTop = target;
-
-		if (target === scrollTop) {
-			// Already as close as the scroll range allows.
-			diag.noMutationCount++;
-			this.perf?.count("activeFollowNoMutationCount");
-			diag.lastScrollTopAfter = scrollTop;
-			diag.lastResult = result;
-			this.countActiveFollowResult(result);
-			return true;
-		}
-
-		// §十: attribute the scroll BEFORE the write — the event may be
-		// delivered synchronously. active-follow reveals are their own
-		// source so the histogram never blames them on a user gesture.
-		// §六: smooth scroll fires scroll events over ~300ms; the note
-		// must survive the whole animation so the MagnificationController's
-		// scroll handler doesn't treat later frames as user scrolls and
-		// pause follow. A frame TTL of 30 (~500ms at 60fps) covers it.
-		// The TTL is only set when scrollTo is actually used — in jsdom
-		// scrollTo is absent and the fallback (scrollTop = target) is
-		// instant, so the TTL stays at 1 and the correction frame runs.
-		const useSmoothScroll =
-			options.behavior === "smooth" &&
-			typeof viewport.scrollTo === "function";
 		this.programmaticScrollNote =
 			options.source === "active-follow" ? "active-follow" : "jump";
-		this.programmaticScrollNoteFrames = useSmoothScroll ? 30 : 1;
-		this.lastScrollWasSmooth = useSmoothScroll;
-		if (useSmoothScroll) {
-			viewport.scrollTo({ top: target, behavior: "smooth" });
-		} else {
-			viewport.scrollTop = target;
-		}
-		diag.lastScrollTopAfter = viewport.scrollTop;
+		viewport.scrollTop = target;
 		diag.scrollMutationCount++;
-		this.perf?.count("activeFollowScrollMutationCount");
-		diag.lastResult = result;
-		this.countActiveFollowResult(result);
-		// §六: writing scrollTop is a request, not a guarantee — the row
-		// can still land outside the safe band if the layout moved in the
-		// same frame. Verify next frame; one correction is allowed.
-		if (options.source === "active-follow") {
-			this.scheduleActiveFollowCorrection();
-		}
+		diag.lastScrollTopAfter = viewport.scrollTop;
 		return true;
 	}
 
-	private scheduleActiveFollowCorrection(): void {
-		if (this.disposed || this.activeFollowCorrectionFrame !== 0) return;
-		const win = this.doc.defaultView;
-		const run = (): void => {
-			this.activeFollowCorrectionFrame = 0;
-			this.runActiveFollowCorrection();
-		};
-		if (win && typeof win.requestAnimationFrame === "function") {
-			this.activeFollowCorrectionFrame = win.requestAnimationFrame(run);
-		} else {
-			run();
-		}
+	// ── §五/§六: playhead visibility ─────────────────────────────────
+
+	/** §五: show or hide the fixed center playhead based on interaction state. */
+	private updatePlayheadVisibility(): void {
+		if (!this.playheadEl) return;
+		const visible = this.interactionState === "collapsed";
+		this.playheadEl.style.display = visible ? "" : "none";
 	}
 
+	// ── §六: center spacers ──────────────────────────────────────────
+
 	/**
-	 * §六: verification pass. At most ONE corrective write — if the row is
-	 * still off-band afterwards the outcome is recorded as a failure
-	 * rather than retried forever, so a pathological layout cannot turn
-	 * into a scroll loop.
+	 * §六: recompute top/bottom spacer heights so the first and last rows
+	 * can reach the center. Called on resize, setItems, level filter,
+	 * file/mode change.
 	 */
-	private runActiveFollowCorrection(): void {
-		if (this.disposed || this.activeKey === null) return;
-		if (!this.canRunActiveFollow()) return;
-		const record = this.itemRecords.get(this.activeKey);
-		if (!record) return;
-		const measured = this.measureActiveRow(record.rowEl);
-		if (measured === null) return;
+	private refreshCenterSpacers(): void {
+		if (this.disposed) return;
 		const viewport = this.viewportEl;
-		const scrollTop = viewport.scrollTop;
-		const margin = activeFollowMarginPx(measured.clientHeight);
-		const diag = this.activeFollowDiag;
-		if (
-			this.isRowInSafeBand(
-				measured.rowTop,
-				measured.rowHeight,
-				scrollTop,
-				measured.clientHeight,
-				margin,
-			)
-		) {
-			return; // the first pass landed it — nothing to correct
+		const clientHeight = viewport.clientHeight;
+		if (!(clientHeight > 0)) return;
+		const rows = this.itemRecords;
+		if (rows.size === 0) return;
+		const firstRecord = rows.values().next().value;
+		const lastRecord = [...rows.values()].pop();
+		if (!firstRecord || !lastRecord) return;
+		const firstRowHeight = firstRecord.rowEl.offsetHeight || 0;
+		const lastRowHeight = lastRecord.rowEl.offsetHeight || 0;
+		const topSpacer = Math.max(0, clientHeight / 2 - firstRowHeight / 2);
+		const bottomSpacer = Math.max(0, clientHeight / 2 - lastRowHeight / 2);
+		this.topCenterSpacerPx = topSpacer;
+		this.bottomCenterSpacerPx = bottomSpacer;
+		this.firstRowHeightPx = firstRowHeight;
+		this.lastRowHeightPx = lastRowHeight;
+		this.centerSpacerRefreshCount++;
+		markColdStart("firstCenterSpacerMeasured");
+		if (this.topSpacerEl) {
+			this.topSpacerEl.style.height = `${topSpacer}px`;
 		}
-		const maxScrollTop = Math.max(
-			0,
-			measured.scrollHeight - measured.clientHeight,
-		);
-		const desired =
-			measured.rowTop + measured.rowHeight / 2 - measured.clientHeight / 2;
-		const target = Math.max(0, Math.min(maxScrollTop, desired));
-		if (target === scrollTop) {
-			// §六: the scroller is ALREADY exactly where the math puts it,
-			// so there is nothing a correction could change. The row is
-			// outside the band only because the band cannot reach it — the
-			// first and last headings of any list sit inside the inset once
-			// the scroll range is clamped. That is the best position that
-			// exists, not a failure, and calling it one would light up the
-			// diagnostics on the most ordinary case there is. Leave
-			// `lastResult` as the boundary outcome the first pass recorded.
-			diag.noMutationCount++;
-			this.perf?.count("activeFollowNoMutationCount");
-			diag.lastTargetScrollTop = target;
-			diag.lastScrollTopAfter = scrollTop;
-			return;
-		}
-		// §六: a smooth scroll (behavior: "smooth") animates over ~300ms.
-		// On the next rAF the row is still mid-flight: scrollTop is between
-		// the old and new positions, so target !== scrollTop. Issuing a
-		// corrective write here would fight the animation. In jsdom
-		// scrollTo is absent (scrollTop = target is instant), so
-		// lastScrollWasSmooth is false and the correction proceeds normally.
-		if (this.lastScrollWasSmooth) {
-			this.lastScrollWasSmooth = false; // one-shot
-			return; // smooth scroll still settling — let it finish
-		}
-		diag.correctionCount++;
-		this.perf?.count("activeFollowCorrectionCount");
-		this.programmaticScrollNote = "active-follow";
-		this.programmaticScrollNoteFrames = 1;
-		viewport.scrollTop = target;
-		diag.scrollMutationCount++;
-		this.perf?.count("activeFollowScrollMutationCount");
-		const after = viewport.scrollTop;
-		diag.lastTargetScrollTop = target;
-		diag.lastScrollTopAfter = after;
-		if (
-			this.isRowInSafeBand(
-				measured.rowTop,
-				measured.rowHeight,
-				after,
-				measured.clientHeight,
-				margin,
-			)
-		) {
-			diag.lastResult = "corrected";
-		} else {
-			diag.failedAfterCorrectionCount++;
-			this.perf?.count("activeFollowFailedVisibilityCount");
-			diag.lastResult = "failed-after-correction";
+		if (this.bottomSpacerEl) {
+			this.bottomSpacerEl.style.height = `${bottomSpacer}px`;
 		}
 	}
 
