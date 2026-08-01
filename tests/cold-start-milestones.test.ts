@@ -48,11 +48,19 @@ describe("cold-start milestone wiring (§十三)", () => {
 	let view: GlideOutlineView;
 	let trace: ColdStartTrace | null;
 	let rafQueue: FrameRequestCallback[];
+	let clock: number;
 
-	function flushRaf(): void {
-		for (let guard = 0; guard < 12 && rafQueue.length > 0; guard++) {
+	/**
+	 * §八 / §十七: the centre-follow session is a real RAF animation now, so
+	 * the milestones only fire if the clock actually advances. A fake clock
+	 * keeps that deterministic — 100 ms per frame converges (or trips the
+	 * 700 ms ceiling) well inside the guard.
+	 */
+	function flushRaf(frames = 16, dt = 100): void {
+		for (let guard = 0; guard < frames && rafQueue.length > 0; guard++) {
 			const batch = rafQueue.splice(0, rafQueue.length);
-			for (const cb of batch) cb(performance.now());
+			clock += dt;
+			for (const cb of batch) cb(clock);
 		}
 	}
 
@@ -97,6 +105,8 @@ describe("cold-start milestone wiring (§十三)", () => {
 
 	beforeEach(() => {
 		rafQueue = [];
+		clock = 0;
+		vi.spyOn(performance, "now").mockImplementation(() => clock);
 		vi.stubGlobal(
 			"requestAnimationFrame",
 			(cb: FrameRequestCallback): number => {
@@ -114,6 +124,7 @@ describe("cold-start milestone wiring (§十三)", () => {
 		trace?.dispose();
 		setActiveColdStartTrace(null);
 		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
 	});
 
 	it("records the outline's first commit and first follow", () => {
@@ -132,7 +143,7 @@ describe("cold-start milestone wiring (§十三)", () => {
 		expect(names).toContain("firstMeasureRowsStart");
 		expect(names).toContain("firstMeasureRowsEnd");
 		expect(names).toContain("firstActiveFollowRequest");
-		expect(names).toContain("firstActiveFollowApplied");
+		expect(names).toContain("firstCenterFollowAligned");
 	});
 
 	it("keeps the milestones in the order the plugin reached them", () => {
@@ -152,7 +163,7 @@ describe("cold-start milestone wiring (§十三)", () => {
 			at("firstActiveFollowRequest"),
 		);
 		expect(at("firstActiveFollowRequest")).toBeLessThan(
-			at("firstActiveFollowApplied"),
+			at("firstCenterFollowAligned"),
 		);
 		const report = trace.buildReport();
 		for (const milestone of report.milestones) {
@@ -208,7 +219,7 @@ describe("cold-start milestone wiring (§十三)", () => {
 			view.setActiveKey(HEADINGS[10].key);
 			flushRaf();
 		}).not.toThrow();
-		expect(view.getActiveFollowDiagnostics().appliedCount).toBe(1);
+		expect(view.getActiveFollowDiagnostics().alignedCount).toBe(1);
 	});
 
 	it("stops recording once the trace is unpublished", () => {
@@ -226,6 +237,6 @@ describe("cold-start milestone wiring (§十三)", () => {
 		flushRaf();
 
 		expect(milestoneNames()).toHaveLength(before);
-		expect(milestoneNames()).not.toContain("firstActiveFollowApplied");
+		expect(milestoneNames()).not.toContain("firstCenterFollowAligned");
 	});
 });

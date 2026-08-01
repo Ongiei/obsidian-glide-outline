@@ -4,35 +4,46 @@ import type { HeadingItem } from "../src/model/HeadingItem";
 import type { GlideOutlineSettings } from "../src/settings";
 import { DEFAULT_SETTINGS } from "../src/settings";
 import {
-	activeFollowMarginPx,
 	getOffsetWithinScrollContent,
 	GlideOutlineView,
 } from "../src/ui/GlideOutlineView";
 
 /**
- * §九 / §十七: the collapsed outline must reliably scroll the highlighted
- * dot into view in a list far taller than the rail.
+ * §五–§十四: the collapsed outline positions the active heading against a
+ * FIXED CENTER PLAYHEAD. The playhead never moves; the marker list slides
+ * underneath it until the active row's content centre sits on it.
  *
- * The bug this suite pins down had two halves:
- *   §五  the offset was read as `rowEl.offsetTop`, which measures from
- *        whatever happens to be the offsetParent (the <nav>, a padded
- *        card box) rather than from the scroll viewport;
- *   §三  a follow requested while the rail was expanded / pressed /
- *        paused was thrown away, so nothing ever asked again and the
- *        outline stayed parked on a stale row.
+ * This replaces the old safe-band model, where a row that happened to be
+ * anywhere inside a generous inset counted as "already visible" and the
+ * outline simply refused to scroll. That produced the exact inconsistency
+ * the user reported: sometimes centred, sometimes not, and after an
+ * interrupted smooth scroll sometimes not even on screen.
  *
- * jsdom has no layout engine, so every geometry read the view performs is
- * mocked explicitly and deterministically:
- *   126 rows × 24 px  = 3024 px of content
- *   viewport          =  400 px tall  → maxScrollTop = 2624
- *   safe-band margin  = min(48, 400 × 0.15) = 48 px
+ * The fixture below is a 126-row list in a 400 px viewport:
+ *
+ *   126 rows × 24 px       = 3024 px of rows
+ *   top / bottom spacers   = 400/2 − 24/2 = 188 px each  (§六)
+ *   scroll content         = 188 + 3024 + 188 = 3400 px
+ *   maxScrollTop           = 3400 − 400 = 3000 px
+ *   playheadY              = 400 / 2 = 200 px
+ *
+ * With the spacers in place row 0 centres at scrollTop 0 and row 125
+ * centres at scrollTop 3000 — both reachable, which is the whole point of
+ * §六. jsdom has no layout engine, so every geometry read is mocked
+ * explicitly: the spacers are modelled by the list's own offsetTop, and
+ * scrollHeight is stated directly.
  */
+
 const ROW_COUNT = 126;
 const ROW_H = 24;
 const CLIENT_H = 400;
-const CONTENT_H = ROW_COUNT * ROW_H; // 3024
-const MAX_SCROLL_TOP = CONTENT_H - CLIENT_H; // 2624
-const MARGIN = 48;
+const PLAYHEAD_Y = CLIENT_H / 2; // 200
+/** §六: the spacer a uniform-height list produces at both ends. */
+const SPACER = CLIENT_H / 2 - ROW_H / 2; // 188
+const CONTENT_H = SPACER + ROW_COUNT * ROW_H + SPACER; // 3400
+const MAX_SCROLL_TOP = CONTENT_H - CLIENT_H; // 3000
+/** §四: the only success criterion left. */
+const TOLERANCE = 0.75;
 
 function heading(level: number, text: string, line: number): HeadingItem {
 	return {
@@ -50,32 +61,44 @@ const HEADINGS = Array.from({ length: ROW_COUNT }, (_, i) =>
 
 const keyAt = (index: number): string => HEADINGS[index].key;
 
-/** Centred scrollTop for a row at `index`, clamped to the scroll range. */
-function centeredTarget(index: number, rowTopBase = 0): number {
-	const desired = rowTopBase + index * ROW_H + ROW_H / 2 - CLIENT_H / 2;
-	return Math.max(0, Math.min(MAX_SCROLL_TOP, desired));
+/** §九: the scrollTop that puts row `index`'s centre on the playhead. */
+function centeredTarget(index: number, listTop = SPACER, rowH = ROW_H): number {
+	const rowCentre = listTop + index * rowH + rowH / 2;
+	return Math.max(0, Math.min(MAX_SCROLL_TOP, rowCentre - PLAYHEAD_Y));
 }
 
 function defineNumber(el: HTMLElement, prop: string, value: number): void {
 	Object.defineProperty(el, prop, { configurable: true, value });
 }
 
-describe("active-follow in a 126-row overflowing outline (§九)", () => {
+describe("center-playhead active follow in a 126-row outline (§五–§十四)", () => {
 	let host: HTMLElement;
 	let settings: GlideOutlineSettings;
 	let view: GlideOutlineView;
 	let rafQueue: FrameRequestCallback[];
+	/** Shared fake clock: RAF timestamps and performance.now() agree. */
+	let clock: number;
 
-	function flushRaf(): void {
-		// Drain, including callbacks scheduled while draining (retry /
-		// correction passes schedule themselves).
-		for (let guard = 0; guard < 12 && rafQueue.length > 0; guard++) {
+	/**
+	 * Drain the RAF queue, advancing the shared clock by `dt` per frame.
+	 * The follow session reschedules itself, so callbacks queued while
+	 * draining are picked up on the next iteration — bounded by `frames`
+	 * so a runaway session fails the test instead of hanging it.
+	 */
+	function flushRaf(frames = 200, dt = 16): number {
+		let ran = 0;
+		for (let i = 0; i < frames && rafQueue.length > 0; i++) {
 			const batch = rafQueue.splice(0, rafQueue.length);
-			for (const cb of batch) cb(performance.now());
+			clock += dt;
+			for (const cb of batch) {
+				ran++;
+				cb(clock);
+			}
 		}
+		return ran;
 	}
 
-	/** Scroll-box metrics: the three values `measureActiveRow` reads. */
+	/** §九: the three viewport values every measurement reads. */
 	function mockViewport(scrollTop: number, scrollHeight = CONTENT_H): void {
 		const el = view.viewportEl;
 		defineNumber(el, "clientHeight", CLIENT_H);
@@ -85,23 +108,15 @@ describe("active-follow in a 126-row overflowing outline (§九)", () => {
 			writable: true,
 			value: scrollTop,
 		});
-		// jsdom's scrollTo is instant (no animation). Shadow it so the
-		// code falls back to scrollTop = target — matching jsdom's actual
-		// behavior and keeping the correction frame active for assertions.
-		// In Chromium the real scrollTo animates smoothly.
-		Object.defineProperty(el, "scrollTo", {
-			configurable: true,
-			value: undefined,
-		});
 	}
 
 	/**
-	 * Lay the rows out as a real browser would: every row is positioned by
-	 * the <nav>, and the <nav> is positioned by the viewport. That is the
-	 * nesting that makes a bare `rowEl.offsetTop` wrong — the chain walk
-	 * has to add the list's own offset back in.
+	 * §五: lay the rows out the way a browser would — each row is
+	 * positioned by the <nav>, and the <nav> by the viewport. `listOffset`
+	 * stands in for the top center spacer, which in a real browser pushes
+	 * the list down inside the scroll content.
 	 */
-	function mockRowLayout(rowHeight = ROW_H, listOffsetTop = 0): void {
+	function mockRowLayout(rowHeight = ROW_H, listOffset = SPACER): void {
 		const rows = [
 			...view.listEl.querySelectorAll<HTMLElement>(".glide-outline-row"),
 		];
@@ -113,15 +128,24 @@ describe("active-follow in a 126-row overflowing outline (§九)", () => {
 				value: view.listEl,
 			});
 		});
-		defineNumber(view.listEl, "offsetTop", listOffsetTop);
+		defineNumber(view.listEl, "offsetTop", listOffset);
 		Object.defineProperty(view.listEl, "offsetParent", {
 			configurable: true,
 			value: view.viewportEl,
 		});
 	}
 
+	/** Run one follow to completion and report where it landed. */
+	function followTo(index: number): number {
+		view.setActiveKey(keyAt(index));
+		flushRaf();
+		return view.viewportEl.scrollTop;
+	}
+
 	beforeEach(() => {
 		rafQueue = [];
+		clock = 1000;
+		vi.spyOn(performance, "now").mockImplementation(() => clock);
 		vi.stubGlobal(
 			"requestAnimationFrame",
 			(cb: FrameRequestCallback): number => {
@@ -146,575 +170,531 @@ describe("active-follow in a 126-row overflowing outline (§九)", () => {
 		view.dispose();
 		host.remove();
 		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
 	});
 
-	it("centres a far-offscreen active row on the collapsed rail", () => {
-		view.setActiveKey(keyAt(100));
-		flushRaf();
+	// ── §九 / §六: centre geometry ──────────────────────────────────
 
-		const d = view.getActiveFollowDiagnostics();
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100)); // 2212
-		expect(d.lastResult).toBe("centered");
-		expect(d.centeredCount).toBe(1);
-		expect(d.appliedCount).toBe(1);
-		expect(d.scrollMutationCount).toBe(1);
-		expect(d.lastMarginPx).toBe(MARGIN);
-		expect(d.failedAfterCorrectionCount).toBe(0);
-		expect(view.getPendingActiveFollow()).toBeNull();
-	});
-
-	it("accumulates the offsetParent chain instead of trusting offsetTop", () => {
-		// A padded card box pushes the whole list down by 60 px. The raw
-		// `rowEl.offsetTop` still reads 2400 — only the chain sees 2460.
-		mockRowLayout(ROW_H, 60);
-		view.setActiveKey(keyAt(100));
-		flushRaf();
-
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.lastMeasureSource).toBe("offset-chain");
-		expect(d.offsetChainCount).toBeGreaterThan(0);
-		expect(d.rectFallbackCount).toBe(0);
-		expect(d.lastRowTop).toBe(100 * ROW_H + 60);
-		expect(d.maxOffsetChainDepth).toBe(2); // row → nav → viewport
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100, 60)); // 2272
-	});
-
-	it("falls back to rectangles when the chain misses the viewport", () => {
-		// A `position: fixed` ancestor (or a detached subtree) breaks the
-		// walk. Only the ONE active row pays for the two rect reads.
-		const record = view.getItemRecord(keyAt(100));
-		expect(record).toBeDefined();
-		const rowEl = record?.rowEl as HTMLElement;
-		Object.defineProperty(rowEl, "offsetParent", {
-			configurable: true,
-			value: null,
+	describe("centre geometry (§六 / §九)", () => {
+		it("centres row 0 at scrollTop 0 thanks to the top spacer", () => {
+			mockViewport(2000);
+			expect(followTo(0)).toBeCloseTo(centeredTarget(0), 1);
+			expect(centeredTarget(0)).toBe(0);
 		});
-		// Rectangles are viewport-relative: they move as the box scrolls,
-		// exactly as a real browser reports them. A static mock would make
-		// the verification pass read a different row position than the
-		// first pass and mask the behaviour under test.
-		rowEl.getBoundingClientRect = () =>
-			({
-				top: 900 - view.viewportEl.scrollTop,
-				height: ROW_H,
-			}) as DOMRect;
-		view.viewportEl.getBoundingClientRect = () =>
-			({ top: 100, height: CLIENT_H }) as DOMRect;
 
-		view.setActiveKey(keyAt(100));
-		flushRaf();
+		it("centres a mid-list row on the playhead", () => {
+			expect(followTo(60)).toBeCloseTo(centeredTarget(60), 1);
+			// 188 + 60*24 + 12 − 200 = 1440
+			expect(centeredTarget(60)).toBe(1440);
+		});
 
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.lastMeasureSource).toBe("rect");
-		expect(d.offsetChainCount).toBe(0);
-		// One read for the placement pass, one for the verification pass —
-		// and never a sweep over the other 125 rows.
-		expect(d.rectFallbackCount).toBe(2);
-		expect(d.lastRowTop).toBe(800); // 900 − 100 − clientTop(0) + scrollTop(0)
-		expect(view.viewportEl.scrollTop).toBe(800 + ROW_H / 2 - CLIENT_H / 2);
-		expect(d.correctionCount).toBe(0);
+		it("centres the last row at maxScrollTop thanks to the bottom spacer", () => {
+			expect(followTo(ROW_COUNT - 1)).toBeCloseTo(
+				centeredTarget(ROW_COUNT - 1),
+				1,
+			);
+			expect(centeredTarget(ROW_COUNT - 1)).toBe(MAX_SCROLL_TOP);
+		});
+
+		it("reports the row centre and playhead used for the decision", () => {
+			followTo(60);
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.lastPlayheadY).toBe(PLAYHEAD_Y);
+			expect(d.lastRowContentCenter).toBe(SPACER + 60 * ROW_H + ROW_H / 2);
+			expect(d.lastCoordinateSource).toBe("offset-chain");
+		});
+
+		it("measures through the offset chain, not a bare offsetTop", () => {
+			// The row's own offsetTop is 1440; the list adds 188 more.
+			const rowEl = view.listEl.querySelectorAll<HTMLElement>(
+				".glide-outline-row",
+			)[60];
+			expect(rowEl.offsetTop).toBe(60 * ROW_H);
+			const chain = getOffsetWithinScrollContent(rowEl, view.viewportEl);
+			expect(chain.resolved).toBe(true);
+			expect(chain.top).toBe(SPACER + 60 * ROW_H);
+		});
+
+		it("honours a taller row height when centring", () => {
+			const TALL = 40;
+			mockRowLayout(TALL, SPACER);
+			view.setActiveKey(keyAt(30));
+			flushRaf();
+			const expected = Math.max(
+				0,
+				Math.min(
+					MAX_SCROLL_TOP,
+					SPACER + 30 * TALL + TALL / 2 - PLAYHEAD_Y,
+				),
+			);
+			expect(view.viewportEl.scrollTop).toBeCloseTo(expected, 1);
+		});
+
+		it("recomputes the spacers from the live viewport height", () => {
+			// Spacers are derived from clientHeight / 2 − rowHeight / 2.
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.topCenterSpacerPx).toBe(SPACER);
+			expect(d.bottomCenterSpacerPx).toBe(SPACER);
+		});
+
+		it("re-measures the spacers when the viewport is resized", () => {
+			const TALLER = 600;
+			defineNumber(view.viewportEl, "clientHeight", TALLER);
+			view.applySettings();
+			flushRaf();
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.topCenterSpacerPx).toBe(TALLER / 2 - ROW_H / 2);
+			expect(d.bottomCenterSpacerPx).toBe(TALLER / 2 - ROW_H / 2);
+		});
+
+		it("clamps the spacers to zero when a row is taller than the viewport", () => {
+			mockRowLayout(CLIENT_H * 2, SPACER);
+			view.applySettings();
+			flushRaf();
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.topCenterSpacerPx).toBe(0);
+			expect(d.bottomCenterSpacerPx).toBe(0);
+		});
+
+		it("survives a level filter that removes the first and last rows", () => {
+			view.setItems(HEADINGS.slice(10, 100));
+			mockViewport(0);
+			mockRowLayout();
+			flushRaf();
+			const key = HEADINGS[55].key;
+			view.setActiveKey(key);
+			flushRaf();
+			// index 45 within the filtered list
+			expect(view.viewportEl.scrollTop).toBeCloseTo(centeredTarget(45), 1);
+		});
+
+		it("centres identically on the right-hand rail", () => {
+			settings.position = "right";
+			view.applySettings();
+			mockViewport(0);
+			mockRowLayout();
+			flushRaf();
+			expect(followTo(60)).toBeCloseTo(centeredTarget(60), 1);
+		});
 	});
 
-	it("leaves the scroll alone when the row already sits in the safe band", () => {
-		mockViewport(2200); // safe band 2248 … 2552; row 100 spans 2400 … 2424
-		view.setActiveKey(keyAt(100));
-		flushRaf();
+	// ── §七 / §八: the single follow session ────────────────────────
 
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.lastResult).toBe("already-visible");
-		expect(d.alreadyVisibleCount).toBe(1);
-		expect(d.noMutationCount).toBe(1);
-		expect(d.scrollMutationCount).toBe(0);
-		expect(view.viewportEl.scrollTop).toBe(2200);
-	});
+	describe("single follow session (§七 / §八)", () => {
+		it("starts a session and reports it while it runs", () => {
+			view.setActiveKey(keyAt(100));
+			const mid = view.getActiveFollowDiagnostics();
+			expect(mid.sessionState).not.toBe("idle");
+			expect(mid.sessionTargetKey).toBe(keyAt(100));
+			flushRaf();
+			const done = view.getActiveFollowDiagnostics();
+			expect(done.sessionState).toBe("idle"); // cleared on alignment
+			expect(done.alignedCount).toBe(1);
+		});
 
-	it("treats a row inside the viewport but under the top inset as off-band", () => {
-		// Row 100 starts half an inset below the viewport top — visible, but
-		// inside the band's margin, which is exactly the "highlighted dot is
-		// squashed against the edge" case the safe band exists to fix.
-		mockViewport(100 * ROW_H - MARGIN / 2);
-		view.setActiveKey(keyAt(100));
-		flushRaf();
+		it("aligns within the 0.75 px tolerance", () => {
+			followTo(60);
+			const d = view.getActiveFollowDiagnostics();
+			expect(Math.abs(d.lastAlignmentErrorPx)).toBeLessThanOrEqual(
+				TOLERANCE,
+			);
+		});
 
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.alreadyVisibleCount).toBe(0);
-		expect(d.lastResult).toBe("centered");
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100));
-	});
+		it("retargets in place: 10 → 60 → 110 keeps only the last target", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf(2); // let the session get moving
+			view.setActiveKey(keyAt(60));
+			view.setActiveKey(keyAt(110));
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(110),
+				1,
+			);
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.retargetCount).toBeGreaterThanOrEqual(2);
+			// One session, one alignment — not three animations.
+			expect(d.alignedCount).toBe(1);
+		});
 
-	it("clamps to the top of the range for the first row", () => {
-		mockViewport(1000);
-		view.setActiveKey(keyAt(0));
-		flushRaf();
+		it("never runs two RAF callbacks for one session", () => {
+			view.setActiveKey(keyAt(10));
+			view.setActiveKey(keyAt(60));
+			view.setActiveKey(keyAt(110));
+			// Three requests, but only ever one frame queued.
+			expect(rafQueue.length).toBe(1);
+			for (let i = 0; i < 10 && rafQueue.length > 0; i++) {
+				const batch = rafQueue.splice(0, rafQueue.length);
+				clock += 16;
+				for (const cb of batch) cb(clock);
+				expect(rafQueue.length).toBeLessThanOrEqual(1);
+			}
+		});
 
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.lastResult).toBe("top-boundary");
-		expect(d.topBoundaryCount).toBe(1);
-		expect(view.viewportEl.scrollTop).toBe(0);
-		// The first row can never be inset by 48 px — the scroll range ends
-		// there. That is the best position available, so the verification
-		// pass must not report it as a correction or a failure.
-		expect(d.correctionCount).toBe(0);
-		expect(d.failedAfterCorrectionCount).toBe(0);
-	});
+		it("does not overshoot the target", () => {
+			const target = centeredTarget(110);
+			view.setActiveKey(keyAt(110));
+			for (let i = 0; i < 200 && rafQueue.length > 0; i++) {
+				const batch = rafQueue.splice(0, rafQueue.length);
+				clock += 16;
+				for (const cb of batch) cb(clock);
+				// Approaching from below: never past the target.
+				expect(view.viewportEl.scrollTop).toBeLessThanOrEqual(
+					target + TOLERANCE,
+				);
+			}
+		});
 
-	it("clamps to the bottom of the range for the last row", () => {
-		view.setActiveKey(keyAt(ROW_COUNT - 1));
-		flushRaf();
+		it("is frame-rate independent: 30 / 60 / 120 Hz land together", () => {
+			const landed: number[] = [];
+			for (const dt of [33, 16, 8]) {
+				view.dispose();
+				host.remove();
+				rafQueue = [];
+				clock = 1000;
+				host = document.createElement("div");
+				document.body.appendChild(host);
+				view = new GlideOutlineView(host, () => settings, {
+					onJump: () => undefined,
+				});
+				view.setItems(HEADINGS);
+				mockViewport(0);
+				mockRowLayout();
+				flushRaf(200, dt);
+				const startedAt = clock;
+				view.setActiveKey(keyAt(60));
+				flushRaf(400, dt);
+				landed.push(view.viewportEl.scrollTop);
+				// Wall-clock duration must be comparable across rates.
+				expect(clock - startedAt).toBeLessThanOrEqual(
+					800 + dt * 2,
+				);
+			}
+			for (const value of landed) {
+				expect(value).toBeCloseTo(centeredTarget(60), 1);
+			}
+		});
 
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.lastResult).toBe("bottom-boundary");
-		expect(d.bottomBoundaryCount).toBe(1);
-		expect(view.viewportEl.scrollTop).toBe(MAX_SCROLL_TOP);
-		expect(d.correctionCount).toBe(0);
-		expect(d.failedAfterCorrectionCount).toBe(0);
-	});
-
-	it("defers instead of scrolling to 0 while the row has no height", () => {
-		mockRowLayout(0); // never laid out yet
-		view.setActiveKey(keyAt(100));
-		flushRaf();
-
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.lastResult).toBe("deferred-no-layout");
-		expect(d.appliedCount).toBe(0);
-		expect(d.scrollMutationCount).toBe(0);
-		expect(view.viewportEl.scrollTop).toBe(0);
-		// The retry budget is spent, but the target is NOT forgotten.
-		expect(d.deferredCount).toBe(4); // first pass + 3 retries
-		expect(view.getPendingActiveFollow()?.key).toBe(keyAt(100));
-	});
-
-	it("applies the deferred target once geometry arrives and the gate re-opens", () => {
-		mockRowLayout(0);
-		view.setActiveKey(keyAt(100));
-		flushRaf(); // budget exhausted, target retained
-
-		mockRowLayout(); // layout finally happened
-		view.setInteractionState("expanded-pointer");
-		view.setInteractionState("collapsed"); // re-opening flushes + re-arms
-		flushRaf();
-
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100));
-		expect(view.getActiveFollowDiagnostics().appliedCount).toBe(1);
-	});
-});
-
-describe("pending active-follow retention (§三/§四)", () => {
-	let host: HTMLElement;
-	let settings: GlideOutlineSettings;
-	let view: GlideOutlineView;
-	let rafQueue: FrameRequestCallback[];
-
-	function flushRaf(): void {
-		for (let guard = 0; guard < 12 && rafQueue.length > 0; guard++) {
+		it("snaps once the hard duration ceiling is reached", () => {
+			// One enormous frame blows straight past the 700 ms ceiling.
+			view.setActiveKey(keyAt(125));
 			const batch = rafQueue.splice(0, rafQueue.length);
-			for (const cb of batch) cb(performance.now());
+			clock += 1200;
+			for (const cb of batch) cb(clock);
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.timeoutCount).toBe(1);
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(125),
+				1,
+			);
+			expect(d.sessionState).toBe("idle");
+		});
+
+		it("keeps pending until the session actually aligns", () => {
+			view.setActiveKey(keyAt(110));
+			expect(view.getPendingActiveFollow()?.key).toBe(keyAt(110));
+			flushRaf(2);
+			// Still mid-flight: the target must survive.
+			expect(view.getPendingActiveFollow()).not.toBeNull();
+			flushRaf();
+			expect(view.getPendingActiveFollow()).toBeNull();
+			expect(view.getActiveFollowDiagnostics().sessionState).toBe("idle");
+		});
+
+		it("writes scrollTop at most once per frame", () => {
+			view.setActiveKey(keyAt(110));
+			let previous = view.getActiveFollowDiagnostics().scrollMutationCount;
+			for (let i = 0; i < 20 && rafQueue.length > 0; i++) {
+				const batch = rafQueue.splice(0, rafQueue.length);
+				clock += 16;
+				for (const cb of batch) cb(clock);
+				const now =
+					view.getActiveFollowDiagnostics().scrollMutationCount;
+				expect(now - previous).toBeLessThanOrEqual(1);
+				previous = now;
+			}
+		});
+
+		it("stops writing scrollTop once the session is cancelled", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2);
+			const parked = view.viewportEl.scrollTop;
+			view.setInteractionState("pressed"); // cancels the session
+			const queued = rafQueue.splice(0, rafQueue.length);
+			clock += 16;
+			for (const cb of queued) cb(clock);
+			expect(view.viewportEl.scrollTop).toBe(parked);
+		});
+
+		it("drops the session and the queue on dispose", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2);
+			view.dispose();
+			const parked = view.viewportEl.scrollTop;
+			const queued = rafQueue.splice(0, rafQueue.length);
+			clock += 16;
+			for (const cb of queued) cb(clock);
+			expect(view.viewportEl.scrollTop).toBe(parked);
+			expect(view.getPendingActiveFollow()).toBeNull();
+		});
+	});
+
+	// ── §十一: pointer enter snaps before expansion ─────────────────
+
+	describe("pointer enter (§十一)", () => {
+		it("snaps the in-flight follow straight to the newest target", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2); // still far from the target
+			expect(view.viewportEl.scrollTop).toBeLessThan(
+				centeredTarget(110) - 100,
+			);
+			view.finishActiveFollowImmediately();
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(110),
+				1,
+			);
+			expect(view.getActiveFollowDiagnostics().snapCount).toBe(1);
+		});
+
+		it("leaves no frame queued behind the snap", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2);
+			view.finishActiveFollowImmediately();
+			const before = view.viewportEl.scrollTop;
+			const queued = rafQueue.splice(0, rafQueue.length);
+			clock += 16;
+			for (const cb of queued) cb(clock);
+			expect(view.viewportEl.scrollTop).toBe(before);
+		});
+
+		it("clears pending and reports aligned after the snap", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2);
+			view.finishActiveFollowImmediately();
+			expect(view.getPendingActiveFollow()).toBeNull();
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.sessionState).toBe("idle");
+			expect(Math.abs(d.lastAlignmentErrorPx)).toBeLessThanOrEqual(
+				TOLERANCE,
+			);
+		});
+
+		it("expanding centres the active row before the rail opens", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2);
+			view.setInteractionState("expanded-pointer");
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(110),
+				1,
+			);
+		});
+
+		it("expands without scrolling when there is no active heading", () => {
+			view.setActiveKey(null);
+			mockViewport(777);
+			view.finishActiveFollowImmediately();
+			expect(view.viewportEl.scrollTop).toBe(777);
+		});
+	});
+
+	// ── §十二: expanded / collapsed behaviour ───────────────────────
+
+	describe("interaction states (§十二)", () => {
+		it("does not auto-scroll while expanded under the pointer", () => {
+			view.setInteractionState("expanded-pointer");
+			mockViewport(500);
+			view.setActiveKey(keyAt(110));
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBe(500);
+			expect(view.getActiveFollowDiagnostics().suppressedCount).toBe(1);
+		});
+
+		it("does not auto-scroll while expanded by the keyboard", () => {
+			view.setInteractionState("expanded-keyboard");
+			mockViewport(500);
+			view.setActiveKey(keyAt(110));
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBe(500);
+		});
+
+		it("freezes completely while pressed", () => {
+			view.setInteractionState("pressed");
+			mockViewport(500);
+			view.setActiveKey(keyAt(110));
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBe(500);
+		});
+
+		it("retains the newest target across an expanded interval", () => {
+			view.setInteractionState("expanded-pointer");
+			view.setActiveKey(keyAt(40));
+			view.setActiveKey(keyAt(110));
+			expect(view.getPendingActiveFollow()?.key).toBe(keyAt(110));
+		});
+
+		it("collapsing follows the newest active key, not the stale one", () => {
+			view.setInteractionState("expanded-pointer");
+			view.setActiveKey(keyAt(40));
+			view.setActiveKey(keyAt(110));
+			mockViewport(0);
+			view.setInteractionState("collapsed");
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(110),
+				1,
+			);
+			expect(
+				view.getActiveFollowDiagnostics().flushCount,
+			).toBeGreaterThanOrEqual(1);
+		});
+
+		it("re-enabling follow consumes the retained target", () => {
+			view.setFollowEnabled(false);
+			view.setActiveKey(keyAt(110));
+			expect(view.viewportEl.scrollTop).toBe(0);
+			view.setFollowEnabled(true);
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(110),
+				1,
+			);
+		});
+	});
+
+	// ── §五: the fixed playhead ─────────────────────────────────────
+
+	describe("fixed centre playhead (§五)", () => {
+		function playhead(): HTMLElement | null {
+			return host.querySelector<HTMLElement>(".glide-outline-playhead");
 		}
-	}
 
-	beforeEach(() => {
-		rafQueue = [];
-		vi.stubGlobal(
-			"requestAnimationFrame",
-			(cb: FrameRequestCallback): number => {
-				rafQueue.push(cb);
-				return rafQueue.length;
-			},
-		);
-		vi.stubGlobal("cancelAnimationFrame", (): void => undefined);
-		host = document.createElement("div");
-		document.body.appendChild(host);
-		settings = structuredClone(DEFAULT_SETTINGS);
-		view = new GlideOutlineView(host, () => settings, {
-			onJump: () => undefined,
+		it("mounts inside the plugin's own owned subtree", () => {
+			const el = playhead();
+			expect(el).not.toBeNull();
+			expect(el?.closest("[data-glide-outline-owner]")).not.toBeNull();
 		});
-		view.setItems(HEADINGS);
 
-		defineNumber(view.viewportEl, "clientHeight", CLIENT_H);
-		defineNumber(view.viewportEl, "scrollHeight", CONTENT_H);
-		Object.defineProperty(view.viewportEl, "scrollTop", {
-			configurable: true,
-			writable: true,
-			value: 0,
+		it("carries a marker child for the dot / line rendering", () => {
+			expect(
+				playhead()?.querySelector(".glide-outline-playhead-marker"),
+			).not.toBeNull();
 		});
-		const rows = [
-			...view.listEl.querySelectorAll<HTMLElement>(".glide-outline-row"),
-		];
-		rows.forEach((row, i) => {
-			defineNumber(row, "offsetTop", i * ROW_H);
-			defineNumber(row, "offsetHeight", ROW_H);
-			Object.defineProperty(row, "offsetParent", {
-				configurable: true,
-				value: view.listEl,
-			});
+
+		it("is visible while collapsed and hidden while expanded", () => {
+			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(true);
+			view.setInteractionState("expanded-pointer");
+			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(
+				false,
+			);
+			view.setInteractionState("collapsed");
+			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(true);
 		});
-		defineNumber(view.listEl, "offsetTop", 0);
-		Object.defineProperty(view.listEl, "offsetParent", {
-			configurable: true,
-			value: view.viewportEl,
+
+		it("is hidden from assistive tech and never announced", () => {
+			expect(playhead()?.getAttribute("aria-hidden")).toBe("true");
+			expect(playhead()?.hasAttribute("aria-label")).toBe(false);
+			expect(playhead()?.hasAttribute("title")).toBe(false);
 		});
-		flushRaf();
+
+		it("lives outside the scroll viewport so it cannot drift", () => {
+			expect(view.viewportEl.contains(playhead())).toBe(false);
+		});
+
+		it("is not a heading row and never enters the item records", () => {
+			expect(
+				playhead()?.classList.contains("glide-outline-row"),
+			).toBeFalsy();
+			expect(
+				view.listEl.querySelectorAll(".glide-outline-row").length,
+			).toBe(ROW_COUNT);
+		});
 	});
 
-	afterEach(() => {
-		view.dispose();
-		host.remove();
-		vi.unstubAllGlobals();
-	});
+	// ── §六: the centre spacers ─────────────────────────────────────
 
-	it("retains a target requested while expanded and flushes it on collapse", () => {
-		view.setInteractionState("expanded-pointer");
-		view.setActiveKey(keyAt(100));
-
-		let d = view.getActiveFollowDiagnostics();
-		expect(d.suppressedCount).toBe(1);
-		expect(d.pendingRetainedCount).toBe(1);
-		expect(d.lastResult).toBe("suppressed-expanded");
-		expect(view.getPendingActiveFollow()?.key).toBe(keyAt(100));
-		expect(view.getPendingActiveFollow()?.reason).toBe("active-change");
-
-		flushRaf();
-		expect(view.viewportEl.scrollTop).toBe(0); // the user is not fought
-
-		view.setInteractionState("collapsed");
-		d = view.getActiveFollowDiagnostics();
-		expect(d.flushCount).toBe(1);
-
-		flushRaf();
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100));
-		expect(view.getPendingActiveFollow()).toBeNull();
-		expect(view.getActiveFollowDiagnostics().appliedCount).toBe(1);
-	});
-
-	it("keeps only the newest target when several arrive behind a shut gate", () => {
-		view.setInteractionState("pressed");
-		view.setActiveKey(keyAt(20));
-		view.setActiveKey(keyAt(60));
-		view.setActiveKey(keyAt(100));
-
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.supersededCount).toBe(2);
-		expect(d.pendingRetainedCount).toBe(3);
-		expect(view.getPendingActiveFollow()?.key).toBe(keyAt(100));
-
-		view.setInteractionState("collapsed");
-		flushRaf();
-		// One scroll, straight to the newest heading — no intermediate hops.
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100));
-		expect(view.getActiveFollowDiagnostics().scrollMutationCount).toBe(1);
-	});
-
-	it("retains a target while follow is paused and resumes on re-enable", () => {
-		view.setFollowEnabled(false);
-		view.setActiveKey(keyAt(100));
-
-		expect(view.getActiveFollowDiagnostics().suppressedCount).toBe(1);
-		expect(view.getPendingActiveFollow()?.key).toBe(keyAt(100));
-		flushRaf();
-		expect(view.viewportEl.scrollTop).toBe(0);
-
-		view.setFollowEnabled(true);
-		expect(view.getActiveFollowDiagnostics().flushCount).toBe(1);
-		flushRaf();
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100));
-	});
-
-	it("does not flush while the other gate is still shut", () => {
-		view.setFollowEnabled(false);
-		view.setInteractionState("expanded-pointer");
-		view.setActiveKey(keyAt(100));
-
-		view.setInteractionState("collapsed"); // one gate reopened only
-		expect(view.getActiveFollowDiagnostics().flushCount).toBe(0);
-		flushRaf();
-		expect(view.viewportEl.scrollTop).toBe(0);
-		expect(view.getPendingActiveFollow()?.key).toBe(keyAt(100));
-
-		view.setFollowEnabled(true); // now both are open
-		flushRaf();
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100));
-	});
-
-	it("retains the target when the gate closes between request and frame", () => {
-		view.setActiveKey(keyAt(100)); // requested while collapsed
-		view.setInteractionState("expanded-pointer"); // user grabbed the rail
-		flushRaf(); // the queued frame runs into a shut gate
-
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.suppressedCount).toBe(1);
-		expect(d.pendingRetainedCount).toBe(1);
-		expect(view.viewportEl.scrollTop).toBe(0);
-		expect(view.getPendingActiveFollow()?.key).toBe(keyAt(100));
-
-		view.setInteractionState("collapsed");
-		flushRaf();
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100));
-	});
-
-	it("drops the pending target when the active heading disappears", () => {
-		view.setInteractionState("expanded-pointer");
-		view.setActiveKey(keyAt(100));
-		view.setActiveKey(null);
-		expect(view.getPendingActiveFollow()?.key).toBe(keyAt(100));
-
-		view.setInteractionState("collapsed");
-		flushRaf();
-		expect(view.getPendingActiveFollow()).toBeNull();
-		expect(view.getActiveFollowDiagnostics().staleRetargetCount).toBe(0);
-		expect(view.viewportEl.scrollTop).toBe(0);
-	});
-
-	it("coalesces several reasons in one frame into a single pass", () => {
-		view.setActiveKey(keyAt(100));
-		view.requestActiveFollow("resize");
-		view.requestActiveFollow("metrics-change");
-
-		const before = view.getActiveFollowDiagnostics();
-		expect(before.coalescedCount).toBe(2);
-
-		flushRaf();
-		// The extra reasons cause one re-run against fresh geometry; the
-		// second pass finds the row already in the band, so exactly one
-		// scroll write is issued.
-		expect(view.getActiveFollowDiagnostics().scrollMutationCount).toBe(1);
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100));
-	});
-
-	it("forgets everything on dispose", () => {
-		view.setInteractionState("expanded-pointer");
-		view.setActiveKey(keyAt(100));
-		expect(view.getPendingActiveFollow()).not.toBeNull();
-
-		view.dispose();
-		expect(view.getPendingActiveFollow()).toBeNull();
-		view.setInteractionState("collapsed");
-		flushRaf();
-		expect(view.viewportEl.scrollTop).toBe(0);
-	});
-
-	it("exposes the whole diagnostics schema", () => {
-		view.setActiveKey(keyAt(100));
-		flushRaf();
-		const d = view.getActiveFollowDiagnostics();
-		expect(Object.keys(d).sort()).toEqual(
-			[
-				"activeKey",
-				"alreadyVisibleCount",
-				"appliedCount",
-				"bottomBoundaryCount",
-				"centeredCount",
-				"coalescedCount",
-				"correctionCount",
-				"deferredCount",
-				"failedAfterCorrectionCount",
-				"followEnabled",
-				"flushCount",
-				"interactionState",
-				"lastAppliedGeneration",
-				"lastClientHeight",
-				"lastKey",
-				"lastLatencyMs",
-				"lastMarginPx",
-				"lastMeasureSource",
-				"lastReason",
-				"lastResult",
-				"lastRowHeight",
-				"lastRowTop",
-				"lastScrollTopAfter",
-				"lastScrollTopBefore",
-				"lastTargetScrollTop",
-				"maxOffsetChainDepth",
-				"noMutationCount",
-				"offsetChainCount",
-				"pendingAgeMs",
-				"pendingGeneration",
-				"pendingKey",
-				"pendingReason",
-				"pendingRetainedCount",
-				"rectFallbackCount",
-				"requestCount",
-				"scrollMutationCount",
-				"staleRetargetCount",
-				"supersededCount",
-				"suppressedCount",
-				"topBoundaryCount",
-			].sort(),
-		);
-		expect(d.activeKey).toBe(keyAt(100));
-		expect(d.interactionState).toBe("collapsed");
-		expect(d.followEnabled).toBe(true);
-		expect(d.lastAppliedGeneration).toBe(d.pendingGeneration);
-		expect(Number.isNaN(d.pendingAgeMs)).toBe(true);
-	});
-});
-
-describe("safe-band verification pass (§六)", () => {
-	let host: HTMLElement;
-	let settings: GlideOutlineSettings;
-	let view: GlideOutlineView;
-	let rafQueue: FrameRequestCallback[];
-
-	function flushRaf(): void {
-		for (let guard = 0; guard < 12 && rafQueue.length > 0; guard++) {
-			const batch = rafQueue.splice(0, rafQueue.length);
-			for (const cb of batch) cb(performance.now());
+	describe("centre spacers (§六)", () => {
+		function spacers(): HTMLElement[] {
+			return [
+				...host.querySelectorAll<HTMLElement>(
+					".glide-outline-center-spacer",
+				),
+			];
 		}
-	}
 
-	function rowEls(): HTMLElement[] {
-		return [...view.listEl.querySelectorAll<HTMLElement>(".glide-outline-row")];
-	}
+		it("adds exactly one spacer at each end of the scroll content", () => {
+			expect(spacers()).toHaveLength(2);
+			for (const el of spacers()) {
+				expect(view.viewportEl.contains(el)).toBe(true);
+			}
+		});
 
-	beforeEach(() => {
-		rafQueue = [];
-		vi.stubGlobal(
-			"requestAnimationFrame",
-			(cb: FrameRequestCallback): number => {
-				rafQueue.push(cb);
-				return rafQueue.length;
-			},
-		);
-		vi.stubGlobal("cancelAnimationFrame", (): void => undefined);
-		host = document.createElement("div");
-		document.body.appendChild(host);
-		settings = structuredClone(DEFAULT_SETTINGS);
-		view = new GlideOutlineView(host, () => settings, {
-			onJump: () => undefined,
+		it("is hidden from assistive tech and carries no label", () => {
+			for (const el of spacers()) {
+				expect(el.getAttribute("aria-hidden")).toBe("true");
+				expect(el.hasAttribute("aria-label")).toBe(false);
+				expect(el.hasAttribute("title")).toBe(false);
+			}
 		});
-		view.setItems(HEADINGS);
-		defineNumber(view.viewportEl, "clientHeight", CLIENT_H);
-		defineNumber(view.viewportEl, "scrollHeight", CONTENT_H);
-		Object.defineProperty(view.viewportEl, "scrollTop", {
-			configurable: true,
-			writable: true,
-			value: 0,
+
+		it("never adds a clickable row or a marker", () => {
+			for (const el of spacers()) {
+				expect(el.querySelector("button")).toBeNull();
+				expect(el.querySelector(".glide-outline-marker")).toBeNull();
+			}
 		});
-		rowEls().forEach((row, i) => {
-			defineNumber(row, "offsetTop", i * ROW_H);
-			defineNumber(row, "offsetHeight", ROW_H);
-			Object.defineProperty(row, "offsetParent", {
+
+		it("writes the computed heights onto the elements", () => {
+			const [top, bottom] = spacers();
+			expect(top.style.height).toBe(`${SPACER}px`);
+			expect(bottom.style.height).toBe(`${SPACER}px`);
+		});
+
+		it("reports the geometry it sized itself from", () => {
+			// §六: the spacer maths must be auditable from the report alone —
+			// half the viewport minus half the row, for each end.
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.playheadClientY).toBe(CLIENT_H / 2);
+			expect(d.firstRowHeight).toBe(ROW_H);
+			expect(d.lastRowHeight).toBe(ROW_H);
+			expect(d.topCenterSpacerPx).toBe(CLIENT_H / 2 - ROW_H / 2);
+			expect(d.bottomCenterSpacerPx).toBe(CLIENT_H / 2 - ROW_H / 2);
+			expect(d.centerSpacerRefreshCount).toBeGreaterThan(0);
+		});
+
+		it("re-measures when the viewport is resized", () => {
+			const before =
+				view.getActiveFollowDiagnostics().centerSpacerRefreshCount;
+			defineNumber(view.viewportEl, "clientHeight", 600);
+			view.applySettings();
+			const after = view.getActiveFollowDiagnostics();
+			expect(after.centerSpacerRefreshCount).toBeGreaterThan(before);
+			expect(after.playheadClientY).toBe(300);
+			expect(after.topCenterSpacerPx).toBe(300 - ROW_H / 2);
+		});
+	});
+
+	// ── §十四: ancestor safety ──────────────────────────────────────
+
+	describe("ancestor safety (§十四)", () => {
+		it("scrolls the outline viewport and nothing else", () => {
+			const ancestor = host.parentElement as HTMLElement;
+			Object.defineProperty(ancestor, "scrollTop", {
 				configurable: true,
-				value: view.listEl,
+				writable: true,
+				value: 0,
 			});
-		});
-		defineNumber(view.listEl, "offsetTop", 0);
-		Object.defineProperty(view.listEl, "offsetParent", {
-			configurable: true,
-			value: view.viewportEl,
-		});
-		flushRaf();
-	});
-
-	afterEach(() => {
-		view.dispose();
-		host.remove();
-		vi.unstubAllGlobals();
-	});
-
-	it("issues exactly one corrective write when the layout moved", () => {
-		view.setActiveKey(keyAt(100));
-		// Run only the follow frame; the correction is queued behind it.
-		const first = rafQueue.splice(0, rafQueue.length);
-		for (const cb of first) cb(performance.now());
-		expect(view.viewportEl.scrollTop).toBe(centeredTarget(100)); // 2212
-
-		// A late row-height change slides the active row down 200 px.
-		rowEls().forEach((row, i) => {
-			defineNumber(row, "offsetTop", i * ROW_H + (i >= 100 ? 200 : 0));
-		});
-		flushRaf(); // verification frame
-
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.correctionCount).toBe(1);
-		expect(d.lastResult).toBe("corrected");
-		expect(d.failedAfterCorrectionCount).toBe(0);
-		expect(view.viewportEl.scrollTop).toBe(2600 + ROW_H / 2 - CLIENT_H / 2);
-	});
-
-	it("records a failure instead of looping when the row cannot land", () => {
-		// A viewport that refuses to scroll past 500 px — a pathological
-		// layout must never turn the verification pass into a scroll loop.
-		let stored = 0;
-		Object.defineProperty(view.viewportEl, "scrollTop", {
-			configurable: true,
-			get: () => stored,
-			set: (value: number) => {
-				stored = Math.min(500, value);
-			},
+			followTo(110);
+			expect(ancestor.scrollTop).toBe(0);
 		});
 
-		view.setActiveKey(keyAt(100));
-		flushRaf();
-
-		const d = view.getActiveFollowDiagnostics();
-		expect(d.correctionCount).toBe(1);
-		expect(d.failedAfterCorrectionCount).toBe(1);
-		expect(d.lastResult).toBe("failed-after-correction");
-		expect(view.viewportEl.scrollTop).toBe(500);
-		// Nothing rescheduled itself: the queue drained to empty.
-		expect(rafQueue).toHaveLength(0);
-	});
-});
-
-describe("safe-band geometry helpers (§五/§六)", () => {
-	it("insets the band by 15 % of the viewport, clamped to 16 … 48 px", () => {
-		expect(activeFollowMarginPx(0)).toBe(16);
-		expect(activeFollowMarginPx(80)).toBe(16); // 12 → clamped up
-		expect(activeFollowMarginPx(200)).toBe(30);
-		expect(activeFollowMarginPx(400)).toBe(48); // 60 → clamped down
-		expect(activeFollowMarginPx(2000)).toBe(48);
-	});
-
-	it("stops the offsetParent walk at the viewport and reports the depth", () => {
-		const viewport = document.createElement("div");
-		const nav = document.createElement("div");
-		const row = document.createElement("div");
-		defineNumber(row, "offsetTop", 240);
-		defineNumber(row, "offsetLeft", 4);
-		Object.defineProperty(row, "offsetParent", {
-			configurable: true,
-			value: nav,
+		it("never calls scrollIntoView", () => {
+			const spy = vi.fn();
+			for (const row of view.listEl.querySelectorAll<HTMLElement>(
+				".glide-outline-row",
+			)) {
+				row.scrollIntoView = spy;
+			}
+			followTo(110);
+			expect(spy).not.toHaveBeenCalled();
 		});
-		defineNumber(nav, "offsetTop", 12);
-		defineNumber(nav, "offsetLeft", 6);
-		Object.defineProperty(nav, "offsetParent", {
-			configurable: true,
-			value: viewport,
-		});
-
-		expect(getOffsetWithinScrollContent(row, viewport)).toEqual({
-			top: 252,
-			left: 10,
-			depth: 2,
-			resolved: true,
-		});
-	});
-
-	it("reports resolved:false when the chain leaves the viewport behind", () => {
-		const viewport = document.createElement("div");
-		const row = document.createElement("div");
-		defineNumber(row, "offsetTop", 240);
-		Object.defineProperty(row, "offsetParent", {
-			configurable: true,
-			value: null,
-		});
-		const result = getOffsetWithinScrollContent(row, viewport);
-		expect(result.resolved).toBe(false);
-		expect(result.top).toBe(240);
-	});
-
-	it("bails out of a cyclic offsetParent chain", () => {
-		const viewport = document.createElement("div");
-		const a = document.createElement("div");
-		const b = document.createElement("div");
-		defineNumber(a, "offsetTop", 1);
-		defineNumber(b, "offsetTop", 1);
-		Object.defineProperty(a, "offsetParent", { configurable: true, value: b });
-		Object.defineProperty(b, "offsetParent", { configurable: true, value: a });
-
-		const result = getOffsetWithinScrollContent(a, viewport);
-		expect(result.resolved).toBe(false);
-		expect(result.depth).toBe(32); // OFFSET_CHAIN_MAX_DEPTH guard
 	});
 });
