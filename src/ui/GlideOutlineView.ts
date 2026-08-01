@@ -106,6 +106,63 @@ export interface PendingActiveFollow {
 	requestedAt: number;
 }
 
+/** §六: safe-band inset bounds (px) and the viewport-height ratio. */
+const ACTIVE_FOLLOW_MIN_MARGIN_PX = 16;
+const ACTIVE_FOLLOW_MAX_MARGIN_PX = 48;
+const ACTIVE_FOLLOW_MARGIN_RATIO = 0.15;
+
+/** §五: a sane ceiling on the offsetParent walk (cycle / detach guard). */
+const OFFSET_CHAIN_MAX_DEPTH = 32;
+
+/** §六: the safe-band inset for a given scroll-box height. */
+export function activeFollowMarginPx(clientHeight: number): number {
+	if (!(clientHeight > 0)) return ACTIVE_FOLLOW_MIN_MARGIN_PX;
+	return Math.max(
+		ACTIVE_FOLLOW_MIN_MARGIN_PX,
+		Math.min(
+			ACTIVE_FOLLOW_MAX_MARGIN_PX,
+			clientHeight * ACTIVE_FOLLOW_MARGIN_RATIO,
+		),
+	);
+}
+
+/**
+ * §五: layout offset of `element` inside the scrolling content of
+ * `scrollViewport`.
+ *
+ * `element.offsetTop` alone is only correct when `offsetParent ===
+ * scrollViewport`. The outline puts a `<nav>` list (and, with a card
+ * shadow, a padded box) between the row and the viewport, and any of
+ * those can become the offsetParent, so the raw value silently measures
+ * from the wrong origin — which is exactly how a collapsed outline ends
+ * up scrolling to the wrong place. Accumulating along the offsetParent
+ * chain is the only reading that is right in every nesting.
+ *
+ * `resolved: false` means the chain terminated before the viewport
+ * (a `position: fixed` ancestor, `display: none`, a detached subtree, or
+ * a static viewport that is not itself an offsetParent). The caller then
+ * falls back to rectangles for the single active row.
+ */
+export function getOffsetWithinScrollContent(
+	element: HTMLElement,
+	scrollViewport: HTMLElement,
+): { top: number; left: number; depth: number; resolved: boolean } {
+	let top = 0;
+	let left = 0;
+	let depth = 0;
+	let node: HTMLElement | null = element;
+	while (node !== null && node !== scrollViewport) {
+		if (depth >= OFFSET_CHAIN_MAX_DEPTH) {
+			return { top, left, depth, resolved: false };
+		}
+		top += node.offsetTop || 0;
+		left += node.offsetLeft || 0;
+		depth++;
+		node = (node.offsetParent as HTMLElement | null) ?? null;
+	}
+	return { top, left, depth, resolved: node === scrollViewport };
+}
+
 /** §八: full active-follow diagnostics payload. */
 export interface ActiveFollowDiagnostics {
 	interactionState: OutlineInteractionState;
@@ -124,6 +181,21 @@ export interface ActiveFollowDiagnostics {
 	flushCount: number;
 	/** §三: pending target no longer matched the live active key. */
 	staleRetargetCount: number;
+	/** §六: second-pass corrections issued. */
+	correctionCount: number;
+	/** §六: still outside the safe band after the one allowed correction. */
+	failedAfterCorrectionCount: number;
+	alreadyVisibleCount: number;
+	centeredCount: number;
+	topBoundaryCount: number;
+	bottomBoundaryCount: number;
+	/** §五: offset-chain vs. rect-fallback measurement mix. */
+	offsetChainCount: number;
+	rectFallbackCount: number;
+	maxOffsetChainDepth: number;
+	/** §六: scrollTop writes actually issued vs. skipped as no-ops. */
+	scrollMutationCount: number;
+	noMutationCount: number;
 	pendingGeneration: number;
 	lastAppliedGeneration: number;
 	pendingKey: string | null;
@@ -132,6 +204,14 @@ export interface ActiveFollowDiagnostics {
 	lastReason: ActiveFollowReason | "";
 	lastResult: ActiveFollowResult | "";
 	lastKey: string | null;
+	lastMeasureSource: "offset-chain" | "rect" | "";
+	lastRowTop: number;
+	lastRowHeight: number;
+	lastClientHeight: number;
+	lastMarginPx: number;
+	lastTargetScrollTop: number;
+	lastScrollTopBefore: number;
+	lastScrollTopAfter: number;
 	lastLatencyMs: number;
 }
 
@@ -264,6 +344,8 @@ export class GlideOutlineView {
 	private activeFollowGeneration = 0;
 	/** §三: generation of the last request that actually positioned. */
 	private lastAppliedActiveFollowGeneration = 0;
+	/** §六: rAF handle for the single allowed correction pass; 0 = none. */
+	private activeFollowCorrectionFrame = 0;
 	/** §四/§八: coalescing + outcome counters for tests and diagnostics. */
 	private readonly activeFollowDiag = {
 		requestCount: 0,
@@ -275,9 +357,28 @@ export class GlideOutlineView {
 		supersededCount: 0,
 		flushCount: 0,
 		staleRetargetCount: 0,
+		correctionCount: 0,
+		failedAfterCorrectionCount: 0,
+		alreadyVisibleCount: 0,
+		centeredCount: 0,
+		topBoundaryCount: 0,
+		bottomBoundaryCount: 0,
+		offsetChainCount: 0,
+		rectFallbackCount: 0,
+		maxOffsetChainDepth: 0,
+		scrollMutationCount: 0,
+		noMutationCount: 0,
 		lastReason: "" as ActiveFollowReason | "",
 		lastResult: "" as ActiveFollowResult | "",
 		lastKey: null as string | null,
+		lastMeasureSource: "" as "offset-chain" | "rect" | "",
+		lastRowTop: Number.NaN,
+		lastRowHeight: Number.NaN,
+		lastClientHeight: Number.NaN,
+		lastMarginPx: Number.NaN,
+		lastTargetScrollTop: Number.NaN,
+		lastScrollTopBefore: Number.NaN,
+		lastScrollTopAfter: Number.NaN,
 		lastLatencyMs: Number.NaN,
 	};
 
@@ -386,6 +487,9 @@ export class GlideOutlineView {
 		if (this.activeKey && !nextKeys.has(this.activeKey)) {
 			this.activeKey = null;
 		}
+
+		// §十三: the row list is now in the document — the first commit is
+		// the earliest instant anything of the outline is on screen.
 
 		// Empty state: hide the rail entirely when nothing is visible.
 		this.rootEl.classList.toggle("is-empty", visible.length === 0);
@@ -586,6 +690,13 @@ export class GlideOutlineView {
 		if (this.activeFollowFrame !== 0) {
 			this.doc.defaultView?.cancelAnimationFrame(this.activeFollowFrame);
 			this.activeFollowFrame = 0;
+		}
+		// §六: and the correction pass queued behind it.
+		if (this.activeFollowCorrectionFrame !== 0) {
+			this.doc.defaultView?.cancelAnimationFrame(
+				this.activeFollowCorrectionFrame,
+			);
+			this.activeFollowCorrectionFrame = 0;
 		}
 		this.activeFollowPending = false;
 		this.pendingActiveFollow = null;
@@ -1012,6 +1123,17 @@ export class GlideOutlineView {
 			supersededCount: d.supersededCount,
 			flushCount: d.flushCount,
 			staleRetargetCount: d.staleRetargetCount,
+			correctionCount: d.correctionCount,
+			failedAfterCorrectionCount: d.failedAfterCorrectionCount,
+			alreadyVisibleCount: d.alreadyVisibleCount,
+			centeredCount: d.centeredCount,
+			topBoundaryCount: d.topBoundaryCount,
+			bottomBoundaryCount: d.bottomBoundaryCount,
+			offsetChainCount: d.offsetChainCount,
+			rectFallbackCount: d.rectFallbackCount,
+			maxOffsetChainDepth: d.maxOffsetChainDepth,
+			scrollMutationCount: d.scrollMutationCount,
+			noMutationCount: d.noMutationCount,
 			pendingGeneration: this.activeFollowGeneration,
 			lastAppliedGeneration: this.lastAppliedActiveFollowGeneration,
 			pendingKey: pending?.key ?? null,
@@ -1023,6 +1145,14 @@ export class GlideOutlineView {
 			lastReason: d.lastReason,
 			lastResult: d.lastResult,
 			lastKey: d.lastKey,
+			lastMeasureSource: d.lastMeasureSource,
+			lastRowTop: d.lastRowTop,
+			lastRowHeight: d.lastRowHeight,
+			lastClientHeight: d.lastClientHeight,
+			lastMarginPx: d.lastMarginPx,
+			lastTargetScrollTop: d.lastTargetScrollTop,
+			lastScrollTopBefore: d.lastScrollTopBefore,
+			lastScrollTopAfter: d.lastScrollTopAfter,
 			lastLatencyMs: d.lastLatencyMs,
 		};
 	}
@@ -1096,14 +1226,96 @@ export class GlideOutlineView {
 	}
 
 	/**
-	 * §四: pure numeric re-position of the active row inside the outline
-	 * viewport. Deliberately NOT `Element.scrollIntoView` — that walks
-	 * ancestor scroll containers and (with `behavior:"smooth"`) animates,
-	 * both of which fight the outline's own motion. We compute the exact
-	 * `scrollTop` and clamp it to the scrollable range.
+	 * §五: where the active row sits inside the outline's scrolling
+	 * content, plus the scroll-box geometry needed to place it.
 	 *
-	 * Returns false when the active row has no measured height yet (never
-	 * laid out / display:none), so the caller can retry after a measure.
+	 * Returns null when the row (or the box) has no layout yet, so the
+	 * caller retries after a measure pass rather than scrolling to 0.
+	 */
+	private measureActiveRow(rowEl: HTMLElement): {
+		rowTop: number;
+		rowHeight: number;
+		clientHeight: number;
+		scrollHeight: number;
+		source: "offset-chain" | "rect";
+	} | null {
+		const viewport = this.viewportEl;
+		const clientHeight = viewport.clientHeight;
+		const rowHeight = rowEl.offsetHeight;
+		if (!(clientHeight > 0) || !(rowHeight > 0)) return null;
+		const scrollHeight = viewport.scrollHeight;
+		const diag = this.activeFollowDiag;
+		const chain = getOffsetWithinScrollContent(rowEl, viewport);
+		if (chain.depth > diag.maxOffsetChainDepth) {
+			diag.maxOffsetChainDepth = chain.depth;
+		}
+		if (chain.resolved) {
+			diag.offsetChainCount++;
+			return {
+				rowTop: chain.top,
+				rowHeight,
+				clientHeight,
+				scrollHeight,
+				source: "offset-chain",
+			};
+		}
+		// §五: rect fallback. Two extra getBoundingClientRect calls, and
+		// only ever for the ONE active row — never a sweep over the list.
+		const rowRect = rowEl.getBoundingClientRect();
+		const viewportRect = viewport.getBoundingClientRect();
+		const rowTop =
+			rowRect.top - viewportRect.top - viewport.clientTop + viewport.scrollTop;
+		if (!Number.isFinite(rowTop)) return null;
+		diag.rectFallbackCount++;
+		return {
+			rowTop,
+			rowHeight,
+			clientHeight,
+			scrollHeight,
+			source: "rect",
+		};
+	}
+
+	/**
+	 * §六: is the row inside the safe band — the viewport inset by
+	 * `activeFollowMarginPx` at both ends? A row taller than the band can
+	 * never fit inside it, so for those "spans the whole band" counts.
+	 */
+	private isRowInSafeBand(
+		rowTop: number,
+		rowHeight: number,
+		scrollTop: number,
+		clientHeight: number,
+		margin: number,
+	): boolean {
+		const safeTop = scrollTop + margin;
+		const safeBottom = scrollTop + clientHeight - margin;
+		const rowBottom = rowTop + rowHeight;
+		if (rowHeight >= safeBottom - safeTop) {
+			return rowTop <= safeTop && rowBottom >= safeBottom;
+		}
+		return rowTop >= safeTop && rowBottom <= safeBottom;
+	}
+
+	private countActiveFollowResult(result: ActiveFollowResult): void {
+		const d = this.activeFollowDiag;
+		if (result === "centered") d.centeredCount++;
+		else if (result === "top-boundary") d.topBoundaryCount++;
+		else if (result === "bottom-boundary") d.bottomBoundaryCount++;
+	}
+
+	/**
+	 * §六: put the active row inside the safe visible band of the outline
+	 * viewport — and then check that it actually got there.
+	 *
+	 * Deliberately NOT `Element.scrollIntoView`: that walks ancestor
+	 * scroll containers (it would scroll the *editor*) and, with
+	 * `behavior:"smooth"`, animates against the outline's own motion. We
+	 * compute the exact `scrollTop`, clamp it to the scrollable range, and
+	 * verify on the next frame.
+	 *
+	 * Returns false only when the row has no layout yet (never laid out /
+	 * display:none), so the caller can retry after a measure.
 	 */
 	scrollActiveRowIntoPosition(options: {
 		alignment: "center" | "nearest";
@@ -1113,38 +1325,175 @@ export class GlideOutlineView {
 		if (this.disposed || this.activeKey === null) return false;
 		const record = this.itemRecords.get(this.activeKey);
 		if (!record) return false;
-		const rowEl = record.rowEl;
-		const viewport = this.viewportEl;
-		const clientHeight = viewport.clientHeight;
-		const rowHeight = rowEl.offsetHeight;
-		// Not laid out yet — signal a retry rather than scrolling to 0.
-		if (!(clientHeight > 0) || !(rowHeight > 0)) return false;
-		const scrollHeight = viewport.scrollHeight;
-		const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
-		const rowTop = rowEl.offsetTop;
-		let target: number;
-		if (options.alignment === "center") {
-			target = rowTop + rowHeight / 2 - clientHeight / 2;
-		} else {
-			const current = viewport.scrollTop;
-			const rowBottom = rowTop + rowHeight;
-			if (rowTop < current) {
-				target = rowTop;
-			} else if (rowBottom > current + clientHeight) {
-				target = rowBottom - clientHeight;
-			} else {
-				return true; // already fully visible
-			}
+		const diag = this.activeFollowDiag;
+		diag.lastKey = this.activeKey;
+		const measured = this.measureActiveRow(record.rowEl);
+		if (measured === null) {
+			diag.lastResult = "deferred-no-layout";
+			return false;
 		}
-		target = Math.max(0, Math.min(maxScrollTop, target));
-		if (target === viewport.scrollTop) return true; // already there
+		const { rowTop, rowHeight, clientHeight, scrollHeight } = measured;
+		diag.lastMeasureSource = measured.source;
+		diag.lastRowTop = rowTop;
+		diag.lastRowHeight = rowHeight;
+		diag.lastClientHeight = clientHeight;
+
+		const viewport = this.viewportEl;
+		const scrollTop = viewport.scrollTop;
+		diag.lastScrollTopBefore = scrollTop;
+		const margin = activeFollowMarginPx(clientHeight);
+		diag.lastMarginPx = margin;
+
+		if (
+			this.isRowInSafeBand(rowTop, rowHeight, scrollTop, clientHeight, margin)
+		) {
+			diag.alreadyVisibleCount++;
+			diag.noMutationCount++;
+			diag.lastResult = "already-visible";
+			diag.lastTargetScrollTop = scrollTop;
+			diag.lastScrollTopAfter = scrollTop;
+			this.perf?.count("activeFollowNoMutationCount");
+			return true;
+		}
+
+		const maxScrollTop = Math.max(0, scrollHeight - clientHeight);
+		let desired: number;
+		if (options.alignment === "center") {
+			desired = rowTop + rowHeight / 2 - clientHeight / 2;
+		} else {
+			// Minimal move that brings the row inside the safe band.
+			desired =
+				rowTop < scrollTop + margin
+					? rowTop - margin
+					: rowTop + rowHeight + margin - clientHeight;
+		}
+		const target = Math.max(0, Math.min(maxScrollTop, desired));
+		// A boundary result means the clamp bit — the row genuinely cannot
+		// be centred because the list ends there.
+		let result: ActiveFollowResult;
+		if (desired < 0) result = "top-boundary";
+		else if (desired > maxScrollTop) result = "bottom-boundary";
+		else result = "centered";
+		diag.lastTargetScrollTop = target;
+
+		if (target === scrollTop) {
+			// Already as close as the scroll range allows.
+			diag.noMutationCount++;
+			this.perf?.count("activeFollowNoMutationCount");
+			diag.lastScrollTopAfter = scrollTop;
+			diag.lastResult = result;
+			this.countActiveFollowResult(result);
+			return true;
+		}
+
 		// §十: attribute the scroll BEFORE the write — the event may be
 		// delivered synchronously. active-follow reveals are their own
 		// source so the histogram never blames them on a user gesture.
 		this.programmaticScrollNote =
 			options.source === "active-follow" ? "active-follow" : "jump";
 		viewport.scrollTop = target;
+		diag.lastScrollTopAfter = viewport.scrollTop;
+		diag.scrollMutationCount++;
+		this.perf?.count("activeFollowScrollMutationCount");
+		diag.lastResult = result;
+		this.countActiveFollowResult(result);
+		// §六: writing scrollTop is a request, not a guarantee — the row
+		// can still land outside the safe band if the layout moved in the
+		// same frame. Verify next frame; one correction is allowed.
+		if (options.source === "active-follow") {
+			this.scheduleActiveFollowCorrection();
+		}
 		return true;
+	}
+
+	private scheduleActiveFollowCorrection(): void {
+		if (this.disposed || this.activeFollowCorrectionFrame !== 0) return;
+		const win = this.doc.defaultView;
+		const run = (): void => {
+			this.activeFollowCorrectionFrame = 0;
+			this.runActiveFollowCorrection();
+		};
+		if (win && typeof win.requestAnimationFrame === "function") {
+			this.activeFollowCorrectionFrame = win.requestAnimationFrame(run);
+		} else {
+			run();
+		}
+	}
+
+	/**
+	 * §六: verification pass. At most ONE corrective write — if the row is
+	 * still off-band afterwards the outcome is recorded as a failure
+	 * rather than retried forever, so a pathological layout cannot turn
+	 * into a scroll loop.
+	 */
+	private runActiveFollowCorrection(): void {
+		if (this.disposed || this.activeKey === null) return;
+		if (!this.canRunActiveFollow()) return;
+		const record = this.itemRecords.get(this.activeKey);
+		if (!record) return;
+		const measured = this.measureActiveRow(record.rowEl);
+		if (measured === null) return;
+		const viewport = this.viewportEl;
+		const scrollTop = viewport.scrollTop;
+		const margin = activeFollowMarginPx(measured.clientHeight);
+		const diag = this.activeFollowDiag;
+		if (
+			this.isRowInSafeBand(
+				measured.rowTop,
+				measured.rowHeight,
+				scrollTop,
+				measured.clientHeight,
+				margin,
+			)
+		) {
+			return; // the first pass landed it — nothing to correct
+		}
+		const maxScrollTop = Math.max(
+			0,
+			measured.scrollHeight - measured.clientHeight,
+		);
+		const desired =
+			measured.rowTop + measured.rowHeight / 2 - measured.clientHeight / 2;
+		const target = Math.max(0, Math.min(maxScrollTop, desired));
+		if (target === scrollTop) {
+			// §六: the scroller is ALREADY exactly where the math puts it,
+			// so there is nothing a correction could change. The row is
+			// outside the band only because the band cannot reach it — the
+			// first and last headings of any list sit inside the inset once
+			// the scroll range is clamped. That is the best position that
+			// exists, not a failure, and calling it one would light up the
+			// diagnostics on the most ordinary case there is. Leave
+			// `lastResult` as the boundary outcome the first pass recorded.
+			diag.noMutationCount++;
+			this.perf?.count("activeFollowNoMutationCount");
+			diag.lastTargetScrollTop = target;
+			diag.lastScrollTopAfter = scrollTop;
+			return;
+		}
+		diag.correctionCount++;
+		this.perf?.count("activeFollowCorrectionCount");
+		this.programmaticScrollNote = "active-follow";
+		viewport.scrollTop = target;
+		diag.scrollMutationCount++;
+		this.perf?.count("activeFollowScrollMutationCount");
+		const after = viewport.scrollTop;
+		diag.lastTargetScrollTop = target;
+		diag.lastScrollTopAfter = after;
+		if (
+			this.isRowInSafeBand(
+				measured.rowTop,
+				measured.rowHeight,
+				after,
+				measured.clientHeight,
+				margin,
+			)
+		) {
+			diag.lastResult = "corrected";
+		} else {
+			diag.failedAfterCorrectionCount++;
+			this.perf?.count("activeFollowFailedVisibilityCount");
+			diag.lastResult = "failed-after-correction";
+		}
 	}
 
 	private createItemRecord(item: HeadingItem): ItemRecord {

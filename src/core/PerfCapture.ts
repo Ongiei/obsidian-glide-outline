@@ -97,6 +97,16 @@ export interface PerfCounters {
 	/** §五.2: fade-class toggles actually written vs. skipped as no-ops. */
 	overflowClassMutationCount: number;
 	overflowClassSkippedCount: number;
+	/**
+	 * §八: collapsed active-heading follow. `failedVisibility` is the one
+	 * that matters — it counts rows that were STILL outside the safe band
+	 * after the single allowed correction, i.e. the bug this section
+	 * exists to catch.
+	 */
+	activeFollowScrollMutationCount: number;
+	activeFollowNoMutationCount: number;
+	activeFollowCorrectionCount: number;
+	activeFollowFailedVisibilityCount: number;
 	/** §十一: wheel routing outcome histogram. */
 	wheelEventCount: number;
 	wheelOutlineCount: number;
@@ -237,6 +247,10 @@ function zeroCounters(): PerfCounters {
 		overflowMetricReadCount: 0,
 		overflowClassMutationCount: 0,
 		overflowClassSkippedCount: 0,
+		activeFollowScrollMutationCount: 0,
+		activeFollowNoMutationCount: 0,
+		activeFollowCorrectionCount: 0,
+		activeFollowFailedVisibilityCount: 0,
 		wheelEventCount: 0,
 		wheelOutlineCount: 0,
 		wheelEditorHandoffCount: 0,
@@ -722,6 +736,16 @@ export interface PerfReport {
 		classSkippedCount: number;
 		/** Share of evaluations that wrote no class at all. */
 		classSkippedShare: number;
+	};
+	/**
+	 * §八: collapsed active-heading follow. `failedVisibilityCount` must
+	 * be 0 — anything else means a row stayed off-band after correction.
+	 */
+	activeFollow: {
+		scrollMutationCount: number;
+		noMutationCount: number;
+		correctionCount: number;
+		failedVisibilityCount: number;
 	};
 	/** §八: how pointer anchors were resolved (fallbackScanCount must be 0). */
 	anchorResolve: {
@@ -1898,6 +1922,12 @@ export class PerfCapture {
 									c.overflowClassMutationCount)
 						: 0,
 				),
+			},
+			activeFollow: {
+				scrollMutationCount: c.activeFollowScrollMutationCount,
+				noMutationCount: c.activeFollowNoMutationCount,
+				correctionCount: c.activeFollowCorrectionCount,
+				failedVisibilityCount: c.activeFollowFailedVisibilityCount,
 			},
 			anchorResolve: {
 				localHitCount: c.anchorLocalHitCount,
