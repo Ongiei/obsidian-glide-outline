@@ -89,16 +89,88 @@ const ACTIVE_FOLLOW_RETRY_BUDGET = 3;
 const CENTER_ALIGNMENT_TOLERANCE_PX = 0.75;
 
 /**
- * §八: time constant for the exponential approach. Lower = snappier,
- * higher = smoother. 110ms feels responsive without overshooting.
+ * §七: duration envelope for the finite center-follow animation.
+ *
+ * The previous model was an exponential approach (`alpha = 1 - exp(-dt/τ)`)
+ * with a 700ms forced snap. Exponentials never arrive: after 700ms a long
+ * scroll still had several pixels left, so the motion visibly decelerated,
+ * paused, and then jumped the remainder in a single frame. A curve with a
+ * real endpoint cannot do that — the last frame IS the target.
  */
-const CENTER_FOLLOW_TAU_MS = 110;
+const CENTER_FOLLOW_MIN_DURATION_MS = 180;
+const CENTER_FOLLOW_MAX_DURATION_MS = 650;
+const CENTER_FOLLOW_BASE_DURATION_MS = 160;
+const CENTER_FOLLOW_DISTANCE_COEFFICIENT = 9;
 
-/** §八: hard ceiling on follow duration before a forced snap. */
-const CENTER_FOLLOW_MAX_DURATION_MS = 700;
+/**
+ * §十一: the single short correction allowed after final verification
+ * (browser clamp, scrollHeight moved under us). Never an instant jump,
+ * never an unbounded retry loop.
+ */
+const CENTER_FOLLOW_CORRECTION_MIN_DURATION_MS = 120;
+const CENTER_FOLLOW_CORRECTION_MAX_DURATION_MS = 220;
+
+/**
+ * §九: sub-pixel target churn that must NOT restart the animation.
+ * Re-basing the interpolation for half a pixel is exactly the stutter
+ * this rewrite exists to remove.
+ */
+const CENTER_TARGET_EPSILON_PX = 0.5;
+
+/**
+ * §十三: runaway-rAF guard ONLY. This is not how a scroll normally ends —
+ * a healthy session finishes when `progress` reaches 1. Reaching this
+ * ceiling means something pathological happened and is recorded as such.
+ */
+const CENTER_FOLLOW_SAFETY_TIMEOUT_MS = 4000;
 
 /** §五: a sane ceiling on the offsetParent walk (cycle / detach guard). */
 const OFFSET_CHAIN_MAX_DEPTH = 32;
+
+/**
+ * §五/§六: the ONE piece of state that says "the fixed playhead is the
+ * active indicator right now". CSS reads it to draw the playhead *and* to
+ * quiet the active row's own marker, so the two can never both paint an
+ * accent — that double image was the "duplicate active indicator" bug.
+ */
+const PLAYHEAD_VISIBLE_CLASS = "glide-outline-root--playhead-visible";
+
+/** §九/§十: two lengths are "the same" below this. */
+function nearlyEqualPx(a: number, b: number, epsilon = 0.01): boolean {
+	if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+	return Math.abs(a - b) <= epsilon;
+}
+
+/**
+ * §七: how long a centre-follow should take to cover `distancePx`.
+ *
+ * `sqrt` rather than a linear ramp: a 2000px scroll is not ten times more
+ * "far" to the eye than a 200px one, and a linear law would make long
+ * jumps feel sluggish while short ones felt instant. Clamped at both ends
+ * so a nudge is never draggy and a full-document jump never outstays.
+ */
+export function computeCenterFollowDuration(distancePx: number): number {
+	const distance = Number.isFinite(distancePx) ? Math.abs(distancePx) : 0;
+	const raw =
+		CENTER_FOLLOW_BASE_DURATION_MS +
+		CENTER_FOLLOW_DISTANCE_COEFFICIENT * Math.sqrt(distance);
+	return Math.min(
+		CENTER_FOLLOW_MAX_DURATION_MS,
+		Math.max(CENTER_FOLLOW_MIN_DURATION_MS, raw),
+	);
+}
+
+/**
+ * §七: ease-out cubic. Monotone on [0,1], `f(0) = 0`, `f(1) = 1`, and its
+ * derivative decays to zero — so the motion settles rather than stopping
+ * dead, and it is structurally incapable of overshooting.
+ */
+export function easeOutCubic(progress: number): number {
+	if (!(progress > 0)) return 0;
+	if (progress >= 1) return 1;
+	const remaining = 1 - progress;
+	return 1 - remaining * remaining * remaining;
+}
 
 /**
  * §七: the lifecycle of a single center-follow animation. Only one session
@@ -114,16 +186,43 @@ export type ActiveFollowSessionState =
 	| "aligned"
 	| "cancelled";
 
-/** §七: a single center-follow animation. */
+/**
+ * §十一: why a session stopped. `aligned` and `corrected` are the two
+ * healthy endings; everything else records that the scroll did not get to
+ * finish on its own terms.
+ */
+export type ActiveFollowEndReason =
+	| ""
+	| "aligned"
+	| "corrected"
+	| "pointer-enter-snap"
+	| "cancelled-expanded"
+	| "cancelled-pressed"
+	| "cancelled-dispose"
+	| "geometry-unavailable"
+	| "safety-timeout";
+
+/**
+ * §七: a single center-follow animation.
+ *
+ * The interpolation is fully described by (start, target, startedAt,
+ * duration) — there is no per-frame accumulator. That is what makes a
+ * retarget a clean restart rather than a splice into a half-run curve.
+ */
 export interface ActiveFollowSession {
 	generation: number;
 	targetKey: string;
-	targetScrollTop: number;
-	state: ActiveFollowSessionState;
-	startedAt: number;
-	lastFrameAt: number;
-	lastErrorPx: number;
 	source: ActiveFollowReason;
+	startScrollTop: number;
+	targetScrollTop: number;
+	startedAt: number;
+	durationMs: number;
+	state: ActiveFollowSessionState;
+	lastErrorPx: number;
+	/** §九: the geometry revision this session's target was computed from. */
+	geometryRevision: number;
+	/** §十一: true once this session has become the one allowed correction. */
+	correction: boolean;
 }
 
 /**
@@ -204,6 +303,52 @@ export interface ActiveFollowDiagnostics {
 	/** §六: how many times the spacers have been re-measured. */
 	centerSpacerRefreshCount: number;
 	playheadVisible: boolean;
+
+	// ── §十三: finite-duration animation state ─────────────────────
+	/** §七: the scrollTop the current interpolation started from. */
+	startScrollTop: number;
+	/** §七: the scrollTop the current interpolation ends at. */
+	targetScrollTop: number;
+	/** §七: the current interpolation's total length in ms. */
+	durationMs: number;
+	/** §七: linear [0,1] position through the current interpolation. */
+	progress: number;
+	/** §七: `easeOutCubic(progress)`. */
+	easedProgress: number;
+	/** §八: the live session's generation (0 = no session). */
+	generation: number;
+
+	// ── §九: geometry revisioning ──────────────────────────────────
+	lastGeometryRevision: number;
+	sessionGeometryRevision: number;
+	geometryRetargetCount: number;
+	ignoredSubpixelTargetChangeCount: number;
+
+	// ── §十一: final verification ──────────────────────────────────
+	finalVerificationCount: number;
+	finalCorrectionSessionCount: number;
+	finalResidualBeforeWritePx: number;
+	finalResidualAfterWritePx: number;
+	sessionEndReason: ActiveFollowEndReason;
+	/** §十三: safety-timeout trips — an error signal, never a normal end. */
+	safetyTimeoutCount: number;
+
+	// ── §四/§五: playhead geometry & visibility ────────────────────
+	/** §四: the playhead's y in ROOT space (what CSS actually draws at). */
+	playheadRootY: number;
+	/** §四: the playhead's y in VIEWPORT space (what targets are computed from). */
+	playheadViewportY: number;
+	playheadRailSide: "left" | "right";
+	playheadRailLeft: number;
+	playheadRailRight: number;
+	playheadHorizontalMode: "left" | "right";
+	playheadGeometryRefreshCount: number;
+	/** §五: which clause of `shouldShowCenterPlayhead()` decided. */
+	playheadVisibleReason: string;
+
+	// ── §十: spacer write de-duplication ───────────────────────────
+	centerSpacerMutationCount: number;
+	centerSpacerSkippedMutationCount: number;
 }
 
 export interface ItemRecord {
@@ -335,8 +480,6 @@ export class GlideOutlineView {
 	private activeFollowSession: ActiveFollowSession | null = null;
 	/** §七: rAF handle driving the session; 0 = none. */
 	private activeFollowFrame = 0;
-	/** §七: last timestamp from the rAF callback (for dt computation). */
-	private activeFollowLastTimestamp = 0;
 	/** §五: the fixed center playhead element. */
 	private playheadEl: HTMLElement | null = null;
 	/** §六: top spacer element inside the scroll content. */
@@ -349,6 +492,33 @@ export class GlideOutlineView {
 	private firstRowHeightPx = 0;
 	private lastRowHeightPx = 0;
 	private centerSpacerRefreshCount = 0;
+	/** §十: writes actually performed / skipped as sub-pixel no-ops. */
+	private centerSpacerMutationCount = 0;
+	private centerSpacerSkippedMutationCount = 0;
+	/** §十: last value actually written to each spacer; NaN = never. */
+	private lastWrittenTopSpacerPx = Number.NaN;
+	private lastWrittenBottomSpacerPx = Number.NaN;
+	/**
+	 * §九: monotonic id of the current centre geometry. A follow frame
+	 * re-reads the DOM only when this moves — an unchanged revision means
+	 * the cached target is still exact, so a steady glide touches no
+	 * layout at all.
+	 */
+	private centerGeometryRevision = 0;
+	private geometryRetargetCount = 0;
+	private ignoredSubpixelTargetChangeCount = 0;
+	/**
+	 * §四: the playhead's y in the two coordinate spaces it has to live in
+	 * at once — ROOT space (where CSS draws it) and VIEWPORT space (where
+	 * scroll targets are computed). Both come out of one measurement pass
+	 * so they can never drift apart.
+	 */
+	private playheadRootY = Number.NaN;
+	private playheadViewportY = Number.NaN;
+	private playheadRailSide: "left" | "right" = "right";
+	private playheadGeometryRefreshCount = 0;
+	/** §五: which clause of `shouldShowCenterPlayhead()` last decided. */
+	private playheadVisibleReason = "init";
 	/** §四/§十三: counters for tests and diagnostics. */
 	private readonly activeFollowDiag = {
 		requestCount: 0,
@@ -374,6 +544,20 @@ export class GlideOutlineView {
 		lastAlignmentErrorPx: Number.NaN,
 		maxAlignmentErrorPx: 0,
 		lastDurationMs: Number.NaN,
+		// §十三: finite-duration animation state. Retained after the session
+		// clears so a test can inspect the curve that just ran.
+		startScrollTop: Number.NaN,
+		targetScrollTop: Number.NaN,
+		durationMs: Number.NaN,
+		progress: 0,
+		easedProgress: 0,
+		// §十一: final verification.
+		finalVerificationCount: 0,
+		finalCorrectionSessionCount: 0,
+		finalResidualBeforeWritePx: Number.NaN,
+		finalResidualAfterWritePx: Number.NaN,
+		safetyTimeoutCount: 0,
+		sessionEndReason: "" as ActiveFollowEndReason,
 	};
 
 	constructor(
@@ -425,9 +609,11 @@ export class GlideOutlineView {
 		this.bottomSpacerEl.setAttribute("aria-hidden", "true");
 		this.viewportEl.appendChild(this.bottomSpacerEl);
 
-		// §五: fixed center playhead. Lives in the root (not the scroll
-		// viewport) so it never moves with the content. pointer-events:
-		// none, no tooltip, no hit area.
+		// §三/§五: fixed center playhead. Lives in the root (not the scroll
+		// viewport) so it never moves with the content, but CSS confines it
+		// to the 28px marker rail — an earlier version stretched it across
+		// the whole root and painted a dot in the middle of the user's
+		// prose. pointer-events: none, aria-hidden, no tooltip, no hit area.
 		this.playheadEl = this.doc.createElement("div");
 		this.playheadEl.className = "glide-outline-playhead";
 		this.playheadEl.setAttribute("aria-hidden", "true");
@@ -461,6 +647,9 @@ export class GlideOutlineView {
 		}
 
 		this.applySettings();
+		// §五: never leave the playhead in an indeterminate state — a fresh
+		// view has no active heading, so it starts hidden.
+		this.updatePlayheadState();
 	}
 
 	/** Keyed reconciliation — DOM nodes survive as long as heading identity does. */
@@ -518,7 +707,10 @@ export class GlideOutlineView {
 		this.invalidateOverflowMetrics();
 		this.scheduleMeasure();
 		// §六: row count / order changed — spacers depend on first/last row.
-		this.refreshCenterSpacers();
+		this.refreshCenterGeometry();
+		// §五: items (and possibly the active key) changed — the playhead's
+		// preconditions have to be re-evaluated before anything is drawn.
+		this.updatePlayheadState();
 		// §四: the list changed, so the active row's offset moved. Re-center
 		// it (retries until the queued measure pass gives it a real height).
 		this.requestActiveFollow("items-change");
@@ -541,6 +733,9 @@ export class GlideOutlineView {
 		// changed there — but a re-position is still requested so a
 		// collapsed outline stays centred on the active row.
 		if (key === this.activeKey) {
+			// §五: the key is unchanged but its record may have appeared
+			// (or vanished) since the last call — re-evaluate visibility.
+			this.updatePlayheadState();
 			this.requestActiveFollow("active-change");
 			return;
 		}
@@ -557,6 +752,9 @@ export class GlideOutlineView {
 			record.buttonEl.setAttribute("aria-current", "true");
 		}
 	}
+	// §五: the active heading is the playhead's whole reason to exist —
+	// no active row, no playhead.
+	this.updatePlayheadState();
 	// §四: keep the active heading positioned inside the outline's own
 	// scroll viewport — but only while collapsed, so the pointer/keyboard
 	// user is never fought (requestActiveFollow enforces that gate).
@@ -603,13 +801,15 @@ export class GlideOutlineView {
 			// is only cancelled, and the pending target survives for the
 			// next collapse.
 			if (state !== "pressed") this.finishActiveFollowImmediately();
-			this.cancelActiveFollowSession();
+			this.cancelActiveFollowSession(
+				state === "pressed" ? "cancelled-pressed" : "cancelled-expanded",
+			);
 		}
 		if (previous !== "collapsed" && state === "collapsed") {
-			this.refreshCenterSpacers();
+			this.refreshCenterGeometry();
 			this.flushPendingActiveFollow();
 		}
-		this.updatePlayheadVisibility();
+		this.updatePlayheadState();
 	}
 
 	/** §四: current interaction state (diagnostics / tests). */
@@ -684,6 +884,10 @@ export class GlideOutlineView {
 		// Font size / padding / border / markdown changes alter card boxes.
 		this.invalidateOverflowMetrics();
 		this.scheduleMeasure();
+		// §四/§五: the rail side may have flipped and the viewport may have
+		// resized — both change where the playhead is drawn.
+		this.refreshCenterGeometry();
+		this.updatePlayheadState();
 	}
 
 	/** True when `node` belongs to this view's owned subtree. */
@@ -719,6 +923,9 @@ export class GlideOutlineView {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
+		// §五: a disposed view has no active indicator. Drop the class before
+		// anything else so a late paint cannot leave a dot behind.
+		this.updatePlayheadState();
 		this.viewportEl.removeEventListener("scroll", this.onViewportScroll);
 		this.hostResizeObserver?.disconnect();
 		this.cardResizeObserver?.disconnect();
@@ -734,11 +941,21 @@ export class GlideOutlineView {
 			this.doc.defaultView?.cancelAnimationFrame(this.activeFollowFrame);
 			this.activeFollowFrame = 0;
 		}
+		if (this.activeFollowSession !== null) {
+			this.activeFollowSession.state = "cancelled";
+			this.activeFollowDiag.cancelledCount++;
+			this.activeFollowDiag.sessionEndReason = "cancelled-dispose";
+		}
 		this.activeFollowSession = null;
 		this.activeFollowPending = false;
 		this.pendingActiveFollow = null;
 		this.metricsScheduled = false;
 		this.itemRecords.clear();
+		// §五: the playhead goes with the root; drop the references too so
+		// nothing can resurrect it against a detached tree.
+		this.playheadEl = null;
+		this.topSpacerEl = null;
+		this.bottomSpacerEl = null;
 		this.rootEl.remove();
 		// Removes the owned wrapper and undoes the host anchor, if any.
 		this.mount.dispose();
@@ -944,8 +1161,9 @@ export class GlideOutlineView {
 		// §五.1: a width change rewraps labels, so row heights (and with
 		// them the scroll height) can move.
 		this.invalidateOverflowMetrics();
-		// §六: viewport height changed — spacers depend on clientHeight.
-		this.refreshCenterSpacers();
+		// §四/§六: viewport height changed — both spacers and the playhead's
+		// root-space y depend on it.
+		this.refreshCenterGeometry();
 		// §四: a viewport-size change shifts the active row's centred
 		// position — re-request a follow (no-op unless collapsed).
 		this.requestActiveFollow("resize");
@@ -1049,7 +1267,7 @@ export class GlideOutlineView {
 			this.requestActiveFollow("metrics-change");
 		}
 		// §六: row heights changed — spacers depend on first/last row height.
-		this.refreshCenterSpacers();
+		this.refreshCenterGeometry();
 		markColdStart("firstMeasureRowsEnd"); // §十三
 	}
 
@@ -1127,6 +1345,13 @@ export class GlideOutlineView {
 		const d = this.activeFollowDiag;
 		const s = this.activeFollowSession;
 		const p = this.pendingActiveFollow;
+		// §三/§四: the playhead's horizontal extent inside the root. It must
+		// be exactly one rail wide — a full-root-width playhead is what
+		// painted a dot in the middle of the document text.
+		const railLeft =
+			this.playheadRailSide === "right"
+				? Math.max(0, (this.rootEl.offsetWidth || 0) - RAIL_WIDTH)
+				: 0;
 		return {
 			interactionState: this.interactionState,
 			followEnabled: this.followEnabled,
@@ -1161,9 +1386,48 @@ export class GlideOutlineView {
 			bottomCenterSpacerPx: this.bottomCenterSpacerPx,
 			firstRowHeight: this.firstRowHeightPx,
 			lastRowHeight: this.lastRowHeightPx,
-			playheadClientY: this.viewportEl.clientHeight / 2,
+			playheadClientY: Number.isFinite(this.playheadViewportY)
+				? this.playheadViewportY
+				: this.viewportEl.clientHeight / 2,
 			centerSpacerRefreshCount: this.centerSpacerRefreshCount,
-			playheadVisible: this.playheadEl !== null && this.playheadEl.style.display !== "none",
+			// §五: visibility has exactly one source of truth — the class.
+			playheadVisible: this.rootEl.classList.contains(PLAYHEAD_VISIBLE_CLASS),
+
+			// §十三: finite-duration animation state.
+			startScrollTop: s?.startScrollTop ?? d.startScrollTop,
+			targetScrollTop: s?.targetScrollTop ?? d.targetScrollTop,
+			durationMs: s?.durationMs ?? d.durationMs,
+			progress: d.progress,
+			easedProgress: d.easedProgress,
+			generation: s?.generation ?? 0,
+
+			// §九: geometry revisioning.
+			lastGeometryRevision: this.centerGeometryRevision,
+			sessionGeometryRevision: s?.geometryRevision ?? 0,
+			geometryRetargetCount: this.geometryRetargetCount,
+			ignoredSubpixelTargetChangeCount: this.ignoredSubpixelTargetChangeCount,
+
+			// §十一: final verification.
+			finalVerificationCount: d.finalVerificationCount,
+			finalCorrectionSessionCount: d.finalCorrectionSessionCount,
+			finalResidualBeforeWritePx: d.finalResidualBeforeWritePx,
+			finalResidualAfterWritePx: d.finalResidualAfterWritePx,
+			sessionEndReason: d.sessionEndReason,
+			safetyTimeoutCount: d.safetyTimeoutCount,
+
+			// §四/§五: playhead geometry & visibility.
+			playheadRootY: this.playheadRootY,
+			playheadViewportY: this.playheadViewportY,
+			playheadRailSide: this.playheadRailSide,
+			playheadRailLeft: railLeft,
+			playheadRailRight: railLeft + RAIL_WIDTH,
+			playheadHorizontalMode: this.playheadRailSide,
+			playheadGeometryRefreshCount: this.playheadGeometryRefreshCount,
+			playheadVisibleReason: this.playheadVisibleReason,
+
+			// §十: spacer write de-duplication.
+			centerSpacerMutationCount: this.centerSpacerMutationCount,
+			centerSpacerSkippedMutationCount: this.centerSpacerSkippedMutationCount,
 		};
 	}
 
@@ -1175,9 +1439,17 @@ export class GlideOutlineView {
 	// ── §七: single Active Follow Session ───────────────────────────
 
 	/**
-	 * §七: start a new session or retarget the existing one. A retarget
-	 * does NOT create a second animation — it updates the target and lets
-	 * the current RAF naturally steer toward the new position.
+	 * §七/§八: start a new session, or fully re-base the existing one.
+	 *
+	 * A retarget is a *restart*, not a patch. The old implementation swapped
+	 * only `targetScrollTop` and left `startedAt` / the implicit start
+	 * position alone, so the second half of an in-flight curve was replayed
+	 * against a new endpoint — the list slid into place, paused, then moved
+	 * again. Re-basing start/clock/duration together makes the new motion
+	 * one continuous curve from wherever the scroll actually is.
+	 *
+	 * Exactly one rAF chain exists at any time; a retarget never starts a
+	 * second one.
 	 */
 	private startOrRetargetActiveFollowSession(
 		key: string,
@@ -1195,38 +1467,72 @@ export class GlideOutlineView {
 			return;
 		}
 		this.activeFollowRetryBudget = ACTIVE_FOLLOW_RETRY_BUDGET;
-		const now = this.now();
+		const viewport = this.viewportEl;
+		const start = viewport.scrollTop;
 		const existing = this.activeFollowSession;
-		if (existing !== null && existing.state !== "aligned" && existing.state !== "cancelled") {
-			// §七: retarget — update the existing session.
+		const live =
+			existing !== null &&
+			existing.state !== "aligned" &&
+			existing.state !== "cancelled";
+
+		// §九: an endpoint that moved by less than half a pixel has not
+		// moved. Restarting the curve for measurement noise is precisely
+		// the near-target stutter this rewrite exists to remove.
+		if (live && existing !== null && existing.targetKey === key) {
+			if (Math.abs(target - existing.targetScrollTop) <= CENTER_TARGET_EPSILON_PX) {
+				this.ignoredSubpixelTargetChangeCount++;
+				existing.geometryRevision = this.centerGeometryRevision;
+				if (this.activeFollowFrame === 0) this.scheduleActiveFollowFrame();
+				return;
+			}
+		}
+
+		const now = this.now();
+		const durationMs = computeCenterFollowDuration(target - start);
+		if (live && existing !== null) {
 			existing.targetKey = key;
-			existing.targetScrollTop = target;
-			existing.state = "retargeting";
 			existing.source = reason;
+			existing.generation = this.activeFollowGeneration;
+			existing.startScrollTop = start;
+			existing.targetScrollTop = target;
+			existing.startedAt = now;
+			existing.durationMs = durationMs;
+			existing.state = "retargeting";
+			existing.lastErrorPx = Math.abs(target - start);
+			existing.geometryRevision = this.centerGeometryRevision;
+			// A re-based session has not spent its one correction yet.
+			existing.correction = false;
 			this.activeFollowDiag.retargetCount++;
+			this.activeFollowDiag.sessionEndReason = "";
 			this.perf?.count("centerFollowRetargetCount");
+			if (this.activeFollowFrame === 0) this.scheduleActiveFollowFrame();
 			return;
 		}
 		this.activeFollowSession = {
 			generation: this.activeFollowGeneration,
 			targetKey: key,
-			targetScrollTop: target,
-			state: "following",
-			startedAt: now,
-			lastFrameAt: now,
-			lastErrorPx: Number.NaN,
 			source: reason,
+			startScrollTop: start,
+			targetScrollTop: target,
+			startedAt: now,
+			durationMs,
+			state: "following",
+			lastErrorPx: Math.abs(target - start),
+			geometryRevision: this.centerGeometryRevision,
+			correction: false,
 		};
+		this.activeFollowDiag.sessionEndReason = "";
 		if (this.activeFollowFrame === 0) {
 			this.scheduleActiveFollowFrame();
 		}
 	}
 
 	/** §七: cancel the current session (expanded / pressed / dispose / file / mode). */
-	private cancelActiveFollowSession(): void {
+	private cancelActiveFollowSession(reason: ActiveFollowEndReason): void {
 		if (this.activeFollowSession !== null) {
 			this.activeFollowSession.state = "cancelled";
 			this.activeFollowDiag.cancelledCount++;
+			this.activeFollowDiag.sessionEndReason = reason;
 		}
 		this.activeFollowSession = null;
 		this.cancelActiveFollowFrame();
@@ -1239,6 +1545,13 @@ export class GlideOutlineView {
 	 */
 	finishActiveFollowImmediately(): void {
 		if (this.disposed) return;
+		// §十二: the order below is the contract, not a style choice.
+		//   1 read the live active key   2 stop the animation
+		//   3 read geometry              4 write the exact target
+		//   5 verify what stuck          6 settle the generation
+		//   7 clear pending              8 clear the session
+		// Only after 8 may the caller expand. An expansion that overtakes
+		// step 4 opens the outline centred on the *previous* heading.
 		const key = this.activeKey;
 		if (key === null) {
 			this.cancelActiveFollowFrame();
@@ -1246,34 +1559,53 @@ export class GlideOutlineView {
 		}
 		this.cancelActiveFollowFrame();
 		const target = this.computeCenterTargetScrollTop(key);
-		if (!Number.isFinite(target)) return;
-		const viewport = this.viewportEl;
 		const diag = this.activeFollowDiag;
+		if (!Number.isFinite(target)) {
+			// §十二: the target is not measurable, so it was NOT reached.
+			// Keep `pendingActiveFollow` alive — dropping it here is how a
+			// heading silently lost its follow across an expand/collapse.
+			diag.sessionEndReason = "geometry-unavailable";
+			if (this.activeFollowSession !== null) {
+				this.activeFollowSession.state = "cancelled";
+				this.activeFollowSession = null;
+			}
+			return;
+		}
+		const viewport = this.viewportEl;
 		const before = viewport.scrollTop;
-		if (before !== target) {
+		diag.finalResidualBeforeWritePx = Math.abs(before - target);
+		if (diag.finalResidualBeforeWritePx > 0) {
 			this.programmaticScrollNote = "active-follow";
 			viewport.scrollTop = target;
 			diag.scrollMutationCount++;
 			diag.snapCount++;
 			this.perf?.count("centerFollowScrollMutationCount");
 			this.perf?.count("centerFollowSnapCount");
+		} else {
+			diag.noMutationCount++;
 		}
+		const after = viewport.scrollTop;
+		diag.finalVerificationCount++;
+		diag.finalResidualAfterWritePx = Math.abs(after - target);
 		diag.lastScrollTopBefore = before;
-		diag.lastScrollTopAfter = viewport.scrollTop;
+		diag.lastScrollTopAfter = after;
 		diag.lastTargetScrollTop = target;
-		diag.lastAlignmentErrorPx = Math.abs(viewport.scrollTop - target);
+		diag.lastAlignmentErrorPx = diag.finalResidualAfterWritePx;
 		if (diag.lastAlignmentErrorPx > diag.maxAlignmentErrorPx) {
 			diag.maxAlignmentErrorPx = diag.lastAlignmentErrorPx;
 		}
-		// Mark aligned and clear pending.
-		if (this.activeFollowSession !== null) {
-			this.activeFollowSession.state = "aligned";
+		const session = this.activeFollowSession;
+		if (session !== null) {
+			session.state = "aligned";
+			session.lastErrorPx = diag.finalResidualAfterWritePx;
+			diag.lastDurationMs = this.now() - session.startedAt;
 		}
+		diag.progress = 1;
+		diag.easedProgress = 1;
 		this.activeFollowSession = null;
-		if (this.pendingActiveFollow !== null) {
-			this.pendingActiveFollow = null;
-		}
+		this.pendingActiveFollow = null;
 		diag.alignedCount++;
+		diag.sessionEndReason = "pointer-enter-snap";
 		markColdStart("firstCenterFollowAligned");
 	}
 
@@ -1299,10 +1631,34 @@ export class GlideOutlineView {
 		this.activeFollowPending = false;
 	}
 
+	/** §七: one guarded scrollTop write. Never more than one per frame. */
+	private writeFollowScrollTop(value: number): void {
+		const viewport = this.viewportEl;
+		if (viewport.scrollTop === value) {
+			this.activeFollowDiag.noMutationCount++;
+			return;
+		}
+		this.programmaticScrollNote = "active-follow";
+		viewport.scrollTop = value;
+		this.activeFollowDiag.scrollMutationCount++;
+		this.perf?.count("centerFollowScrollMutationCount");
+	}
+
 	/**
-	 * §八: per-frame exponential approach. Frame-rate independent:
-	 * alpha = 1 - exp(-dt / tau). No overshoot, no oscillation. Snaps
-	 * when the error falls below tolerance or the max duration elapses.
+	 * §七: finite-duration interpolation between two fixed endpoints.
+	 *
+	 * The previous model was an exponential approach — `alpha = 1 -
+	 * exp(-dt / tau)` — which by construction *never* arrives. It crawled
+	 * asymptotically until a 700 ms watchdog gave up and teleported the
+	 * remainder. That is exactly what the eye read as "slows down, pauses,
+	 * then jumps": deceleration into a stall, then a discontinuity.
+	 *
+	 * Now the curve has a real end. `progress` runs 0 → 1 over a duration
+	 * chosen from the distance, `easeOutCubic(1) === 1`, so the final frame
+	 * writes the target *by arithmetic*. There is nothing left to snap.
+	 * Driving from (startedAt, durationMs) rather than a per-frame
+	 * accumulator also makes it frame-rate independent for free: 30 Hz and
+	 * 120 Hz sample the same curve, they just sample it differently often.
 	 */
 	private centerFollowFrameStep(timestamp: number): void {
 		if (this.disposed) return;
@@ -1311,80 +1667,160 @@ export class GlideOutlineView {
 			return;
 		}
 		if (!this.canRunActiveFollow()) {
-			this.cancelActiveFollowSession();
+			this.cancelActiveFollowSession(
+				this.interactionState === "pressed"
+					? "cancelled-pressed"
+					: "cancelled-expanded",
+			);
 			return;
 		}
 		const diag = this.activeFollowDiag;
 		const viewport = this.viewportEl;
 		const current = viewport.scrollTop;
-		const target = session.targetScrollTop;
-
-		// Recompute target in case the layout shifted (spacer resize, etc.)
-		const recomputed = this.computeCenterTargetScrollTop(session.targetKey);
-		if (Number.isFinite(recomputed) && Math.abs(recomputed - target) > 1) {
-			session.targetScrollTop = recomputed;
-		}
-
-		const dt = Math.max(1, timestamp - session.lastFrameAt);
-		const elapsed = timestamp - session.startedAt;
-		session.lastFrameAt = timestamp;
 		diag.frameCount++;
 		this.perf?.count("centerFollowFrameCount");
 		markColdStart("firstCenterFollowFrame");
 
-		const error = session.targetScrollTop - current;
-		session.lastErrorPx = Math.abs(error);
+		// §九: the endpoint is re-derived ONLY when the geometry actually
+		// changed. An unchanged revision means the cached target is still
+		// exact, so a steady glide reads no layout at all — and, more
+		// importantly, cannot be knocked off course by re-measure noise.
+		if (session.geometryRevision !== this.centerGeometryRevision) {
+			session.geometryRevision = this.centerGeometryRevision;
+			const recomputed = this.computeCenterTargetScrollTop(session.targetKey);
+			if (Number.isFinite(recomputed)) {
+				if (Math.abs(recomputed - session.targetScrollTop) > CENTER_TARGET_EPSILON_PX) {
+					// Re-base the whole curve from here — never splice a new
+					// endpoint onto an old clock.
+					session.startScrollTop = current;
+					session.targetScrollTop = recomputed;
+					session.startedAt = timestamp;
+					session.durationMs = computeCenterFollowDuration(recomputed - current);
+					session.state = "retargeting";
+					this.geometryRetargetCount++;
+					this.perf?.count("centerFollowRetargetCount");
+				} else {
+					this.ignoredSubpixelTargetChangeCount++;
+				}
+			}
+		}
+
+		const target = session.targetScrollTop;
+		session.lastErrorPx = Math.abs(target - current);
 		diag.lastAlignmentErrorPx = session.lastErrorPx;
 		if (session.lastErrorPx > diag.maxAlignmentErrorPx) {
 			diag.maxAlignmentErrorPx = session.lastErrorPx;
 		}
 		diag.lastScrollTopBefore = current;
-		diag.lastTargetScrollTop = session.targetScrollTop;
+		diag.lastTargetScrollTop = target;
+		diag.startScrollTop = session.startScrollTop;
+		diag.targetScrollTop = target;
+		diag.durationMs = session.durationMs;
 
-		// §四: tolerance check — aligned.
+		// Already inside tolerance — finish now rather than animate a no-op.
 		if (session.lastErrorPx <= CENTER_ALIGNMENT_TOLERANCE_PX) {
-			this.alignSession(current, session);
+			this.finalizeFollowSession(session, current);
 			return;
 		}
 
-		// §八: hard timeout — snap.
-		if (elapsed >= CENTER_FOLLOW_MAX_DURATION_MS) {
-			this.programmaticScrollNote = "active-follow";
-			viewport.scrollTop = session.targetScrollTop;
-			diag.scrollMutationCount++;
+		// §十三: runaway guard ONLY. A healthy session ends at progress 1;
+		// arriving here is recorded as a fault, not as a normal ending.
+		const elapsed = timestamp - session.startedAt;
+		if (elapsed >= CENTER_FOLLOW_SAFETY_TIMEOUT_MS) {
 			diag.timeoutCount++;
-			this.perf?.count("centerFollowScrollMutationCount");
+			diag.safetyTimeoutCount++;
 			this.perf?.count("centerFollowTimeoutCount");
-			diag.lastScrollTopAfter = viewport.scrollTop;
-			this.alignSession(viewport.scrollTop, session);
+			this.finalizeFollowSession(session, current, "safety-timeout");
 			return;
 		}
 
-		// §八: exponential approach. alpha = 1 - exp(-dt / tau).
-		const alpha = 1 - Math.exp(-dt / CENTER_FOLLOW_TAU_MS);
-		const next = current + error * alpha;
+		const duration =
+			session.durationMs > 0 ? session.durationMs : CENTER_FOLLOW_MIN_DURATION_MS;
+		const progress = Math.max(0, Math.min(1, elapsed / duration));
+		const eased = easeOutCubic(progress);
+		diag.progress = progress;
+		diag.easedProgress = eased;
+		const next =
+			session.startScrollTop + (target - session.startScrollTop) * eased;
 
-		this.programmaticScrollNote = "active-follow";
-		viewport.scrollTop = next;
-		diag.scrollMutationCount++;
-		this.perf?.count("centerFollowScrollMutationCount");
+		this.writeFollowScrollTop(next);
 		diag.lastScrollTopAfter = viewport.scrollTop;
-		session.state = "following";
-
 		this.perf?.count("activeFollowScrollMutationCount");
+
+		if (progress >= 1) {
+			// The write above already *was* the target — verification below
+			// only confirms that the browser kept it.
+			this.finalizeFollowSession(session, viewport.scrollTop);
+			return;
+		}
+		session.state = "following";
 		this.scheduleActiveFollowFrame();
 	}
 
-	/** §八: mark the session aligned, clear pending, stop the RAF. */
-	private alignSession(finalScrollTop: number, session: ActiveFollowSession): void {
+	/**
+	 * §十一: final verification. Write the exact endpoint, then read the
+	 * scroll position *back* — a browser may clamp or round a fractional
+	 * scrollTop, and trusting the value we wrote instead of the value that
+	 * stuck is how a half-pixel error survives into the next session.
+	 *
+	 * A residual over tolerance buys exactly ONE corrective pass, and that
+	 * pass is a short animation, never a jump. If the residual outlives a
+	 * dedicated correction the geometry is lying, and teleporting would
+	 * only hide that.
+	 */
+	private finalizeFollowSession(
+		session: ActiveFollowSession,
+		observedScrollTop: number,
+		forcedReason?: ActiveFollowEndReason,
+	): void {
 		const diag = this.activeFollowDiag;
+		const viewport = this.viewportEl;
+		const target = session.targetScrollTop;
+		diag.finalVerificationCount++;
+		diag.finalResidualBeforeWritePx = Math.abs(observedScrollTop - target);
+		if (diag.finalResidualBeforeWritePx > 0) {
+			this.writeFollowScrollTop(target);
+		}
+		const actual = viewport.scrollTop;
+		const residual = Math.abs(actual - target);
+		diag.finalResidualAfterWritePx = residual;
+		diag.lastScrollTopAfter = actual;
+		diag.lastAlignmentErrorPx = residual;
+		if (residual > diag.maxAlignmentErrorPx) diag.maxAlignmentErrorPx = residual;
+		session.lastErrorPx = residual;
+
+		if (
+			forcedReason === undefined &&
+			residual > CENTER_ALIGNMENT_TOLERANCE_PX &&
+			!session.correction
+		) {
+			session.correction = true;
+			session.startScrollTop = actual;
+			session.startedAt = this.now();
+			session.durationMs = Math.min(
+				CENTER_FOLLOW_CORRECTION_MAX_DURATION_MS,
+				Math.max(
+					CENTER_FOLLOW_CORRECTION_MIN_DURATION_MS,
+					computeCenterFollowDuration(residual),
+				),
+			);
+			session.state = "verifying";
+			session.geometryRevision = this.centerGeometryRevision;
+			diag.finalCorrectionSessionCount++;
+			this.scheduleActiveFollowFrame();
+			return;
+		}
+
 		session.state = "aligned";
-		diag.lastScrollTopAfter = finalScrollTop;
-		diag.lastAlignmentErrorPx = Math.abs(finalScrollTop - session.targetScrollTop);
 		diag.lastDurationMs = this.now() - session.startedAt;
 		diag.alignedCount++;
+		diag.progress = 1;
+		diag.easedProgress = 1;
+		diag.sessionEndReason =
+			forcedReason ?? (session.correction ? "corrected" : "aligned");
 		markColdStart("firstCenterFollowAligned");
-		// §七: pending is cleared ONLY on alignment, not on scroll request.
+		// §八: pending is cleared ONLY when the alignment actually landed —
+		// never merely because a scroll was requested.
 		if (this.pendingActiveFollow?.generation === session.generation) {
 			this.pendingActiveFollow = null;
 		}
@@ -1396,16 +1832,21 @@ export class GlideOutlineView {
 
 	/**
 	 * §九: compute the scrollTop that puts the active row's content center
-	 * at the playhead (viewport.clientHeight / 2). Returns NaN when the
-	 * row or viewport has no layout yet.
+	 * on the playhead line — at `playheadViewportY`, the same coordinate
+	 * `refreshCenterGeometry()` drew it at, NOT an independently recomputed
+	 * midpoint. Returns NaN when the row or viewport has no layout yet.
 	 */
 	private computeCenterTargetScrollTop(key: string): number {
 		const record = this.itemRecords.get(key);
 		if (!record) return Number.NaN;
 		const measured = this.measureActiveRow(record.rowEl);
 		if (measured === null) return Number.NaN;
-		const viewport = this.viewportEl;
-		const playheadY = viewport.clientHeight / 2;
+		// §四: the SAME number `refreshCenterGeometry()` drew the playhead
+		// from. Recomputing "clientHeight / 2" independently here is what
+		// let the visible line and the scroll target drift apart.
+		const playheadY = Number.isFinite(this.playheadViewportY)
+			? this.playheadViewportY
+			: measured.clientHeight / 2;
 		const activeCenter = measured.rowTop + measured.rowHeight / 2;
 		const maxScrollTop = Math.max(0, measured.scrollHeight - measured.clientHeight);
 		const target = Math.max(0, Math.min(maxScrollTop, activeCenter - playheadY));
@@ -1487,46 +1928,156 @@ export class GlideOutlineView {
 
 	// ── §五/§六: playhead visibility ─────────────────────────────────
 
-	/** §五: show or hide the fixed center playhead based on interaction state. */
-	private updatePlayheadVisibility(): void {
-		if (!this.playheadEl) return;
-		const visible = this.interactionState === "collapsed";
-		this.playheadEl.style.display = visible ? "" : "none";
+	/**
+	 * §五: the single judge of whether the fixed playhead may be drawn.
+	 * Every clause has to hold.
+	 *
+	 * Keying this on "collapsed" alone was the first of the two bugs this
+	 * round fixes: with no active heading, no rendered rows, or a disposed
+	 * view there is nothing for the playhead to point at, yet it happily
+	 * sat there marking empty space — and, because the element used to
+	 * span the whole root, it marked empty space *in the user's prose*.
+	 */
+	private shouldShowCenterPlayhead(): { visible: boolean; reason: string } {
+		if (this.disposed) return { visible: false, reason: "disposed" };
+		if (this.playheadEl === null) return { visible: false, reason: "no-playhead-el" };
+		if (this.interactionState !== "collapsed") {
+			return { visible: false, reason: "not-collapsed" };
+		}
+		if (this.activeKey === null) return { visible: false, reason: "no-active-key" };
+		if (this.items.length === 0) return { visible: false, reason: "empty-outline" };
+		if (this.itemRecords.size === 0) return { visible: false, reason: "no-item-records" };
+		if (!this.itemRecords.has(this.activeKey)) {
+			return { visible: false, reason: "active-row-not-rendered" };
+		}
+		if (this.rootEl.classList.contains("is-empty")) {
+			return { visible: false, reason: "root-empty" };
+		}
+		return { visible: true, reason: "visible" };
 	}
 
-	// ── §六: center spacers ──────────────────────────────────────────
+	/**
+	 * §五/§六: publish the verdict as ONE root class. CSS decides what it
+	 * means — the playhead becomes visible *and* the active row's own
+	 * marker goes quiet — so exactly one accent is ever painted. Nothing
+	 * here touches `playheadEl.style.display`; a second source of truth for
+	 * visibility is how the two got out of sync in the first place.
+	 */
+	private updatePlayheadState(): void {
+		const verdict = this.shouldShowCenterPlayhead();
+		this.playheadVisibleReason = verdict.reason;
+		this.rootEl.classList.toggle(PLAYHEAD_VISIBLE_CLASS, verdict.visible);
+	}
+
+	/** §五: is the fixed playhead currently the active indicator? */
+	isPlayheadVisible(): boolean {
+		return this.rootEl.classList.contains(PLAYHEAD_VISIBLE_CLASS);
+	}
+
+	// ── §四/§六/§十: center geometry ─────────────────────────────────
 
 	/**
-	 * §六: recompute top/bottom spacer heights so the first and last rows
-	 * can reach the center. Called on resize, setItems, level filter,
-	 * file/mode change.
+	 * §四: one pass produces every centre-derived number — both playhead
+	 * coordinates and both spacer heights — from a single set of reads.
+	 *
+	 * They have to come from the same pass. The playhead is drawn in ROOT
+	 * space; scroll targets are computed in VIEWPORT space; the viewport is
+	 * inset inside the root. When the two were derived independently they
+	 * disagreed by exactly that inset, and the "centre" the user saw was
+	 * not the centre the scroll aimed at.
+	 *
+	 * §九: the geometry revision only moves when a value actually changed,
+	 * so a measure pass that finds nothing new cannot retarget a live
+	 * follow session.
 	 */
-	private refreshCenterSpacers(): void {
+	private refreshCenterGeometry(): void {
 		if (this.disposed) return;
 		const viewport = this.viewportEl;
 		const clientHeight = viewport.clientHeight;
-		if (!(clientHeight > 0)) return;
+		this.playheadGeometryRefreshCount++;
+		this.playheadRailSide =
+			this.getSettings().position === "left" ? "left" : "right";
+
+		let changed = false;
+
+		if (clientHeight > 0) {
+			const viewportY = clientHeight / 2;
+			if (!nearlyEqualPx(this.playheadViewportY, viewportY)) {
+				this.playheadViewportY = viewportY;
+				changed = true;
+			}
+			// ROOT space = where the viewport's client box centre lands
+			// relative to the root's border box.
+			const rootRect = this.rootEl.getBoundingClientRect();
+			const viewportRect = viewport.getBoundingClientRect();
+			let rootY =
+				viewportRect.top - rootRect.top + viewport.clientTop + viewportY;
+			if (!Number.isFinite(rootY)) rootY = viewportY;
+			if (!nearlyEqualPx(this.playheadRootY, rootY)) {
+				this.playheadRootY = rootY;
+				this.rootEl.style.setProperty("--glide-playhead-y", `${rootY}px`);
+				changed = true;
+			}
+		}
+
 		const rows = this.itemRecords;
-		if (rows.size === 0) return;
-		const firstRecord = rows.values().next().value;
-		const lastRecord = [...rows.values()].pop();
-		if (!firstRecord || !lastRecord) return;
-		const firstRowHeight = firstRecord.rowEl.offsetHeight || 0;
-		const lastRowHeight = lastRecord.rowEl.offsetHeight || 0;
-		const topSpacer = Math.max(0, clientHeight / 2 - firstRowHeight / 2);
-		const bottomSpacer = Math.max(0, clientHeight / 2 - lastRowHeight / 2);
-		this.topCenterSpacerPx = topSpacer;
-		this.bottomCenterSpacerPx = bottomSpacer;
-		this.firstRowHeightPx = firstRowHeight;
-		this.lastRowHeightPx = lastRowHeight;
-		this.centerSpacerRefreshCount++;
-		markColdStart("firstCenterSpacerMeasured");
-		if (this.topSpacerEl) {
-			this.topSpacerEl.style.height = `${topSpacer}px`;
+		if (clientHeight > 0 && rows.size > 0) {
+			let firstRecord: ItemRecord | undefined;
+			let lastRecord: ItemRecord | undefined;
+			for (const record of rows.values()) {
+				if (firstRecord === undefined) firstRecord = record;
+				lastRecord = record;
+			}
+			if (firstRecord !== undefined && lastRecord !== undefined) {
+				const centreY = this.playheadViewportY;
+				const firstRowHeight = firstRecord.rowEl.offsetHeight || 0;
+				const lastRowHeight = lastRecord.rowEl.offsetHeight || 0;
+				const topSpacer = Math.max(0, centreY - firstRowHeight / 2);
+				const bottomSpacer = Math.max(
+					0,
+					clientHeight - centreY - lastRowHeight / 2,
+				);
+				this.firstRowHeightPx = firstRowHeight;
+				this.lastRowHeightPx = lastRowHeight;
+				this.topCenterSpacerPx = topSpacer;
+				this.bottomCenterSpacerPx = bottomSpacer;
+				this.centerSpacerRefreshCount++;
+				markColdStart("firstCenterSpacerMeasured");
+				if (this.writeCenterSpacer("top", topSpacer)) changed = true;
+				if (this.writeCenterSpacer("bottom", bottomSpacer)) changed = true;
+			}
 		}
-		if (this.bottomSpacerEl) {
-			this.bottomSpacerEl.style.height = `${bottomSpacer}px`;
+
+		if (changed) this.centerGeometryRevision++;
+	}
+
+	/**
+	 * §十: write a spacer height only when it moved by more than half a
+	 * pixel.
+	 *
+	 * Re-writing the same `height` is not free — it costs a style recalc —
+	 * but the real damage was downstream: a spacer write bumps the geometry
+	 * revision, and a no-op write on every measure pass therefore retargeted
+	 * the live follow session forever. That was the layout jitter.
+	 */
+	private writeCenterSpacer(which: "top" | "bottom", nextPx: number): boolean {
+		const previous =
+			which === "top"
+				? this.lastWrittenTopSpacerPx
+				: this.lastWrittenBottomSpacerPx;
+		if (
+			Number.isFinite(previous) &&
+			Math.abs(nextPx - previous) <= CENTER_TARGET_EPSILON_PX
+		) {
+			this.centerSpacerSkippedMutationCount++;
+			return false;
 		}
+		const el = which === "top" ? this.topSpacerEl : this.bottomSpacerEl;
+		if (which === "top") this.lastWrittenTopSpacerPx = nextPx;
+		else this.lastWrittenBottomSpacerPx = nextPx;
+		if (el !== null) el.style.height = `${nextPx}px`;
+		this.centerSpacerMutationCount++;
+		return true;
 	}
 
 	private createItemRecord(item: HeadingItem): ItemRecord {

@@ -374,19 +374,28 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			}
 		});
 
-		it("snaps once the hard duration ceiling is reached", () => {
-			// One enormous frame blows straight past the 700 ms ceiling.
+		it("§七: ends by arriving, not by a watchdog snap", () => {
+			// One enormous frame overshoots the whole duration. The old
+			// exponential model needed a 700 ms ceiling to teleport the
+			// remainder — an asymptotic approach never actually arrives.
+			// This curve just evaluates easeOutCubic(1), which IS 1.
 			view.setActiveKey(keyAt(125));
 			const batch = rafQueue.splice(0, rafQueue.length);
 			clock += 1200;
 			for (const cb of batch) cb(clock);
 			const d = view.getActiveFollowDiagnostics();
-			expect(d.timeoutCount).toBe(1);
 			expect(view.viewportEl.scrollTop).toBeCloseTo(
 				centeredTarget(125),
 				1,
 			);
 			expect(d.sessionState).toBe("idle");
+			expect(d.sessionEndReason).toBe("aligned");
+			expect(d.progress).toBe(1);
+			expect(d.easedProgress).toBe(1);
+			// The timeout is a fault signal now, never a normal ending.
+			expect(d.timeoutCount).toBe(0);
+			expect(d.safetyTimeoutCount).toBe(0);
+			expect(d.snapCount).toBe(0);
 		});
 
 		it("keeps pending until the session actually aligns", () => {
@@ -579,7 +588,9 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			).not.toBeNull();
 		});
 
-		it("is visible while collapsed and hidden while expanded", () => {
+		it("is visible while collapsed on an active row, hidden while expanded", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf();
 			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(true);
 			view.setInteractionState("expanded-pointer");
 			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(
@@ -587,6 +598,91 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			);
 			view.setInteractionState("collapsed");
 			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(true);
+		});
+
+		/**
+		 * §五 / §2.2: keying visibility on "collapsed" alone was the first
+		 * of the two reported bugs. With nothing to point at, the playhead
+		 * still painted — and because it also spanned the full root width,
+		 * it painted in the middle of the user's prose.
+		 */
+		it("stays hidden until there is something to point at", () => {
+			// Fresh view: collapsed, rows mounted, but no active heading.
+			expect(view.getInteractionState()).toBe("collapsed");
+			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(
+				false,
+			);
+			expect(view.getActiveFollowDiagnostics().playheadVisibleReason).toBe(
+				"no-active-key",
+			);
+		});
+
+		it("disappears when the active heading is cleared", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(true);
+			view.setActiveKey(null);
+			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(
+				false,
+			);
+		});
+
+		/**
+		 * Reconciliation contract: `setItems` drops the active key when the
+		 * row it names no longer exists. So the *route* into "the outline
+		 * changed under the playhead" is `no-active-key`, and it has to hide
+		 * either way. Pinned here because the two tests below deliberately
+		 * bypass this to reach the later clauses.
+		 */
+		it("disappears when reconciliation drops the active row", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			expect(view.getActiveFollowDiagnostics().playheadVisible).toBe(true);
+			view.setItems([]);
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.playheadVisible).toBe(false);
+			expect(d.playheadVisibleReason).toBe("no-active-key");
+		});
+
+		it("disappears when the outline empties out", () => {
+			// Order matters: emptying first, then naming an active heading,
+			// is the one way to hold a non-null key over an empty outline
+			// (a late cursor event racing a file swap does exactly this).
+			view.setItems([]);
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.playheadVisible).toBe(false);
+			expect(d.playheadVisibleReason).toBe("empty-outline");
+		});
+
+		it("disappears when the active heading is filtered out of the list", () => {
+			// Populated outline, but the named heading was filtered away —
+			// there is no row to point at, so there is nothing to draw.
+			view.setItems(HEADINGS.slice(50));
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.playheadVisible).toBe(false);
+			expect(d.playheadVisibleReason).toBe("active-row-not-rendered");
+		});
+
+		it("disappears on dispose and leaves no dot behind", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			const root = view.rootEl;
+			view.dispose();
+			expect(
+				root.classList.contains("glide-outline-root--playhead-visible"),
+			).toBe(false);
+		});
+
+		it("never writes an inline display — the root class owns visibility", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			expect(playhead()?.style.display).toBe("");
+			view.setInteractionState("expanded-pointer");
+			expect(playhead()?.style.display).toBe("");
 		});
 
 		it("is hidden from assistive tech and never announced", () => {
@@ -606,6 +702,360 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			expect(
 				view.listEl.querySelectorAll(".glide-outline-row").length,
 			).toBe(ROW_COUNT);
+		});
+	});
+
+	// ── §三 / §四: playhead geometry ────────────────────────────────
+
+	describe("playhead geometry (§三 / §四)", () => {
+		/**
+		 * §三 / §2.1: the reported bug. The playhead used `left: 0; right: 0`
+		 * with `justify-content: center`, so it spanned the whole editor pane
+		 * and drew its dot at the horizontal centre of the *document*.
+		 */
+		it("is exactly one rail wide, never the width of the root", () => {
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.playheadRailRight - d.playheadRailLeft).toBe(28);
+		});
+
+		it("anchors to whichever rail the outline is on", () => {
+			settings.position = "left";
+			view.applySettings();
+			expect(view.getActiveFollowDiagnostics().playheadHorizontalMode).toBe(
+				"left",
+			);
+			settings.position = "right";
+			view.applySettings();
+			expect(view.getActiveFollowDiagnostics().playheadHorizontalMode).toBe(
+				"right",
+			);
+		});
+
+		/**
+		 * §四: the drawn y and the targeted y come from ONE pass. Deriving
+		 * them separately is how the visible line and the scroll target
+		 * ended up disagreeing by the viewport's own inset.
+		 */
+		it("publishes the drawn position as a CSS variable", () => {
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.playheadViewportY).toBe(PLAYHEAD_Y);
+			expect(Number.isFinite(d.playheadRootY)).toBe(true);
+			expect(
+				view.rootEl.style.getPropertyValue("--glide-playhead-y"),
+			).toBe(`${d.playheadRootY}px`);
+		});
+
+		it("targets the same y it draws", () => {
+			followTo(60);
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.lastPlayheadY).toBe(d.playheadViewportY);
+		});
+
+		it("re-measures on resize and moves both coordinates together", () => {
+			const before = view.getActiveFollowDiagnostics();
+			defineNumber(view.viewportEl, "clientHeight", 600);
+			view.applySettings();
+			const after = view.getActiveFollowDiagnostics();
+			expect(after.playheadGeometryRefreshCount).toBeGreaterThan(
+				before.playheadGeometryRefreshCount,
+			);
+			expect(after.playheadViewportY).toBe(300);
+			expect(
+				view.rootEl.style.getPropertyValue("--glide-playhead-y"),
+			).toBe(`${after.playheadRootY}px`);
+		});
+
+		it("is not refreshed per animation frame", () => {
+			view.setActiveKey(keyAt(110));
+			const before =
+				view.getActiveFollowDiagnostics().playheadGeometryRefreshCount;
+			const frames = flushRaf();
+			expect(frames).toBeGreaterThan(2);
+			expect(
+				view.getActiveFollowDiagnostics().playheadGeometryRefreshCount,
+			).toBe(before);
+		});
+	});
+
+	// ── §六: exactly one active indicator ───────────────────────────
+
+	describe("single active indicator (§六)", () => {
+		const VISIBLE = "glide-outline-root--playhead-visible";
+
+		it("hands the accent to the playhead while collapsed", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			expect(view.rootEl.classList.contains(VISIBLE)).toBe(true);
+		});
+
+		it("hands it back to the row marker when the rail expands", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			view.setInteractionState("expanded-pointer");
+			expect(view.rootEl.classList.contains(VISIBLE)).toBe(false);
+		});
+
+		it("keeps the row's semantics either way", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf();
+			const active = view.listEl.querySelector(
+				".glide-outline-item.is-active",
+			);
+			expect(active?.getAttribute("aria-current")).toBe("true");
+			view.setInteractionState("expanded-pointer");
+			expect(
+				view.listEl.querySelector(".glide-outline-item.is-active"),
+			).toBe(active);
+			expect(active?.getAttribute("aria-current")).toBe("true");
+		});
+	});
+
+	// ── §七: continuous motion ──────────────────────────────────────
+
+	describe("continuous motion (§七)", () => {
+		/** Per-frame scroll deltas for one complete follow. */
+		function deltas(index: number, dt = 16): number[] {
+			view.setActiveKey(keyAt(index));
+			const out: number[] = [];
+			let previous = view.viewportEl.scrollTop;
+			for (let i = 0; i < 200 && rafQueue.length > 0; i++) {
+				const batch = rafQueue.splice(0, rafQueue.length);
+				clock += dt;
+				for (const cb of batch) cb(clock);
+				const now = view.viewportEl.scrollTop;
+				out.push(now - previous);
+				previous = now;
+			}
+			return out;
+		}
+
+		/**
+		 * §2.3: the reported stutter. An exponential approach decays toward
+		 * zero and stalls; the 700 ms watchdog then jumped the remainder.
+		 * The signature was a run of ~0 px frames followed by one large one.
+		 */
+		it("never stalls and then jumps", () => {
+			const moves = deltas(110).filter((d) => d !== 0);
+			expect(moves.length).toBeGreaterThan(3);
+			const last = moves[moves.length - 1];
+			const largest = Math.max(...moves);
+			// The final step is the SMALLEST of the run, not a leap.
+			expect(Math.abs(last)).toBeLessThanOrEqual(Math.abs(largest));
+			// No frame after the first may be more than double its
+			// predecessor — that is what a snap looks like numerically.
+			for (let i = 1; i < moves.length; i++) {
+				expect(Math.abs(moves[i])).toBeLessThanOrEqual(
+					Math.abs(moves[i - 1]) * 2 + 1,
+				);
+			}
+		});
+
+		it("decelerates monotonically — ease-out, never ease-in", () => {
+			const moves = deltas(110).filter((d) => d > 0.01);
+			// Allow the first frame to ramp in, then require decay.
+			for (let i = 2; i < moves.length; i++) {
+				expect(moves[i]).toBeLessThanOrEqual(moves[i - 1] + 0.01);
+			}
+		});
+
+		it("scales its duration with the distance travelled", () => {
+			view.setActiveKey(keyAt(5));
+			flushRaf(1);
+			const near = view.getActiveFollowDiagnostics().durationMs;
+			flushRaf();
+			mockViewport(0);
+			view.setActiveKey(keyAt(125));
+			flushRaf(1);
+			const far = view.getActiveFollowDiagnostics().durationMs;
+			expect(far).toBeGreaterThan(near);
+			expect(near).toBeGreaterThanOrEqual(180);
+			expect(far).toBeLessThanOrEqual(650);
+		});
+	});
+
+	// ── §八: retarget is a full restart ─────────────────────────────
+
+	describe("retarget lifecycle (§八)", () => {
+		it("re-bases start, clock and duration — not just the endpoint", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf(3);
+			const parked = view.viewportEl.scrollTop;
+			expect(parked).toBeGreaterThan(0);
+			view.setActiveKey(keyAt(110));
+			const d = view.getActiveFollowDiagnostics();
+			// The new curve starts from where the scroll actually IS.
+			expect(d.startScrollTop).toBeCloseTo(parked, 1);
+			expect(d.targetScrollTop).toBeCloseTo(centeredTarget(110), 1);
+			expect(d.sessionState).toBe("retargeting");
+		});
+
+		it("keeps exactly one session and one alignment", () => {
+			view.setActiveKey(keyAt(10));
+			flushRaf(3);
+			view.setActiveKey(keyAt(60));
+			flushRaf(3);
+			view.setActiveKey(keyAt(110));
+			flushRaf();
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.alignedCount).toBe(1);
+			expect(d.sessionState).toBe("idle");
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(110),
+				1,
+			);
+		});
+
+		it("matches the pending generation to the live session", () => {
+			view.setActiveKey(keyAt(110));
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.sessionGeneration).toBe(d.pendingGeneration);
+		});
+
+		it("clears pending only once the alignment lands", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2);
+			expect(view.getPendingActiveFollow()).not.toBeNull();
+			flushRaf();
+			expect(view.getPendingActiveFollow()).toBeNull();
+			// …and does not move again afterwards.
+			const settled = view.viewportEl.scrollTop;
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBe(settled);
+		});
+	});
+
+	// ── §九 / §十: geometry revision & spacer de-duplication ────────
+
+	describe("geometry revision (§九 / §十)", () => {
+		it("ignores a re-measure that changes nothing", () => {
+			const before = view.getActiveFollowDiagnostics();
+			view.applySettings();
+			const after = view.getActiveFollowDiagnostics();
+			expect(after.lastGeometryRevision).toBe(before.lastGeometryRevision);
+			expect(after.centerSpacerSkippedMutationCount).toBeGreaterThan(
+				before.centerSpacerSkippedMutationCount,
+			);
+		});
+
+		it("bumps the revision only when the spacers really move", () => {
+			const before = view.getActiveFollowDiagnostics();
+			defineNumber(view.viewportEl, "clientHeight", 600);
+			view.applySettings();
+			const after = view.getActiveFollowDiagnostics();
+			expect(after.lastGeometryRevision).toBeGreaterThan(
+				before.lastGeometryRevision,
+			);
+			expect(after.centerSpacerMutationCount).toBeGreaterThan(
+				before.centerSpacerMutationCount,
+			);
+		});
+
+		/**
+		 * §十: a no-op spacer write used to bump the revision, which
+		 * retargeted the live session every measure pass. That was the
+		 * layout jitter.
+		 */
+		it("does not disturb a running session with an idle re-measure", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(3);
+			const before = view.getActiveFollowDiagnostics();
+			view.applySettings();
+			const after = view.getActiveFollowDiagnostics();
+			expect(after.geometryRetargetCount).toBe(
+				before.geometryRetargetCount,
+			);
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(110),
+				1,
+			);
+		});
+
+		it("treats a sub-pixel target change as no change at all", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(3);
+			const before =
+				view.getActiveFollowDiagnostics()
+					.ignoredSubpixelTargetChangeCount;
+			// Same key, same geometry — the endpoint has not moved.
+			view.setActiveKey(keyAt(110));
+			expect(
+				view.getActiveFollowDiagnostics()
+					.ignoredSubpixelTargetChangeCount,
+			).toBeGreaterThan(before);
+		});
+	});
+
+	// ── §十一: final verification ───────────────────────────────────
+
+	describe("final verification (§十一)", () => {
+		it("verifies the landing and records the residual", () => {
+			followTo(60);
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.finalVerificationCount).toBeGreaterThan(0);
+			expect(d.finalResidualAfterWritePx).toBeLessThanOrEqual(TOLERANCE);
+			expect(d.sessionEndReason).toBe("aligned");
+		});
+
+		it("needs no correction when the browser keeps what was written", () => {
+			followTo(60);
+			expect(
+				view.getActiveFollowDiagnostics().finalCorrectionSessionCount,
+			).toBe(0);
+		});
+
+		it("corrects a clamped landing once — and never jumps", () => {
+			// Model a browser that refuses the last 3 px (a clamp), then
+			// relents. Only ONE correction session may be spent on it.
+			const target = centeredTarget(110);
+			let clamped = true;
+			let raw = view.viewportEl.scrollTop;
+			Object.defineProperty(view.viewportEl, "scrollTop", {
+				configurable: true,
+				get: () => raw,
+				set: (value: number) => {
+					raw = clamped && value > target - 3 ? target - 3 : value;
+				},
+			});
+			view.setActiveKey(keyAt(110));
+			flushRaf(200);
+			const mid = view.getActiveFollowDiagnostics();
+			expect(mid.finalCorrectionSessionCount).toBe(1);
+			clamped = false;
+			flushRaf(200);
+			const d = view.getActiveFollowDiagnostics();
+			// Still exactly one correction — never an unbounded retry loop.
+			expect(d.finalCorrectionSessionCount).toBe(1);
+			expect(d.sessionState).toBe("idle");
+			expect(d.snapCount).toBe(0);
+		});
+
+		it("only finishActiveFollowImmediately is allowed to snap", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2);
+			expect(view.getActiveFollowDiagnostics().snapCount).toBe(0);
+			view.finishActiveFollowImmediately();
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.snapCount).toBe(1);
+			expect(d.sessionEndReason).toBe("pointer-enter-snap");
+			expect(view.viewportEl.scrollTop).toBeCloseTo(
+				centeredTarget(110),
+				1,
+			);
+		});
+
+		/** §十二: pressed freezes — it must NOT snap under a held pointer. */
+		it("freezes rather than snapping while pressed", () => {
+			view.setActiveKey(keyAt(110));
+			flushRaf(2);
+			const parked = view.viewportEl.scrollTop;
+			view.setInteractionState("pressed");
+			expect(view.viewportEl.scrollTop).toBe(parked);
+			const d = view.getActiveFollowDiagnostics();
+			expect(d.snapCount).toBe(0);
+			expect(d.sessionEndReason).toBe("cancelled-pressed");
+			// The target survives for the next collapse.
+			expect(view.getPendingActiveFollow()?.key).toBe(keyAt(110));
 		});
 	});
 
