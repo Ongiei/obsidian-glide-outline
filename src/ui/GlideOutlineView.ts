@@ -22,6 +22,19 @@ function zeroRect(): Rect {
 	return { left: 0, top: 0, right: 0, bottom: 0 };
 }
 
+/**
+ * Cheap conservative gate for Obsidian's asynchronous MarkdownRenderer.
+ * Plain headings are byte-for-byte equivalent as text and do not need a
+ * component/render lifecycle. Ambiguous Markdown/Obsidian syntax stays on
+ * the full renderer path so rich labels preserve existing behaviour.
+ */
+export function headingNeedsMarkdownRenderer(source: string): boolean {
+	return (
+		/[*_~`[\]<>\\&$#%^|=@]/u.test(source) ||
+		/(?:https?:\/\/|www\.)/iu.test(source)
+	);
+}
+
 /** Monotonic id source for sr-only label elements (unique per window). */
 let a11yLabelSeq = 0;
 
@@ -964,6 +977,21 @@ export class GlideOutlineView {
 	/** Current overflow / scrollability of the outline viewport. */
 	getOverflowState(): OverflowState {
 		return this.overflowState;
+	}
+
+	/**
+	 * Cached scroll range for DOM-write callers that must not force a
+	 * layout/scroll-state flush in the middle of an animation frame.
+	 * `null` means the first measurement pass has not populated the cache.
+	 */
+	getCachedMaxScrollTop(): number | null {
+		if (
+			!Number.isFinite(this.cachedClientHeight) ||
+			!Number.isFinite(this.cachedScrollHeight)
+		) {
+			return null;
+		}
+		return Math.max(0, this.cachedScrollHeight - this.cachedClientHeight);
 	}
 
 	/** Viewport scroll metrics, for diagnostics. */
@@ -2184,7 +2212,10 @@ export class GlideOutlineView {
 		);
 
 		const settings = this.getSettings();
-		const rich = settings.renderMarkdown && !!this.handlers.renderLabel;
+		const rich =
+			settings.renderMarkdown &&
+			!!this.handlers.renderLabel &&
+			headingNeedsMarkdownRenderer(item.displaySource);
 		const content = rich ? item.displaySource : item.text;
 		if (record.renderedContent === content && record.renderedRich === rich) {
 			return;

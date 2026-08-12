@@ -9,7 +9,10 @@ import { ActiveHeadingTracker } from "./ActiveHeadingTracker";
 import type { EditorUpdateBridge } from "./EditorUpdateBridge";
 import { GlideOutlineView } from "../ui/GlideOutlineView";
 import { MagnificationController } from "../ui/MagnificationController";
-import { sameHeadingKeys } from "../utils/headingIdentity";
+import {
+	sameHeadingItems,
+	sameHeadingKeys,
+} from "../utils/headingIdentity";
 import { matchPreviewHeadings } from "../utils/previewHeadings";
 import { FULL_MOTION_STATE } from "../utils/motion";
 import { ScrollCorrector } from "./ScrollCorrector";
@@ -236,6 +239,12 @@ export class GlideOutlineController {
 	}
 
 	private setItems(items: HeadingItem[]): void {
+		// Editor-change fires for every body keystroke. Parsing the current
+		// text is cheap, but reconciling every row and scheduling a full
+		// offsetHeight sweep is not. If heading identity, content and line
+		// positions are all unchanged, the existing view/tracker snapshot is
+		// already authoritative and no downstream work is needed.
+		if (sameHeadingItems(items, this.items)) return;
 		const keysChanged = !sameHeadingKeys(items, this.items);
 		this.items = items;
 		// Always push to the view: even when identities are unchanged, line

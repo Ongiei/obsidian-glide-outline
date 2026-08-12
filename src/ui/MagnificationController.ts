@@ -423,6 +423,13 @@ export class MagnificationController {
 	 * is the ONLY value an outline scroll has to update: every cached row
 	 * center and envelope item rect lives in content space. */
 	private currentScrollTop = 0;
+	/**
+	 * Last scroll target issued by this controller. It advances immediately
+	 * on a write, while `currentScrollTop` advances when the browser reports
+	 * the resulting scroll event. Keeping the two roles separate lets
+	 * multiple writes accumulate even when events are coalesced or delayed.
+	 */
+	private commandedScrollTop = 0;
 	/** §四.2: >0 while we are inside our own scrollTop write, so the
 	 * scroll listener can classify a synchronous (reentrant) dispatch. */
 	private scrollTopWriteDepth = 0;
@@ -531,6 +538,11 @@ export class MagnificationController {
 		this.win = win;
 
 		const { hitZoneEl, listEl, rootEl, viewportEl } = view;
+		// Seed both observed and commanded scroll positions before any input
+		// can arrive. In particular, a wheel routed immediately after expand
+		// must build on the restored scroll position, not the field default 0.
+		this.currentScrollTop = viewportEl.scrollTop;
+		this.commandedScrollTop = this.currentScrollTop;
 
 		// Rail strip + real cards/markers: enter/move/leave. The motion
 		// corridor and the removed interaction surface are NOT interactive,
@@ -591,6 +603,7 @@ export class MagnificationController {
 				const previousScrollTop = this.currentScrollTop;
 				const delta = scrollTop - previousScrollTop;
 				this.currentScrollTop = scrollTop;
+				this.commandedScrollTop = scrollTop;
 				// §十: attribute the delta to whoever moved the scroller.
 				const source = this.classifyScrollSource();
 				if (measure && perf) {
@@ -1784,9 +1797,18 @@ export class MagnificationController {
 			}
 		}
 
-		// ---------------- WRITE PHASE (styles only) ----------------
+		// ---------------- WRITE PHASE ----------------
 		if (measure && perf) {
 			perf.markPhase("pureCalc", this.win.performance.now());
+		}
+		// Commit scrolling BEFORE the per-row transform writes. Chromium may
+		// synchronously settle pending styles when `scrollTop` is assigned;
+		// placing the scroller first prevents that settlement from charging
+		// this frame's 50–100 freshly written row transforms. Geometry still
+		// reacts through the scroll event on the next coordinated frame.
+		this.stepAutoScroll(settings);
+		if (measure && perf) {
+			perf.markPhase("autoScroll", this.win.performance.now());
 		}
 		let converging = false;
 		let writes = 0;
@@ -2013,16 +2035,10 @@ export class MagnificationController {
 		// Keep the loop alive until every displayed value converged.
 		if (converging) this.schedule("motionConverging");
 
-		// Pointer edge auto-scroll + pointer-follow share this frame.
-		// Scrolling shifts the cached geometry by delta (scroll handler),
-		// so the next frame sees correct centers without any rect reads.
-		this.stepAutoScroll(settings);
 		if (measure && perf) {
-			// §四: closing mark and frame close share one clock read; the
-			// remainder (RAF entry glue, the capture's own bookkeeping)
-			// lands in unattributedFrameJs and the two reconcile exactly.
+			// §四: close the frame; any small epilogue remainder lands in
+			// unattributedFrameJs and the exclusive phases still reconcile.
 			const frameEnd = this.win.performance.now();
-			perf.markPhase("autoScroll", frameEnd);
 			perf.endFrameAttribution(frameEnd);
 			// §九 IDLE FRAME DIAGNOSIS. Counted after the attribution
 			// window closes — this is the capture accounting for itself,
@@ -2506,23 +2522,39 @@ export class MagnificationController {
 		source: ScrollDeltaSource = "unknown",
 	): void {
 		const el = this.view.viewportEl;
-		const before = el.scrollTop;
+		// `scrollTop` is deliberately NOT read here. This write is ordered
+		// before the frame's transforms; a readback would still force Chromium
+		// to settle pending style/scroll state before the frame can continue.
+		// The scroll listener/rebuild path owns the authoritative DOM read,
+		// while this hot write uses the last commanded position and the view's
+		// already-measured range.
+		const before = this.commandedScrollTop;
+		const maxScrollTop = this.view.getCachedMaxScrollTop();
+		const requestedTarget = before + requestedDelta;
+		const target =
+			maxScrollTop === null
+				? requestedTarget
+				: Math.min(maxScrollTop, Math.max(0, requestedTarget));
+		const expectedDelta = target - before;
 		// §三: timing the write itself is DEEP-only; the mutation and
 		// boundary-clamp counters below stay on in both modes.
 		// §3.2: and only while the "scrollWrite" group is armed.
 		const timeWrite = perf?.deepScrollWriteActive === true && recordPhase;
 		const writeStart = timeWrite ? this.win.performance.now() : 0;
-		this.scrollTopWriteDepth++;
-		this.activeWriteSource = source;
-		try {
-			el.scrollTop = before + requestedDelta;
-		} finally {
-			this.scrollTopWriteDepth--;
-			this.activeWriteSource = null;
+		if (expectedDelta !== 0) {
+			this.commandedScrollTop = target;
+			this.scrollTopWriteDepth++;
+			this.activeWriteSource = source;
+			try {
+				el.scrollTop = target;
+			} finally {
+				this.scrollTopWriteDepth--;
+				this.activeWriteSource = null;
+			}
+			// §十: the browser may deliver the scroll event asynchronously —
+			// leave a short-lived note so that event still attributes to us.
+			this.scrollAttribution = { source, ttl: 2 };
 		}
-		// §十: the browser may deliver the scroll event asynchronously —
-		// leave a short-lived note so that event still attributes to us.
-		this.scrollAttribution = { source, ttl: 2 };
 		if (!perf) return;
 		if (timeWrite) {
 			perf.addPhaseSample(
@@ -2530,9 +2562,8 @@ export class MagnificationController {
 				this.win.performance.now() - writeStart,
 			);
 		}
-		const appliedDelta = el.scrollTop - before;
-		if (appliedDelta !== 0) perf.count("scrollTopMutationCount");
-		const boundaryClampedDelta = requestedDelta - appliedDelta;
+		if (expectedDelta !== 0) perf.count("scrollTopMutationCount");
+		const boundaryClampedDelta = requestedDelta - expectedDelta;
 		if (Math.abs(boundaryClampedDelta) > 0.5) {
 			perf.count("scrollBoundaryClampCount");
 		}
@@ -2775,6 +2806,7 @@ export class MagnificationController {
 		this.viewportTop = viewportRect.top;
 		this.viewportBottom = viewportRect.bottom;
 		this.currentScrollTop = this.view.viewportEl.scrollTop;
+		this.commandedScrollTop = this.currentScrollTop;
 		const children = this.view.listEl.children;
 		// Carry map: previous entries by element (single pass, O(n)).
 		const prevByEl = new Map<HTMLElement, CachedItem>();

@@ -313,4 +313,58 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 		// the autoScroll sub-phase decomposition.
 		expect(report.pluginPhases.scrollTopWrite.count).toBe(0);
 	});
+
+	it("does not read scrollTop back inside the auto-scroll write frame", () => {
+		let value = 200;
+		let getterReads = 0;
+		Object.defineProperty(view.viewportEl, "scrollTop", {
+			configurable: true,
+			get: () => {
+				getterReads++;
+				return value;
+			},
+			set: (next: number) => {
+				value = Math.min(MAX_SCROLL_TOP, Math.max(0, next));
+			},
+		});
+
+		pointer("pointerenter", 495);
+		pointer("pointermove", 495);
+		flushFrame(); // cache rebuild + dwell arm may read once
+		vi.advanceTimersByTime(AUTO_SCROLL_DWELL_MS + 10);
+		flushFrame(); // establishes the integrator time base
+		getterReads = 0;
+		vi.advanceTimersByTime(16);
+		flushFrame(); // transform writes + scrollTop assignment
+
+		expect(value).toBeGreaterThan(200);
+		expect(getterReads).toBe(0);
+	});
+
+	it("accumulates delayed scroll events from the restored scroll position", () => {
+		// The controller was constructed at scrollTop=200. Keep scroll events
+		// asynchronous (none dispatched here) and verify repeated frame writes
+		// build on the commanded target instead of restarting from 0 or 200.
+		let value = 200;
+		Object.defineProperty(view.viewportEl, "scrollTop", {
+			configurable: true,
+			get: () => value,
+			set: (next: number) => {
+				value = Math.min(MAX_SCROLL_TOP, Math.max(0, next));
+			},
+		});
+		pointer("pointerenter", 495);
+		pointer("pointermove", 495);
+		flushFrame();
+		vi.advanceTimersByTime(AUTO_SCROLL_DWELL_MS + 10);
+		flushFrame();
+		vi.advanceTimersByTime(16);
+		flushFrame();
+		const afterFirstWrite = value;
+		vi.advanceTimersByTime(16);
+		flushFrame();
+
+		expect(afterFirstWrite).toBeGreaterThan(200);
+		expect(value).toBeGreaterThan(afterFirstWrite);
+	});
 });
