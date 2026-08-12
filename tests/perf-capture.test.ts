@@ -279,3 +279,65 @@ describe("PerfCapture", () => {
 		expect(report.frames.maxSuspendedGapMs).toBe(0);
 	});
 });
+
+describe("PerfCapture abort (§七 dev-mode shutdown)", () => {
+	it("stops an active capture, disconnects the observer, and discards the report", () => {
+		const onObserve = vi.fn();
+		const onDisconnect = vi.fn();
+		const win = fakeWin({ onObserve, onDisconnect });
+		const perf = new PerfCapture();
+		perf.start(win);
+		perf.recordFrame(0);
+		perf.recordFrame(16);
+		expect(onObserve).toHaveBeenCalledTimes(1);
+		// Abort: no report, but the longtask observer is torn down so the
+		// capture has zero standing cost (matching stop()).
+		perf.abort();
+		expect(perf.active).toBe(false);
+		expect(onDisconnect).toHaveBeenCalledTimes(1);
+		// A second stop finds nothing left to report and disconnects nothing.
+		expect(perf.stop(win)).toBeNull();
+		expect(onDisconnect).toHaveBeenCalledTimes(1);
+	});
+
+	it("is a no-op when nothing is running", () => {
+		const onDisconnect = vi.fn();
+		fakeWin({ onDisconnect }); // nothing is observed until a capture starts
+		const perf = new PerfCapture();
+		expect(() => perf.abort()).not.toThrow();
+		expect(perf.active).toBe(false);
+		expect(onDisconnect).not.toHaveBeenCalled();
+	});
+
+	it("clears every deep/intent flag so no hot path keeps sampling", () => {
+		const win = fakeWin();
+		const perf = new PerfCapture();
+		perf.start(win, "deep");
+		expect(perf.deepActive).toBe(true);
+		expect(perf.deepFrameCalcActive).toBe(true);
+		expect(perf.deepScrollWriteActive).toBe(true);
+		expect(perf.deepScrollEventActive).toBe(true);
+		expect(perf.deepAutoScrollIntentActive).toBe(true);
+		perf.abort();
+		expect(perf.deepActive).toBe(false);
+		expect(perf.deepFrameCalcActive).toBe(false);
+		expect(perf.deepScrollWriteActive).toBe(false);
+		expect(perf.deepScrollEventActive).toBe(false);
+		expect(perf.deepAutoScrollIntentActive).toBe(false);
+	});
+
+	it("can be re-armed cleanly after an abort (no stuck state)", () => {
+		const win = fakeWin();
+		const perf = new PerfCapture();
+		perf.start(win);
+		perf.recordFrame(0);
+		perf.abort();
+		expect(perf.stop(win)).toBeNull(); // nothing to report after abort
+		// Re-arm and capture fresh.
+		perf.start(win);
+		perf.recordFrame(0);
+		perf.recordFrame(16);
+		const report = perf.stop(win)!;
+		expect(report.frames.count).toBe(1);
+	});
+});

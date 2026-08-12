@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	buildHeadingItems,
 	normalizeHeadingText,
+	sameHeadingItems,
 	sameHeadingKeys,
 } from "../src/utils/headingIdentity";
 
@@ -19,6 +20,19 @@ describe("buildHeadingItems — displaySource", () => {
 		const a = buildHeadingItems([{ level: 1, text: "Intro", line: 0 }]);
 		const b = buildHeadingItems([{ level: 1, text: "Intro", line: 42 }]);
 		expect(sameHeadingKeys(a, b)).toBe(true);
+		expect(sameHeadingItems(a, b)).toBe(false);
+	});
+
+	it("detects snapshots that are fully interchangeable", () => {
+		const a = buildHeadingItems([
+			{ level: 1, text: "Intro", line: 0 },
+			{ level: 2, text: "Details", line: 4 },
+		]);
+		const b = buildHeadingItems([
+			{ level: 1, text: "Intro", line: 0 },
+			{ level: 2, text: "Details", line: 4 },
+		]);
+		expect(sameHeadingItems(a, b)).toBe(true);
 	});
 
 	it("duplicate headings get distinct occurrence keys", () => {

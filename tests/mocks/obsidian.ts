@@ -45,6 +45,22 @@ export class Component {
 	unload(): void {}
 }
 
+/**
+ * Obsidian's toast. The tests care about *whether* the plugin told the
+ * user something (e.g. that developer mode revoked a running capture), so
+ * every message is recorded on a static list the suite can read and reset.
+ */
+export class Notice {
+	static messages: string[] = [];
+	constructor(message: string) {
+		Notice.messages.push(message);
+	}
+	setMessage(): this {
+		return this;
+	}
+	hide(): void {}
+}
+
 export class Plugin {}
 export class MarkdownView {}
 

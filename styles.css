@@ -114,10 +114,18 @@
 	display: none;
 }
 
+/* §十: deliberately NO `margin-block: auto`.
+
+   Auto block margins on a flex item inside a scroll container re-centre the
+   whole list whenever the content is shorter than the viewport — and the
+   centre spacers already own that job. The two fought each other: a spacer
+   write changed the content height, the auto margin re-split the leftover
+   space, and the list shifted underneath a follow session that had already
+   computed its target. That was the layout jitter. Vertical placement is
+   the spacers' responsibility, and only theirs. */
 :where([data-glide-outline-owner]) .glide-outline-list {
 	display: flex;
 	flex-direction: column;
-	margin-block: auto; /* safe vertical centering that keeps overflow scrollable */
 	pointer-events: none;
 }
 
@@ -359,13 +367,15 @@
 	border-radius: 50%;
 }
 
-:where([data-glide-outline-owner]) .glide-outline-item.is-active .glide-outline-marker::before {
-	background-color: var(--interactive-accent);
-}
+/* The accent color itself is asserted once, at the end of the sheet, in
+   the "Active marker accent" block — later than every generic marker,
+   level and hover rule, so nothing downstream can quietly win the
+   cascade. Only the geometry of the active dot lives here. */
 
-/* Active dot: accent + slight scale. `scale` is a paint-only transform on
-   an absolutely positioned pseudo-element — layout size is unchanged. */
-:where([data-glide-outline-owner]) .glide-outline-root--marker-dot .glide-outline-item.is-active .glide-outline-marker::before {
+/* Active dot: slight scale. `scale` is a paint-only transform on an
+   absolutely positioned pseudo-element — layout size is unchanged. */
+:where([data-glide-outline-owner]) .glide-outline-root--marker-dot .glide-outline-item.is-active .glide-outline-marker::before,
+:where([data-glide-outline-owner]) .glide-outline-root--marker-dot .glide-outline-item[aria-current="true"] .glide-outline-marker::before {
 	scale: 1.3;
 }
 
@@ -587,6 +597,164 @@
 
 :where([data-glide-outline-owner]) .glide-outline-item.is-active:hover .glide-outline-label {
 	color: var(--interactive-accent);
+}
+
+/* --------------------------------------------------------------------------
+   Active marker accent (§十).
+
+   The active heading's marker — line OR dot — is the one thing in the rail
+   that must always read as "you are here", so it is stated last, after
+   every generic marker rule, every per-level ramp and every hover rule.
+   Placement is the whole point: `:where(...)` contributes ZERO
+   specificity, so an earlier accent declaration could be tied by any
+   later same-weight rule (the quiet `--text-faint` base, the dot geometry
+   block, a hover treatment) and lose on source order alone. Declaring it
+   here means no rule in this sheet comes after it.
+
+   `aria-current="true"` is carried alongside `.is-active` because the two
+   are written together in TS; matching both means a missed class toggle
+   can never leave the marker looking inactive while the DOM says
+   otherwise.
+
+   `opacity: 1` is restated so the accent can never be diluted by an
+   inherited fade, and the color is always `var(--interactive-accent)` —
+   the user's own Obsidian accent, never a hard-coded hex, and never
+   forced with `!important`.
+
+   §三 / §五: this block is deliberately NOT qualified by `.is-expanded`.
+   In the collapsed rail the active row sits *under* the fixed playhead by
+   construction, so the two indicators coincide rather than compete —
+   and weakening these selectors would reopen the cascade hole that the
+   active-marker guard exists to close. */
+:where([data-glide-outline-owner]) .glide-outline-item.is-active .glide-outline-marker::before,
+:where([data-glide-outline-owner]) .glide-outline-item[aria-current="true"] .glide-outline-marker::before,
+:where([data-glide-outline-owner]) .glide-outline-root--marker-dot .glide-outline-item.is-active .glide-outline-marker::before,
+:where([data-glide-outline-owner]) .glide-outline-root--marker-dot .glide-outline-item[aria-current="true"] .glide-outline-marker::before,
+:where([data-glide-outline-owner]) .glide-outline-root.is-expanded .glide-outline-item.is-active:hover .glide-outline-marker::before,
+:where([data-glide-outline-owner]) .glide-outline-root.is-expanded .glide-outline-item[aria-current="true"]:hover .glide-outline-marker::before,
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item.is-active:focus-visible .glide-outline-marker::before,
+:where([data-glide-outline-owner]) .glide-outline-root button.glide-outline-item[aria-current="true"]:focus-visible .glide-outline-marker::before {
+	background-color: var(--interactive-accent);
+	opacity: 1;
+}
+
+/* --------------------------------------------------------------------------
+   §六: ONE active indicator at a time.
+
+   While the fixed playhead is the indicator (collapsed, with a real active
+   row), the row's own marker steps back to the quiet base colour and its
+   normal size. Otherwise both painted the accent at once: the playhead
+   parked at the centre and the active row's dot sliding toward it, which
+   reads as a duplicated, doubled marker for the whole length of the scroll
+   — they only coincide at the very end.
+
+   This is the ONE rule in the sheet allowed to outrank the active-accent
+   block above, and only because it is the state where that block's premise
+   (the row marker IS the indicator) is false. It is scoped to
+   `--playhead-visible`, so the moment the rail expands the accent block
+   takes over again unchanged. `.is-active` / `aria-current` stay on the
+   element throughout — this is presentation only, never semantics.
+   -------------------------------------------------------------------------- */
+:where([data-glide-outline-owner])
+	.glide-outline-root--playhead-visible
+	.glide-outline-item.is-active
+	.glide-outline-marker::before,
+:where([data-glide-outline-owner])
+	.glide-outline-root--playhead-visible
+	.glide-outline-item[aria-current="true"]
+	.glide-outline-marker::before {
+	background-color: var(--text-faint);
+	scale: 1;
+}
+
+/* --------------------------------------------------------------------------
+   §三 / §四 / §五: Fixed centre playhead.
+
+   It lives in the root rather than the scroll viewport so it never moves
+   with the content. But the root spans the whole editor pane, and the first
+   version stretched the playhead across all of it — `left: 0; right: 0;
+   justify-content: center` — which centred the dot horizontally in the
+   *editor*, painting a stray accent mark in the middle of the user's prose.
+   It is now confined to the marker rail: exactly one rail wide, anchored to
+   the rail-facing edge, with the marker at the same 9px inset every other
+   marker uses. Nothing is ever drawn outside the rail.
+
+   §四: the vertical position comes from `--glide-playhead-y` (root space,
+   written by refreshCenterGeometry) instead of a bare `top: 50%`. The scroll
+   viewport is inset inside the root, so the root's midpoint is NOT the
+   viewport's midpoint — and the line the user sees has to agree with the
+   number the scroll targets are computed from. The 50% fallback only applies
+   before the first measurement.
+
+   §五: visibility is owned entirely by `--playhead-visible` on the root; no
+   inline `display` is ever written. pointer-events: none, aria-hidden, no
+   tooltip, no hit area.
+   -------------------------------------------------------------------------- */
+:where([data-glide-outline-owner]) .glide-outline-playhead {
+	position: absolute;
+	display: none;
+	top: var(--glide-playhead-y, 50%);
+	width: var(--glide-rail-width, 28px);
+	height: 0;
+	pointer-events: none;
+	z-index: 25;
+	transform: translateY(-50%);
+}
+
+:where([data-glide-outline-owner])
+	.glide-outline-root--playhead-visible
+	.glide-outline-playhead {
+	display: block;
+}
+
+:where([data-glide-outline-owner]) .glide-outline-root--right .glide-outline-playhead {
+	right: 0;
+	left: auto;
+}
+
+:where([data-glide-outline-owner]) .glide-outline-root--left .glide-outline-playhead {
+	left: 0;
+	right: auto;
+}
+
+:where([data-glide-outline-owner]) .glide-outline-playhead-marker {
+	position: absolute;
+	top: 0;
+	translate: 0 -50%;
+	display: block;
+	background-color: var(--interactive-accent);
+	opacity: 1;
+	transition: opacity 120ms ease;
+}
+
+/* Same 9px rail inset as every row marker, so the playhead sits exactly on
+   the line the markers travel along. */
+:where([data-glide-outline-owner]) .glide-outline-root--right .glide-outline-playhead-marker {
+	right: 9px;
+}
+
+:where([data-glide-outline-owner]) .glide-outline-root--left .glide-outline-playhead-marker {
+	left: 9px;
+}
+
+/* Dot mode: a regular dot at its active size (6px x 1.3). */
+:where([data-glide-outline-owner]) .glide-outline-root--marker-dot .glide-outline-playhead-marker {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+}
+
+/* Line mode: same base length and thickness as a regular line. */
+:where([data-glide-outline-owner]) .glide-outline-root:not(.glide-outline-root--marker-dot) .glide-outline-playhead-marker {
+	width: 20px;
+	height: 2px;
+	border-radius: 2px;
+}
+
+/* §六: center spacers — invisible, non-interactive, just scroll range. */
+:where([data-glide-outline-owner]) .glide-outline-center-spacer {
+	flex: 0 0 auto;
+	pointer-events: none;
 }
 
 /* --------------------------------------------------------------------------

@@ -45,6 +45,32 @@ export function sameHeadingKeys(
 	return true;
 }
 
+/**
+ * True when both heading snapshots are fully interchangeable, including
+ * positional and presentation data. This is stricter than stable identity:
+ * callers may skip every downstream view/tracker update only in this case.
+ */
+export function sameHeadingItems(
+	a: readonly HeadingItem[],
+	b: readonly HeadingItem[],
+): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		const left = a[i];
+		const right = b[i];
+		if (
+			left.key !== right.key ||
+			left.level !== right.level ||
+			left.text !== right.text ||
+			left.displaySource !== right.displaySource ||
+			left.line !== right.line
+		) {
+			return false;
+		}
+	}
+	return true;
+}
+
 function clampLevel(level: number): number {
 	if (!Number.isFinite(level)) return 1;
 	return Math.min(6, Math.max(1, Math.round(level)));

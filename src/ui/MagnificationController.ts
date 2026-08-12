@@ -18,6 +18,10 @@ import {
 } from "../utils/wheelRouting";
 import { DisposableStore } from "../utils/disposable";
 import {
+	markColdStart,
+	noteColdStartInteraction,
+} from "../core/ColdStartTrace";
+import {
 	bridgeRectFor,
 	emptyRect,
 	pointInEnvelope,
@@ -53,7 +57,10 @@ import type { Diagnostics, ScrollDeltaSource } from "../core/Diagnostics";
 import type { PerfCapture, PerfCounters } from "../core/PerfCapture";
 import type { HeadingItem } from "../model/HeadingItem";
 import type { GlideOutlineSettings } from "../settings";
-import type { GlideOutlineView } from "./GlideOutlineView";
+import type {
+	GlideOutlineView,
+	OutlineInteractionState,
+} from "./GlideOutlineView";
 
 interface CachedItem {
 	el: HTMLElement;
@@ -416,6 +423,13 @@ export class MagnificationController {
 	 * is the ONLY value an outline scroll has to update: every cached row
 	 * center and envelope item rect lives in content space. */
 	private currentScrollTop = 0;
+	/**
+	 * Last scroll target issued by this controller. It advances immediately
+	 * on a write, while `currentScrollTop` advances when the browser reports
+	 * the resulting scroll event. Keeping the two roles separate lets
+	 * multiple writes accumulate even when events are coalesced or delayed.
+	 */
+	private commandedScrollTop = 0;
 	/** §四.2: >0 while we are inside our own scrollTop write, so the
 	 * scroll listener can classify a synchronous (reentrant) dispatch. */
 	private scrollTopWriteDepth = 0;
@@ -524,6 +538,11 @@ export class MagnificationController {
 		this.win = win;
 
 		const { hitZoneEl, listEl, rootEl, viewportEl } = view;
+		// Seed both observed and commanded scroll positions before any input
+		// can arrive. In particular, a wheel routed immediately after expand
+		// must build on the restored scroll position, not the field default 0.
+		this.currentScrollTop = viewportEl.scrollTop;
+		this.commandedScrollTop = this.currentScrollTop;
 
 		// Rail strip + real cards/markers: enter/move/leave. The motion
 		// corridor and the removed interaction surface are NOT interactive,
@@ -584,6 +603,7 @@ export class MagnificationController {
 				const previousScrollTop = this.currentScrollTop;
 				const delta = scrollTop - previousScrollTop;
 				this.currentScrollTop = scrollTop;
+				this.commandedScrollTop = scrollTop;
 				// §十: attribute the delta to whoever moved the scroller.
 				const source = this.classifyScrollSource();
 				if (measure && perf) {
@@ -633,8 +653,15 @@ export class MagnificationController {
 				) {
 					this.anchorScrollStale = true;
 				}
-				// User is scrolling the outline — pause active-heading follow.
-				this.view.setFollowEnabled(false);
+				// Only a USER scroll pauses follow. The active-follow's own
+				// scrollTop write fires this handler synchronously, and
+				// pausing on it would lock follow off after the first
+				// positioning — syncExpanded only re-enables it on the
+				// next pointer move, which may never come if the user is
+				// scrolling the editor, not the outline.
+				if (source === "external") {
+					this.view.setFollowEnabled(false);
+				}
 				const scheduleStart = measureDeep
 					? this.win.performance.now()
 					: 0;
@@ -729,6 +756,9 @@ export class MagnificationController {
 		this.scrollAttribution = { source: reason, ttl: 3 };
 		if (reason === "file-change") this.fileChangeTtl = 3;
 		else this.modeChangeTtl = 3;
+		// §四: a file/mode swap can land on the same active heading with a
+		// different row offset — re-center it (no-op unless collapsed).
+		this.view.requestActiveFollow(reason);
 	}
 
 	dispose(): void {
@@ -758,6 +788,10 @@ export class MagnificationController {
 	}
 
 	private onPointerEnter = (event: PointerEvent): void => {
+		// §十二: the first pointer that reaches the rail is the moment the
+		// cold-start trace has been waiting for — an untouched outline is
+		// idle, not fast, so stability is only judged from here on.
+		noteColdStartInteraction("firstPointerEnter");
 		// §十: is this a FRESH gesture, or a re-entry from a transparent
 		// gap? `pointerenter` fires on the rail AND on the list, so gliding
 		// off a card into the gap and onto the next one re-fires it several
@@ -1161,6 +1195,7 @@ export class MagnificationController {
 		};
 		// Stop ALL scroll intents while the target is held (§十一).
 		this.pressed = pressed;
+		this.view.setInteractionState("pressed");
 		this.resetAllScrollIntent("pressed");
 		// Section 12: freezing is structural — the frame loop is suspended
 		// while pressed (schedule() refuses, frame() early-returns), and no
@@ -1179,6 +1214,9 @@ export class MagnificationController {
 		const pressed = this.pressed;
 		if (!pressed || event.pointerId !== pressed.pointerId) return;
 		this.pressed = null;
+		// §四: press released — fall back to the ambient pointer/keyboard
+		// state (still expanded while the pointer stays over the outline).
+		this.view.setInteractionState(this.currentInteractionState());
 		if (pressed.captured) {
 			try {
 				pressed.captured.releasePointerCapture(event.pointerId);
@@ -1254,6 +1292,8 @@ export class MagnificationController {
 			}
 		}
 		this.pressed = null;
+		// §四: press cleared — reflect the ambient interaction state.
+		this.view.setInteractionState(this.currentInteractionState());
 	}
 
 	private cancelCollapse(): void {
@@ -1263,15 +1303,39 @@ export class MagnificationController {
 		}
 	}
 
+	/**
+	 * §四: the outline's interaction state as the view should see it.
+	 * `pressed` and pointer hover both imply the user is driving, so both
+	 * suppress active-follow; a lone keyboard focus is its own variant.
+	 */
+	private currentInteractionState(): OutlineInteractionState {
+		if (this.pressed) return "pressed";
+		if (this.pointerExpanded) return "expanded-pointer";
+		if (this.focusExpanded) return "expanded-keyboard";
+		return "collapsed";
+	}
+
 	private syncExpanded(): void {
 		const expanded = this.isExpanded();
+		const state = this.currentInteractionState();
 		if (expanded === this.view.isExpanded()) {
 			// Still update follow state: pointer inside ⇒ follow paused.
 			this.view.setFollowEnabled(!expanded);
+			this.view.setInteractionState(state);
 			return;
 		}
+		// §十二: the first real reveal. Recorded before the write so the
+		// milestone brackets the expansion rather than trailing it.
+		if (expanded) noteColdStartInteraction("firstExpand");
+		// §十一: snap the newest active heading to the centre BEFORE the
+		// rail expands. The user must see the current heading the instant
+		// the cards appear — never a stale row that then slides into place
+		// under the pointer, and never magnification spinning up around
+		// the wrong heading.
+		if (expanded) this.view.finishActiveFollowImmediately();
 		this.view.setExpanded(expanded);
 		this.view.setFollowEnabled(!expanded);
+		this.view.setInteractionState(state);
 		if (!expanded) {
 			this.cancelFrame();
 			this.resetAllScrollIntent("collapsed");
@@ -1284,6 +1348,9 @@ export class MagnificationController {
 			this.activeRange = emptyActiveRange();
 			this.windowCheckPending = false;
 			this.lastMotionTime = Number.NaN;
+			// §四: now collapsed — pre-position the active heading so the
+			// next expand starts already centred on it.
+			this.view.requestActiveFollow("collapse");
 		} else {
 			// §七: expanding refreshes the envelope on demand; the geometry
 			// cache stays valid (row layout is expansion-invariant).
@@ -1730,9 +1797,18 @@ export class MagnificationController {
 			}
 		}
 
-		// ---------------- WRITE PHASE (styles only) ----------------
+		// ---------------- WRITE PHASE ----------------
 		if (measure && perf) {
 			perf.markPhase("pureCalc", this.win.performance.now());
+		}
+		// Commit scrolling BEFORE the per-row transform writes. Chromium may
+		// synchronously settle pending styles when `scrollTop` is assigned;
+		// placing the scroller first prevents that settlement from charging
+		// this frame's 50–100 freshly written row transforms. Geometry still
+		// reacts through the scroll event on the next coordinated frame.
+		this.stepAutoScroll(settings);
+		if (measure && perf) {
+			perf.markPhase("autoScroll", this.win.performance.now());
 		}
 		let converging = false;
 		let writes = 0;
@@ -1875,6 +1951,17 @@ export class MagnificationController {
 				dirtyAdded++;
 			}
 		}
+		// §十三: first-use milestones, read off counters the write phase
+		// already produced. Two optional-chained no-ops per frame when no
+		// trace is armed — the promotion logic itself is untouched.
+		if (promotedShiftLayers > 0) {
+			markColdStart("firstShiftLayerPromotion");
+			noteColdStartInteraction("firstMotionFrame");
+		}
+		if (promotedScaleLayers > 0) {
+			markColdStart("firstScaleLayerPromotion");
+			noteColdStartInteraction("firstMotionFrame");
+		}
 		if (measure && perf) {
 			perf.markPhase("styleWrite", this.win.performance.now());
 			// §十四 range statistics. WRITE range = rows still dirty
@@ -1948,16 +2035,10 @@ export class MagnificationController {
 		// Keep the loop alive until every displayed value converged.
 		if (converging) this.schedule("motionConverging");
 
-		// Pointer edge auto-scroll + pointer-follow share this frame.
-		// Scrolling shifts the cached geometry by delta (scroll handler),
-		// so the next frame sees correct centers without any rect reads.
-		this.stepAutoScroll(settings);
 		if (measure && perf) {
-			// §四: closing mark and frame close share one clock read; the
-			// remainder (RAF entry glue, the capture's own bookkeeping)
-			// lands in unattributedFrameJs and the two reconcile exactly.
+			// §四: close the frame; any small epilogue remainder lands in
+			// unattributedFrameJs and the exclusive phases still reconcile.
 			const frameEnd = this.win.performance.now();
-			perf.markPhase("autoScroll", frameEnd);
 			perf.endFrameAttribution(frameEnd);
 			// §九 IDLE FRAME DIAGNOSIS. Counted after the attribution
 			// window closes — this is the capture accounting for itself,
@@ -2361,6 +2442,8 @@ export class MagnificationController {
 							: "kinetic",
 				);
 				perf?.count("autoScrollFrameCount");
+				// §十二: the outline scrolled itself under the pointer.
+				noteColdStartInteraction("firstAutoScrollFrame");
 				perf?.addAutoScrollSample(combined, integ.appliedVelocity);
 				perf?.addCombinedIntentSample(combined);
 				perf?.addAppliedVelocitySample(integ.appliedVelocity);
@@ -2439,23 +2522,39 @@ export class MagnificationController {
 		source: ScrollDeltaSource = "unknown",
 	): void {
 		const el = this.view.viewportEl;
-		const before = el.scrollTop;
+		// `scrollTop` is deliberately NOT read here. This write is ordered
+		// before the frame's transforms; a readback would still force Chromium
+		// to settle pending style/scroll state before the frame can continue.
+		// The scroll listener/rebuild path owns the authoritative DOM read,
+		// while this hot write uses the last commanded position and the view's
+		// already-measured range.
+		const before = this.commandedScrollTop;
+		const maxScrollTop = this.view.getCachedMaxScrollTop();
+		const requestedTarget = before + requestedDelta;
+		const target =
+			maxScrollTop === null
+				? requestedTarget
+				: Math.min(maxScrollTop, Math.max(0, requestedTarget));
+		const expectedDelta = target - before;
 		// §三: timing the write itself is DEEP-only; the mutation and
 		// boundary-clamp counters below stay on in both modes.
 		// §3.2: and only while the "scrollWrite" group is armed.
 		const timeWrite = perf?.deepScrollWriteActive === true && recordPhase;
 		const writeStart = timeWrite ? this.win.performance.now() : 0;
-		this.scrollTopWriteDepth++;
-		this.activeWriteSource = source;
-		try {
-			el.scrollTop = before + requestedDelta;
-		} finally {
-			this.scrollTopWriteDepth--;
-			this.activeWriteSource = null;
+		if (expectedDelta !== 0) {
+			this.commandedScrollTop = target;
+			this.scrollTopWriteDepth++;
+			this.activeWriteSource = source;
+			try {
+				el.scrollTop = target;
+			} finally {
+				this.scrollTopWriteDepth--;
+				this.activeWriteSource = null;
+			}
+			// §十: the browser may deliver the scroll event asynchronously —
+			// leave a short-lived note so that event still attributes to us.
+			this.scrollAttribution = { source, ttl: 2 };
 		}
-		// §十: the browser may deliver the scroll event asynchronously —
-		// leave a short-lived note so that event still attributes to us.
-		this.scrollAttribution = { source, ttl: 2 };
 		if (!perf) return;
 		if (timeWrite) {
 			perf.addPhaseSample(
@@ -2463,9 +2562,8 @@ export class MagnificationController {
 				this.win.performance.now() - writeStart,
 			);
 		}
-		const appliedDelta = el.scrollTop - before;
-		if (appliedDelta !== 0) perf.count("scrollTopMutationCount");
-		const boundaryClampedDelta = requestedDelta - appliedDelta;
+		if (expectedDelta !== 0) perf.count("scrollTopMutationCount");
+		const boundaryClampedDelta = requestedDelta - expectedDelta;
 		if (Math.abs(boundaryClampedDelta) > 0.5) {
 			perf.count("scrollBoundaryClampCount");
 		}
@@ -2699,6 +2797,7 @@ export class MagnificationController {
 	 */
 	private rebuildCache(): void {
 		this.cacheDirty = false;
+		markColdStart("firstGeometryBuild"); // §十三
 		this.perf?.count("geometryRebuildCount");
 		this.perf?.countRebuildReason(this.cacheDirtyReason);
 		// Viewport bounds are cached here (not per frame) — they only move
@@ -2707,6 +2806,7 @@ export class MagnificationController {
 		this.viewportTop = viewportRect.top;
 		this.viewportBottom = viewportRect.bottom;
 		this.currentScrollTop = this.view.viewportEl.scrollTop;
+		this.commandedScrollTop = this.currentScrollTop;
 		const children = this.view.listEl.children;
 		// Carry map: previous entries by element (single pass, O(n)).
 		const prevByEl = new Map<HTMLElement, CachedItem>();
@@ -2821,6 +2921,7 @@ export class MagnificationController {
 	 */
 	private rebuildEnvelope(): void {
 		this.envelopeDirty = false;
+		markColdStart("firstEnvelopeBuild"); // §十三
 		let start = this.activeRange.start;
 		let end = this.activeRange.end;
 		if (this.cache.length === 0) {

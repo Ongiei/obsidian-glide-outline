@@ -7,6 +7,7 @@ import {
 	EDITOR_JUMP_GUARD_MS,
 	JUMP_MAX_LOCK_MS,
 	JUMP_SETTLE_MS,
+	VIEWPORT_INTENT_TTL_MS,
 } from "../src/core/ActiveHeadingTracker";
 import type { EditorUpdateSummary } from "../src/core/EditorUpdateBridge";
 import { OWNER_ATTR, OWNER_VALUE } from "../src/ui/mount";
@@ -167,6 +168,135 @@ describe("ActiveHeadingTracker hybrid model (P0-2)", () => {
 		expect(tracker.getSource()).toBe("cursor");
 		flushFrame();
 		expect(activeKeys.at(-1)).toBe(ITEMS[2].key);
+	});
+
+	// ------------------------------------------------------------------
+	// §三 hybrid model: an EXPLICIT user scroll gesture arms a viewport
+	// intent that the next scroll consumes — the only way a bare scroll
+	// may flip the editor source cursor→viewport.
+	// ------------------------------------------------------------------
+
+	it("an explicit wheel gesture flips the editor source cursor→viewport", () => {
+		state.cursorLine = 25; // Gamma via the cursor rule
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		flushFrame();
+		expect(tracker.getSource()).toBe("cursor");
+		expect(activeKeys.at(-1)).toBe(ITEMS[2].key);
+
+		// Wheel WITHOUT moving the caret arms the intent…
+		contentEl.dispatchEvent(new Event("wheel", { bubbles: true }));
+		// …and the scroll it triggers consumes it → follow the viewport.
+		scroller.scrollTop = 0; // activation 20 → Alpha (top 0)
+		tracker.handleEditorUpdate(update({ viewportChanged: true }));
+		expect(tracker.getSource()).toBe("viewport");
+		flushFrame();
+		expect(activeKeys.at(-1)).toBe(ITEMS[0].key);
+	});
+
+	it("an armed viewport intent expires and no longer flips the source", () => {
+		state.cursorLine = 25;
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		flushFrame();
+		expect(tracker.getSource()).toBe("cursor");
+
+		contentEl.dispatchEvent(new Event("wheel", { bubbles: true }));
+		vi.advanceTimersByTime(VIEWPORT_INTENT_TTL_MS + 10); // disarms
+		scroller.scrollTop = 0;
+		tracker.handleEditorUpdate(update({ viewportChanged: true }));
+		expect(tracker.getSource()).toBe("cursor"); // stale intent ignored
+	});
+
+	it("a real caret move disarms a pending viewport intent", () => {
+		state.cursorLine = 25;
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		flushFrame();
+		// Arm a wheel intent, then move the caret before any scroll consumes it.
+		contentEl.dispatchEvent(new Event("wheel", { bubbles: true }));
+		state.cursorLine = 12; // Beta
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		expect(tracker.getSource()).toBe("cursor");
+		// A later bare scroll must NOT resurrect the disarmed intent.
+		scroller.scrollTop = 0;
+		tracker.handleEditorUpdate(update({ viewportChanged: true }));
+		expect(tracker.getSource()).toBe("cursor");
+		flushFrame();
+		expect(activeKeys.at(-1)).toBe(ITEMS[1].key);
+	});
+
+	it("a bare geometry change never flips cursor→viewport", () => {
+		state.cursorLine = 25;
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		flushFrame();
+		// A layout shift / re-measure carries no user intent.
+		scroller.scrollTop = 0;
+		tracker.handleEditorUpdate(update({ geometryChanged: true }));
+		expect(tracker.getSource()).toBe("cursor");
+	});
+
+	it("an explicit user scroll during a jump interrupts the lock", () => {
+		tracker.beginJump(ITEMS[2].key);
+		flushFrame();
+		expect(tracker.getSource()).toBe("jump");
+		expect(activeKeys.at(-1)).toBe(ITEMS[2].key);
+		// The user grabs the wheel mid-jump → arm, next scroll breaks it.
+		contentEl.dispatchEvent(new Event("wheel", { bubbles: true }));
+		scroller.scrollTop = 0; // activation 20 → Alpha (top 0)
+		tracker.handleEditorUpdate(update({ viewportChanged: true }));
+		expect(tracker.getSource()).toBe("viewport");
+		flushFrame();
+		expect(activeKeys.at(-1)).toBe(ITEMS[0].key);
+	});
+
+	it("a paging key arms a viewport intent in editor modes", () => {
+		state.cursorLine = 25;
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		flushFrame();
+		expect(tracker.getSource()).toBe("cursor");
+		contentEl.dispatchEvent(
+			new KeyboardEvent("keydown", { key: "PageUp", bubbles: true }),
+		);
+		scroller.scrollTop = 0;
+		tracker.handleEditorUpdate(update({ viewportChanged: true }));
+		expect(tracker.getSource()).toBe("viewport");
+	});
+
+	it("a middle-button press arms a pointer-scroll viewport intent", () => {
+		state.cursorLine = 25;
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		flushFrame();
+		contentEl.dispatchEvent(
+			new MouseEvent("pointerdown", { button: 1, bubbles: true }),
+		);
+		scroller.scrollTop = 0;
+		tracker.handleEditorUpdate(update({ viewportChanged: true }));
+		expect(tracker.getSource()).toBe("viewport");
+	});
+
+	it("a wheel gesture on the outline rail does not arm an intent", () => {
+		state.cursorLine = 25;
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		flushFrame();
+		const mount = document.createElement("div");
+		mount.setAttribute(OWNER_ATTR, OWNER_VALUE);
+		contentEl.appendChild(mount);
+		mount.dispatchEvent(new Event("wheel", { bubbles: true }));
+		scroller.scrollTop = 0;
+		tracker.handleEditorUpdate(update({ viewportChanged: true }));
+		expect(tracker.getSource()).toBe("cursor"); // outline gesture, not scroll
+	});
+
+	it("reports source-attribution diagnostics", () => {
+		state.cursorLine = 25;
+		tracker.handleEditorUpdate(update({ selectionSet: true }));
+		flushFrame();
+		contentEl.dispatchEvent(new Event("wheel", { bubbles: true }));
+		scroller.scrollTop = 0;
+		tracker.handleEditorUpdate(update({ viewportChanged: true }));
+		const diag = tracker.getIntentDiagnostics();
+		expect(diag.source).toBe("viewport");
+		expect(diag.armedCount).toBeGreaterThanOrEqual(1);
+		expect(diag.consumedCount).toBeGreaterThanOrEqual(1);
+		expect(diag.cursorToViewportCount).toBe(1);
 	});
 
 	it("beginJump locks the target while scroll updates stream in", () => {

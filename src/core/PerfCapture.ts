@@ -97,6 +97,20 @@ export interface PerfCounters {
 	/** §五.2: fade-class toggles actually written vs. skipped as no-ops. */
 	overflowClassMutationCount: number;
 	overflowClassSkippedCount: number;
+	/**
+	 * §十五: collapsed active-heading follow against the fixed centre
+	 * playhead. `centerFollowTimeoutCount` is the one that matters — it
+	 * counts sessions that hit the hard duration ceiling instead of
+	 * converging, i.e. a follow that could not keep up with the target.
+	 */
+	activeFollowScrollMutationCount: number;
+	activeFollowNoMutationCount: number;
+	centerFollowFrameCount: number;
+	centerFollowScrollMutationCount: number;
+	centerFollowRectFallbackCount: number;
+	centerFollowRetargetCount: number;
+	centerFollowSnapCount: number;
+	centerFollowTimeoutCount: number;
 	/** §十一: wheel routing outcome histogram. */
 	wheelEventCount: number;
 	wheelOutlineCount: number;
@@ -237,6 +251,14 @@ function zeroCounters(): PerfCounters {
 		overflowMetricReadCount: 0,
 		overflowClassMutationCount: 0,
 		overflowClassSkippedCount: 0,
+		activeFollowScrollMutationCount: 0,
+		activeFollowNoMutationCount: 0,
+		centerFollowFrameCount: 0,
+		centerFollowScrollMutationCount: 0,
+		centerFollowRectFallbackCount: 0,
+		centerFollowRetargetCount: 0,
+		centerFollowSnapCount: 0,
+		centerFollowTimeoutCount: 0,
 		wheelEventCount: 0,
 		wheelOutlineCount: 0,
 		wheelEditorHandoffCount: 0,
@@ -723,6 +745,21 @@ export interface PerfReport {
 		/** Share of evaluations that wrote no class at all. */
 		classSkippedShare: number;
 	};
+	/**
+	 * §十五: collapsed active-heading follow against the fixed centre
+	 * playhead. `timeoutCount` should stay at 0 in normal use — a session
+	 * that hits the duration ceiling could not converge on the target.
+	 */
+	activeFollow: {
+		scrollMutationCount: number;
+		noMutationCount: number;
+		frameCount: number;
+		centerScrollMutationCount: number;
+		rectFallbackCount: number;
+		retargetCount: number;
+		snapCount: number;
+		timeoutCount: number;
+	};
 	/** §八: how pointer anchors were resolved (fallbackScanCount must be 0). */
 	anchorResolve: {
 		localHitCount: number;
@@ -1025,6 +1062,27 @@ export class PerfCapture {
 		this.removeSuspensionListeners = null;
 		const durationMs = win.performance.now() - this.startedAt;
 		return this.buildReport(durationMs);
+	}
+
+	/**
+	 * §七: abandon a running capture WITHOUT producing a report. Used when
+	 * developer mode is switched off mid-capture — the longtask observer
+	 * and the suspension listeners are torn down exactly like `stop()`,
+	 * but no report is built or returned and the in-flight samples are
+	 * discarded. Idempotent; a no-op when nothing is running.
+	 */
+	abort(): void {
+		if (!this.active) return;
+		this.active = false;
+		this.deepActive = false;
+		this.deepFrameCalcActive = false;
+		this.deepAutoScrollIntentActive = false;
+		this.deepScrollWriteActive = false;
+		this.deepScrollEventActive = false;
+		this.longTaskObserver?.disconnect();
+		this.longTaskObserver = null;
+		this.removeSuspensionListeners?.();
+		this.removeSuspensionListeners = null;
 	}
 
 	/** Feed one RAF timestamp; consecutive calls produce intervals. */
@@ -1877,6 +1935,16 @@ export class PerfCapture {
 									c.overflowClassMutationCount)
 						: 0,
 				),
+			},
+			activeFollow: {
+				scrollMutationCount: c.activeFollowScrollMutationCount,
+				noMutationCount: c.activeFollowNoMutationCount,
+				frameCount: c.centerFollowFrameCount,
+				centerScrollMutationCount: c.centerFollowScrollMutationCount,
+				rectFallbackCount: c.centerFollowRectFallbackCount,
+				retargetCount: c.centerFollowRetargetCount,
+				snapCount: c.centerFollowSnapCount,
+				timeoutCount: c.centerFollowTimeoutCount,
 			},
 			anchorResolve: {
 				localHitCount: c.anchorLocalHitCount,

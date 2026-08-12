@@ -9,7 +9,10 @@ import { ActiveHeadingTracker } from "./ActiveHeadingTracker";
 import type { EditorUpdateBridge } from "./EditorUpdateBridge";
 import { GlideOutlineView } from "../ui/GlideOutlineView";
 import { MagnificationController } from "../ui/MagnificationController";
-import { sameHeadingKeys } from "../utils/headingIdentity";
+import {
+	sameHeadingItems,
+	sameHeadingKeys,
+} from "../utils/headingIdentity";
 import { matchPreviewHeadings } from "../utils/previewHeadings";
 import { FULL_MOTION_STATE } from "../utils/motion";
 import { ScrollCorrector } from "./ScrollCorrector";
@@ -17,6 +20,13 @@ import type { JumpLandingEvaluation } from "./ScrollCorrector";
 import { evaluateJumpLanding } from "./jumpLanding";
 import type { Diagnostics } from "./Diagnostics";
 import type { PerfCapture } from "./PerfCapture";
+import { markColdStart, noteColdStartMarkdownLabel } from "./ColdStartTrace";
+
+/** Monotonic clock for the §十三 label timing; 0 where unavailable. */
+function coldStartClock(): number {
+	const perf = globalThis.performance;
+	return typeof perf?.now === "function" ? perf.now() : 0;
+}
 
 /** Breathing room above a jumped-to heading, in px (editor modes). */
 const JUMP_Y_MARGIN = 12;
@@ -79,6 +89,7 @@ export class GlideOutlineController {
 		/** On-demand perf capture (section 3); shared with magnification. */
 		private readonly perf: PerfCapture | null = null,
 	) {
+		markColdStart("controllerAttachStart"); // §十三
 		this.renderComponent.load();
 		this.outlineView = new GlideOutlineView(
 			view.contentEl,
@@ -115,6 +126,7 @@ export class GlideOutlineController {
 			});
 		}
 		this.refreshFromCache();
+		markColdStart("controllerAttachEnd"); // §十三
 	}
 
 	/** Authoritative channel: metadata cache. */
@@ -191,6 +203,9 @@ export class GlideOutlineController {
 			rootClasses: this.outlineView.getRootClassList(),
 			outlineViewport: this.outlineView.getViewportMetrics(),
 			overflow: this.outlineView.getOverflowState(),
+			// §八: collapsed active-heading follow — pending target, safe
+			// band, and the outcome of the last positioning attempt.
+			activeFollow: this.outlineView.getActiveFollowDiagnostics(),
 			// §十一: read-only mount host mutation diagnostics.
 			mountInstanceId: this.outlineView.getMountInstanceId(),
 			mount: this.outlineView.getMountDiagnostics(),
@@ -203,18 +218,33 @@ export class GlideOutlineController {
 	 */
 	private renderLabel(labelEl: HTMLElement, item: HeadingItem): void {
 		const sourcePath = this.view.file?.path ?? "";
+		// §十三: label rendering is Obsidian's, not ours — this only times
+		// it. A cold start that opens a note with a hundred rich headings
+		// pays for a hundred of these before anything can settle, and that
+		// cost was previously invisible in the trace.
+		const startedAt = coldStartClock();
 		MarkdownRenderer.render(
 			this.view.app,
 			item.displaySource,
 			labelEl,
 			sourcePath,
 			this.renderComponent,
-		).catch(() => {
-			labelEl.textContent = item.text;
-		});
+		)
+			.then(() => {
+				noteColdStartMarkdownLabel(coldStartClock() - startedAt);
+			})
+			.catch(() => {
+				labelEl.textContent = item.text;
+			});
 	}
 
 	private setItems(items: HeadingItem[]): void {
+		// Editor-change fires for every body keystroke. Parsing the current
+		// text is cheap, but reconciling every row and scheduling a full
+		// offsetHeight sweep is not. If heading identity, content and line
+		// positions are all unchanged, the existing view/tracker snapshot is
+		// already authoritative and no downstream work is needed.
+		if (sameHeadingItems(items, this.items)) return;
 		const keysChanged = !sameHeadingKeys(items, this.items);
 		this.items = items;
 		// Always push to the view: even when identities are unchanged, line

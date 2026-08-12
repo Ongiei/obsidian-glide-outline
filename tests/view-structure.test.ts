@@ -3,7 +3,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { HeadingItem } from "../src/model/HeadingItem";
 import type { GlideOutlineSettings } from "../src/settings";
 import { DEFAULT_SETTINGS } from "../src/settings";
-import { GlideOutlineView } from "../src/ui/GlideOutlineView";
+import {
+	GlideOutlineView,
+	headingNeedsMarkdownRenderer,
+} from "../src/ui/GlideOutlineView";
 
 function heading(level: number, text: string, line: number): HeadingItem {
 	return {
@@ -103,6 +106,45 @@ describe("GlideOutlineView DOM structure (single visual card)", () => {
 		for (const item of HEADINGS) {
 			expect(view.getBaseCardHeight(item.key)).toBeGreaterThanOrEqual(0);
 		}
+	});
+});
+
+describe("rich heading render gate", () => {
+	it("keeps ordinary headings on the synchronous plain-text path", () => {
+		expect(headingNeedsMarkdownRenderer("Plain heading 42")).toBe(false);
+		expect(headingNeedsMarkdownRenderer("中文标题与 emoji ✨")).toBe(false);
+	});
+
+	it("preserves Obsidian and inline Markdown on the rich renderer path", () => {
+		for (const source of [
+			"**Bold** heading",
+			"[[Internal link]]",
+			"`inline code`",
+			"==Highlight==",
+			"<mark>HTML</mark>",
+			"mail@example.com",
+			"https://example.com",
+		]) {
+			expect(headingNeedsMarkdownRenderer(source)).toBe(true);
+		}
+	});
+
+	it("does not invoke the rich renderer for plain headings when enabled", () => {
+		const host = document.createElement("div");
+		document.body.appendChild(host);
+		const settings = structuredClone(DEFAULT_SETTINGS);
+		settings.renderMarkdown = true;
+		let renderCalls = 0;
+		const view = new GlideOutlineView(host, () => settings, {
+			onJump: () => undefined,
+			renderLabel: () => {
+				renderCalls++;
+			},
+		});
+		view.setItems(HEADINGS);
+		expect(renderCalls).toBe(0);
+		view.dispose();
+		host.remove();
 	});
 });
 
