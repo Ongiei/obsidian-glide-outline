@@ -1,4 +1,4 @@
-import { Notice, Plugin } from "obsidian";
+import { Notice, Platform, Plugin } from "obsidian";
 import type { Editor, MarkdownView, TFile } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { Diagnostics } from "./core/Diagnostics";
@@ -428,8 +428,13 @@ export default class GlideOutlinePlugin extends Plugin {
 		const payload = {
 			timestamp: new Date().toISOString(),
 			pluginVersion: this.manifest.version,
-			platform: navigator.platform,
-			userAgent: navigator.userAgent,
+			platform: Platform.isWin
+				? "windows"
+				: Platform.isMacOS
+					? "macos"
+					: Platform.isLinux
+						? "linux"
+						: "unknown",
 			systemPrefersReducedMotion: systemReduced,
 			resolvedMotion: FULL_MOTION_STATE,
 			settings: {

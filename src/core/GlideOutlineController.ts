@@ -24,7 +24,7 @@ import { markColdStart, noteColdStartMarkdownLabel } from "./ColdStartTrace";
 
 /** Monotonic clock for the §十三 label timing; 0 where unavailable. */
 function coldStartClock(): number {
-	const perf = globalThis.performance;
+	const perf = window.performance;
 	return typeof perf?.now === "function" ? perf.now() : 0;
 }
 
@@ -358,9 +358,7 @@ export class GlideOutlineController {
 		this.corrector?.dispose();
 		this.corrector = null;
 		const scroller = cm.scrollDOM;
-		const win = this.view.contentEl.ownerDocument.defaultView as
-			| (Window & typeof globalThis)
-			| null;
+		const win = this.view.contentEl.ownerDocument.defaultView;
 		const smooth = behavior === "smooth";
 		if (!win) {
 			// Detached document — no timers available; jump uncorrected.

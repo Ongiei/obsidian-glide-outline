@@ -2,6 +2,21 @@
 
 All notable changes to Glide Outline will be documented in this file.
 
+## 0.1.7 — centred active heading and smoother navigation
+
+- Keep the active heading centred in the collapsed rail with one bounded,
+  smooth follow session; retain the newest target while the user is interacting
+  with the outline and resume it when the rail collapses.
+- Let explicit editor scroll gestures take over from the caret while keeping
+  programmatic scrolls from stealing the active-heading state.
+- Keep active markers painted with the Obsidian accent colour in expanded,
+  hovered and keyboard-focused states.
+- Hide performance commands behind an opt-in Developer mode, and add a one-shot
+  cold-start trace for measuring the first interaction without permanent
+  instrumentation.
+- Add the demonstration video and update the market-facing installation,
+  accessibility and settings documentation.
+
 ## 0.1.6 — Windows frame-budget reduction
 
 Pure hot-path cost reduction. **No change** to interaction, animation, collision

@@ -321,7 +321,7 @@ export function normalizeSettings(raw: unknown): GlideOutlineSettings {
 			DEFAULT_SETTINGS.cardGap,
 		),
 		showLevels: [0, 1, 2, 3, 4, 5].map((i) =>
-			typeof levels[i] === "boolean" ? (levels[i] as boolean) : true,
+			typeof levels[i] === "boolean" ? levels[i] : true,
 		) as GlideOutlineSettings["showLevels"],
 		renderMarkdown: bool(data.renderMarkdown, DEFAULT_SETTINGS.renderMarkdown),
 		developerMode: bool(data.developerMode, DEFAULT_SETTINGS.developerMode),

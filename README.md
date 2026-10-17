@@ -4,7 +4,7 @@ A fluid **editor-margin outline** for [Obsidian](https://obsidian.md) with dock-
 
 Glide Outline lives in the margin of your Markdown editor as a quiet column of heading markers. Move your pointer near the rail and the markers glide open into heading labels — the heading closest to your pointer magnifies the most, neighbours scale down continuously, like a vertical macOS Dock made of text.
 
-> **Demo placeholder** — animation GIF coming soon.
+▶ **[Watch the Glide Outline demo (MP4, 7 MB)](https://github.com/Ongiei/obsidian-glide-outline/blob/main/video/glide-outline.mp4)**
 
 ## Features
 
@@ -20,9 +20,15 @@ Glide Outline lives in the margin of your Markdown editor as a quiet column of h
 - **Customisable label cards.** Background opacity, border, corner radius, shadow, padding and text shadow — down to a pure-text mode with no chrome at all.
 - **Optional Markdown labels.** Render inline formatting (bold, code, links…) inside heading labels, powered by Obsidian's own renderer.
 - **Pop-out window safe.** All DOM checks use the owning window, so the rail works in detached editor windows.
-- **Accessible.** Keyboard focus keeps the outline open, Enter/Space activation, `aria-label`s, and full `prefers-reduced-motion` support.
+- **Accessible.** Keyboard focus keeps the outline open, Enter/Space activation, and hidden labels provide screen-reader names without Obsidian's hover tooltips.
 
 ## Installation
+
+### Community plugins
+
+1. Open **Settings → Community plugins** in Obsidian.
+2. Select **Browse** and search for **Glide Outline**.
+3. Select **Install**, then **Enable**.
 
 ### Manual
 
@@ -56,23 +62,22 @@ Symlink (or copy) the repository into `<vault>/.obsidian/plugins/glide-outline/`
 6. **Duplicates** — three identical `常见问题` H3s and the two-level `监控` pair all highlight and jump independently.
 7. **Code fences** — none of the fake `# headings` inside fenced blocks appear in the rail.
 8. **Narrow pane** — drag the split narrow: cards shrink text budget first, badges and paddings last; nothing overlaps the editor text.
-9. **Reduced motion** — with the system reduced-motion preference (or Animation off), magnification snaps without transitions and auto-scroll disables entirely.
 
 Structural properties of the fixture are pinned by `tests/stress-fixture.test.ts`, so edits cannot silently destroy this coverage.
 
 ## Settings
 
-Settings are grouped into **General**, **Marker**, **Motion**, **Typography**, **Label card**, **Rendering** and **Show heading levels**, plus a one-click **Restore default appearance** button (position, shown levels and Markdown rendering are preserved).
+Settings are grouped into **General**, **Appearance**, **Motion** and **Advanced** tabs, plus a one-click **Restore default appearance** button (position, shown levels and Markdown rendering are preserved).
 
 | Setting | Default | Description |
 | --- | --- | --- |
 | Enable outline | on | Master switch. |
 | Position | right | Which editor margin the rail sits in. |
+| Horizontal offset | 12 px | Leave space between the outline and the editor edge. |
 | Vertical offset | 0 px | Shift the rail up/down. |
 | Marker style | line | `line` or `dot` markers. |
 | Maximum magnification | 1.25 | Peak scale of the label nearest the pointer. |
 | Magnification radius | 90 px | Distance over which magnification decays to 1. |
-| Animation | on | Disable for instant reveal without motion. |
 | Base font size | 12 px | Label font size before magnification. |
 | Maximum label width | 240 px | Longer headings get a single-line ellipsis. |
 | Background opacity | 78 % | Label card background; 0 turns cards into pure text. |
@@ -83,9 +88,10 @@ Settings are grouped into **General**, **Marker**, **Motion**, **Typography**, *
 | Render Markdown in labels | off | Show inline bold/code/links in labels. |
 | Show heading levels | H1–H6 | Filter which levels appear in the rail. |
 | Pointer edge auto-scroll | on | Scroll the list when the pointer dwells near a list edge. |
-| Auto-scroll speed | 1 | Speed multiplier for pointer edge auto-scroll. |
+| Pointer movement assist | on | Pre-scroll toward quick vertical pointer movement. |
+| Edge auto-scroll speed | 1 | Speed multiplier for pointer edge auto-scroll. |
+| Pointer movement assist strength | 1 | Strength of pointer-follow pre-scroll. |
 | Auto-scroll trigger area | 120 px | Height of the edge zone that starts auto-scroll. |
-| Pointer-follow pre-scroll | on | Fast vertical pointer flicks pre-scroll the list toward the gesture. |
 
 Slider changes apply instantly but are saved to disk with a short debounce, so dragging never hammers the settings file.
 

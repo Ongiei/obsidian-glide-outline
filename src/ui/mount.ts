@@ -114,7 +114,7 @@ export function createOutlineMount(hostEl: HTMLElement): OutlineMount {
 			: "";
 	const anchored = hostPosition === "static";
 	const previousInlinePosition = anchored ? hostEl.style.position : null;
-	if (anchored) hostEl.style.position = "relative";
+	if (anchored) hostEl.setCssProps({ position: "relative" });
 
 	hostEl.appendChild(mountEl);
 
@@ -146,7 +146,7 @@ export function createOutlineMount(hostEl: HTMLElement): OutlineMount {
 			// Restore only what we wrote, and only if it is still ours —
 			// another actor may legitimately have changed it since.
 			if (anchored && hostEl.style.position === "relative") {
-				hostEl.style.position = previousInlinePosition ?? "";
+				hostEl.setCssProps({ position: previousInlinePosition ?? "" });
 				if (hostEl.getAttribute("style") === "") {
 					hostEl.removeAttribute("style");
 				}
