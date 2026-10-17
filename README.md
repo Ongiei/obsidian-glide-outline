@@ -4,7 +4,9 @@ A fluid **editor-margin outline** for [Obsidian](https://obsidian.md) with dock-
 
 Glide Outline lives in the margin of your Markdown editor as a quiet column of heading markers. Move your pointer near the rail and the markers glide open into heading labels — the heading closest to your pointer magnifies the most, neighbours scale down continuously, like a vertical macOS Dock made of text.
 
-▶ **[Watch the Glide Outline demo (MP4, 7 MB)](https://github.com/Ongiei/obsidian-glide-outline/blob/main/video/glide-outline.mp4)**
+https://github.com/user-attachments/assets/40130ca1-b9ce-4013-a5f2-bcc778a15e58
+
+[Download the demo video (MP4, 7 MB)](https://github.com/Ongiei/obsidian-glide-outline/blob/main/video/glide-outline.mp4)
 
 ## Features
 
