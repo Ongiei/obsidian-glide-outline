@@ -6,7 +6,7 @@ Glide Outline lives in the margin of your Markdown editor as a quiet column of h
 
 https://github.com/user-attachments/assets/40130ca1-b9ce-4013-a5f2-bcc778a15e58
 
-[Download the demo video (MP4, 7 MB)](https://github.com/Ongiei/obsidian-glide-outline/blob/main/video/glide-outline.mp4)
+[Download the original demo video (MP4, 7 MB)](https://github.com/Ongiei/obsidian-glide-outline/blob/main/video/glide-outline.mp4)
 
 ## Features
 
