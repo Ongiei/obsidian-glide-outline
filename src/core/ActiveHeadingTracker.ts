@@ -165,9 +165,7 @@ export class ActiveHeadingTracker {
 		private readonly view: MarkdownView,
 		private readonly onChange: (key: string | null) => void,
 	) {
-		const win = view.contentEl.ownerDocument.defaultView as
-			| (Window & typeof globalThis)
-			| null;
+		const win = view.contentEl.ownerDocument.defaultView;
 		if (!win) throw new Error("glide-outline: detached document");
 		this.win = win;
 

@@ -10,6 +10,14 @@ export default defineConfig({
 	test: {
 		environment: "node",
 		include: ["tests/**/*.test.ts"],
+		setupFiles: ["./tests/setup.ts"],
+		/**
+		 * Keep files serial. The collision-continuity suite is deliberately
+		 * CPU-bound; running it beside the other animation suites can starve
+		 * fake-frame loops long enough to hit the wall-clock timeout even though
+		 * every case passes in isolation.
+		 */
+		fileParallelism: false,
 		/**
 		 * The collision-continuity suite sweeps thousands of simulated
 		 * frames per case; it is compute-bound, not wall-clock-asserting,

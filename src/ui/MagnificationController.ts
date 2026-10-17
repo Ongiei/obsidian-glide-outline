@@ -533,7 +533,7 @@ export class MagnificationController {
 		private readonly perf: PerfCapture | null = null,
 	) {
 		const doc = view.rootEl.ownerDocument;
-		const win = doc.defaultView as (Window & typeof globalThis) | null;
+		const win = doc.defaultView;
 		if (!win) throw new Error("glide-outline: detached document");
 		this.win = win;
 
