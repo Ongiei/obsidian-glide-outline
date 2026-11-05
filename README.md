@@ -10,9 +10,9 @@ https://github.com/user-attachments/assets/40130ca1-b9ce-4013-a5f2-bcc778a15e58
 
 ## Features
 
-- **Hover snap for accurate clicks.** Pause briefly on a heading label to hold it still. Small pointer movements keep the original target; larger movements release with a smooth handoff. Scrollable edge zones take priority over snapping.
+- **Immediate hover snap for accurate clicks.** Enter a heading label to hold it still, without a dwell delay or added background. Movement inside the acquired card region keeps the original target regardless of speed; leaving releases with a smooth handoff. Edge zones still scroll when no card is held.
 - **Stable long-to-short browsing.** The outline stays open while you move through shorter headings within the current browsing corridor. Only real cards and markers activate headings; there is no invisible click overlay.
-- **Fixed quick controls.** A faint, hover-revealed control row opens plugin settings and toggles H2–H6 independently. It stays outside the scrolling heading viewport and remains accessible when all headings are hidden.
+- **Fixed quick controls.** A faint control row opens plugin settings and adjusts heading depth with a native H2–H6 slider. H3 shows H2 and H3; H6 shows H2–H6; H1 follows its separate plugin setting. The row stays outside the scrolling viewport, and the first heading starts near the top rather than after a half-pane spacer.
 - **Margin rail, not a panel.** A thin column of markers on the left or right edge of the current Markdown editor, with no permanent sidebar.
 - **Marker length encodes level.** H1 gets the longest marker, H6 the shortest. Line or dot style.
 - **Active heading highlight.** The heading you are currently reading is tinted with your theme accent colour.

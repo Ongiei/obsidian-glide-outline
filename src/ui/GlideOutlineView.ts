@@ -1983,6 +1983,9 @@ export class GlideOutlineView {
 		if (!this.itemRecords.has(this.activeKey)) {
 			return { visible: false, reason: "active-row-not-rendered" };
 		}
+		if (this.items[0]?.key === this.activeKey && this.topCenterSpacerPx === 0) {
+			return { visible: false, reason: "first-row-start-aligned" };
+		}
 		if (this.rootEl.classList.contains("is-empty")) {
 			return { visible: false, reason: "root-empty" };
 		}
@@ -2065,7 +2068,9 @@ export class GlideOutlineView {
 				const centreY = this.playheadViewportY;
 				const firstRowHeight = firstRecord.rowEl.offsetHeight || 0;
 				const lastRowHeight = lastRecord.rowEl.offsetHeight || 0;
-				const topSpacer = Math.max(0, centreY - firstRowHeight / 2);
+				// The first heading starts below the toolbar, not halfway
+				// down the pane. Later headings may still follow the playhead.
+				const topSpacer = 0;
 				const bottomSpacer = Math.max(
 					0,
 					clientHeight - centreY - lastRowHeight / 2,

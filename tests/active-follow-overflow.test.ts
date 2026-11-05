@@ -176,10 +176,13 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 	// ── §九 / §六: centre geometry ──────────────────────────────────
 
 	describe("centre geometry (§六 / §九)", () => {
-		it("centres row 0 at scrollTop 0 thanks to the top spacer", () => {
+		it("starts row 0 at the top without an artificial half-viewport spacer", () => {
+			mockRowLayout(ROW_H, 0);
 			mockViewport(2000);
 			expect(followTo(0)).toBeCloseTo(centeredTarget(0), 1);
 			expect(centeredTarget(0)).toBe(0);
+			expect(view.getActiveFollowDiagnostics().topCenterSpacerPx).toBe(0);
+			expect(view.isPlayheadVisible()).toBe(false);
 		});
 
 		it("centres a mid-list row on the playhead", () => {
@@ -233,7 +236,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 		it("recomputes the spacers from the live viewport height", () => {
 			// Spacers are derived from clientHeight / 2 − rowHeight / 2.
 			const d = view.getActiveFollowDiagnostics();
-			expect(d.topCenterSpacerPx).toBe(SPACER);
+			expect(d.topCenterSpacerPx).toBe(0);
 			expect(d.bottomCenterSpacerPx).toBe(SPACER);
 		});
 
@@ -243,7 +246,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			view.applySettings();
 			flushRaf();
 			const d = view.getActiveFollowDiagnostics();
-			expect(d.topCenterSpacerPx).toBe(TALLER / 2 - ROW_H / 2);
+			expect(d.topCenterSpacerPx).toBe(0);
 			expect(d.bottomCenterSpacerPx).toBe(TALLER / 2 - ROW_H / 2);
 		});
 
@@ -1094,7 +1097,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 
 		it("writes the computed heights onto the elements", () => {
 			const [top, bottom] = spacers();
-			expect(top.style.height).toBe(`${SPACER}px`);
+			expect(top.style.height).toBe("0px");
 			expect(bottom.style.height).toBe(`${SPACER}px`);
 		});
 
@@ -1105,7 +1108,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			expect(d.playheadClientY).toBe(CLIENT_H / 2);
 			expect(d.firstRowHeight).toBe(ROW_H);
 			expect(d.lastRowHeight).toBe(ROW_H);
-			expect(d.topCenterSpacerPx).toBe(CLIENT_H / 2 - ROW_H / 2);
+			expect(d.topCenterSpacerPx).toBe(0);
 			expect(d.bottomCenterSpacerPx).toBe(CLIENT_H / 2 - ROW_H / 2);
 			expect(d.centerSpacerRefreshCount).toBeGreaterThan(0);
 		});
@@ -1118,7 +1121,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			const after = view.getActiveFollowDiagnostics();
 			expect(after.centerSpacerRefreshCount).toBeGreaterThan(before);
 			expect(after.playheadClientY).toBe(300);
-			expect(after.topCenterSpacerPx).toBe(300 - ROW_H / 2);
+			expect(after.topCenterSpacerPx).toBe(0);
 		});
 	});
 

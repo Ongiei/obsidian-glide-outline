@@ -612,9 +612,6 @@
 :where([data-glide-outline-owner]) .glide-outline-item[data-level].is-active .glide-outline-label {
 	color: var(--interactive-accent);
 }
-:where([data-glide-outline-owner]) [data-glide-snapped] .glide-outline-card {
-	background-color: var(--background-modifier-hover);
-}
 
 /* Independent fixed row: never overlays magnified headings. Only real
    controls receive input, not the otherwise transparent toolbar strip. */
@@ -670,6 +667,54 @@
 :where([data-glide-outline-owner]) .glide-outline-toolbar .glide-outline-control:disabled {
 	cursor: default;
 	opacity: 0.5;
+}
+:where([data-glide-outline-owner]) .glide-outline-depth {
+	display: grid;
+	grid-template-rows: 20px 10px;
+	width: 130px;
+	flex: 0 1 130px;
+	pointer-events: auto;
+}
+:where([data-glide-outline-owner]) .glide-outline-depth input {
+	width: 100%;
+	min-width: 65px;
+	margin: 0;
+	accent-color: var(--interactive-accent);
+	appearance: none;
+	height: 20px;
+	background: transparent;
+}
+:where([data-glide-outline-owner]) .glide-outline-depth input[type="range"]::-webkit-slider-runnable-track {
+	height: 2px;
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-border-hover);
+}
+:where([data-glide-outline-owner]) .glide-outline-depth input[type="range"]::-webkit-slider-thumb {
+	appearance: none;
+	width: 12px;
+	height: 12px;
+	margin-top: -5px;
+	border: 0;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	box-shadow: none;
+}
+:where([data-glide-outline-owner]) .glide-outline-depth input:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 1px;
+}
+:where([data-glide-outline-owner]) .glide-outline-depth-ticks {
+	display: flex;
+	justify-content: space-between;
+	font-size: 9px;
+	line-height: 10px;
+	color: var(--text-muted);
+}
+:where([data-glide-outline-owner]) .glide-outline-depth-value {
+	align-self: center;
+	margin-inline-start: 6px;
+	font-size: var(--font-smallest);
+	color: var(--text-muted);
 }
 
 /* --------------------------------------------------------------------------

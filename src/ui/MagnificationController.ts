@@ -516,7 +516,6 @@ export class MagnificationController {
 	 * and the locked target cannot slide away (section 12). */
 	private pressed: PressedHeadingState | null = null;
 	private readonly pointerSnap = new PointerSnap();
-	private snapTimer = 0;
 	private snapTarget: EventTarget | null = null;
 	private readonly hoverSession = new HoverSession();
 	private snappedRow: HTMLElement | null = null;
@@ -1496,11 +1495,14 @@ export class MagnificationController {
 			canScrollDown: overflow.canScrollDown,
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
 		}).velocity !== 0;
-		const wait = this.pointerSnap.update(
-			edgeScroll ? null : row?.getAttribute("data-key") ?? null,
-			this.lastPointerX, this.lastPointerY, now,
+		const held = this.pointerSnap.holds(this.lastPointerX, this.lastPointerY);
+		// Only acquisition reads one real card rect, in the READ phase.
+		// Once held, geometry is frozen and speed/acceleration cannot eject it.
+		const bounds = !held && !edgeScroll && !this.aimSettling && card ? card.getBoundingClientRect() : undefined;
+		this.pointerSnap.update(
+			(edgeScroll || this.aimSettling) && !held ? null : row?.getAttribute("data-key") ?? null,
+			this.lastPointerX, this.lastPointerY, now, bounds,
 		);
-		if (edgeScroll) this.pointerSnap.clear();
 		const wasSnapped = this.snappedRow !== null;
 		const nextRow = this.pointerSnap.targetKey
 			? this.cache[this.cacheIndexByKey.get(this.pointerSnap.targetKey) ?? -1]?.el ?? null
@@ -1511,16 +1513,6 @@ export class MagnificationController {
 			nextRow?.setAttribute("data-glide-snapped", "true");
 		}
 		if (wasSnapped && !nextRow) this.aimSettling = true;
-		if (wait === 0 && this.snapTimer !== 0) {
-			this.win.clearTimeout(this.snapTimer);
-			this.snapTimer = 0;
-		}
-		if (wait > 0 && this.snapTimer === 0) {
-			this.snapTimer = this.win.setTimeout(() => {
-				this.snapTimer = 0;
-				this.schedule("pointerMove");
-			}, wait);
-		}
 		if (this.pointerSnap.locked) {
 			if (!Number.isFinite(this.aimY)) this.aimY = this.lastPointerY;
 			this.resetAllScrollIntent("pointer-snap");
@@ -3133,8 +3125,6 @@ export class MagnificationController {
 		this.aimSettling = false;
 		this.pointerSnap.clear();
 		this.snapTarget = null;
-		if (this.snapTimer !== 0) this.win.clearTimeout(this.snapTimer);
-		this.snapTimer = 0;
 	}
 
 	private insideHoverSession(x: number, y: number): boolean {
