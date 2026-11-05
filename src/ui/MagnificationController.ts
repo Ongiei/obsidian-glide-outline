@@ -519,6 +519,7 @@ export class MagnificationController {
 	private snapTarget: EventTarget | null = null;
 	private readonly hoverSession = new HoverSession();
 	private snappedRow: HTMLElement | null = null;
+	private snapAnchorShift = 0;
 	private aimY = Number.NaN;
 	private aimSettling = false;
 
@@ -1351,12 +1352,8 @@ export class MagnificationController {
 		// §十二: the first real reveal. Recorded before the write so the
 		// milestone brackets the expansion rather than trailing it.
 		if (expanded) noteColdStartInteraction("firstExpand");
-		// §十一: snap the newest active heading to the centre BEFORE the
-		// rail expands. The user must see the current heading the instant
-		// the cards appear — never a stale row that then slides into place
-		// under the pointer, and never magnification spinning up around
-		// the wrong heading.
-		if (expanded) this.view.finishActiveFollowImmediately();
+		// Pause in place so the collapsed markers and revealed labels
+		// refer to the same content offsets, including near the start.
 		this.view.setExpanded(expanded);
 		this.view.setFollowEnabled(!expanded);
 		this.view.setInteractionState(state);
@@ -1478,8 +1475,8 @@ export class MagnificationController {
 			perf.markPhase("read", this.win.performance.now());
 		}
 
-		// Freeze the displayed geometry BEFORE clicking, not only after
-		// pointerdown. Rail/gap browsing is unchanged; only real cards snap.
+		// Lock the focus BEFORE clicking, not only after pointerdown.
+		// Rail/gap browsing is unchanged; only real cards snap.
 		const card = closestOwned(this.snapTarget, ".glide-outline-card", this.ownsNode);
 		const row = card ? closestOwned(card, ".glide-outline-row", this.ownsNode) : null;
 		// Edge browsing has priority over aiming. Otherwise the 100ms
@@ -1511,15 +1508,16 @@ export class MagnificationController {
 			this.snappedRow?.removeAttribute("data-glide-snapped");
 			this.snappedRow = nextRow;
 			nextRow?.setAttribute("data-glide-snapped", "true");
+			this.snapAnchorShift = nextRow
+				? this.cache[this.cacheIndexByEl.get(nextRow) ?? -1]?.motion.displayedShift ?? 0
+				: 0;
 		}
 		if (wasSnapped && !nextRow) this.aimSettling = true;
 		if (this.pointerSnap.locked) {
 			if (!Number.isFinite(this.aimY)) this.aimY = this.lastPointerY;
 			this.resetAllScrollIntent("pointer-snap");
-			this.lastMotionTime = Number.NaN;
-			if (measure && perf) perf.endFrameAttribution(this.win.performance.now());
-			this.endFrame();
-			return;
+			// Hold the focus, not an unfinished frame. Old peaks must keep
+			// shrinking while the selected card settles to its single peak.
 		}
 
 		if (Number.isNaN(this.lastPointerY)) {
@@ -1588,7 +1586,12 @@ export class MagnificationController {
 			measureDeep && scrolledSinceLastFrame
 				? this.win.performance.now()
 				: 0;
-		if (this.aimSettling) {
+		const lockedIndex = this.snappedRow ? this.cacheIndexByEl.get(this.snappedRow) ?? -1 : -1;
+		if (lockedIndex >= 0) {
+			this.pointerAnchorEl = this.snappedRow;
+			this.aimSettling = false;
+			this.aimY = this.cache[lockedIndex].contentVisualCenter - this.currentScrollTop + this.viewportTop;
+		} else if (this.aimSettling) {
 			this.aimY = stepToward(this.aimY, this.lastPointerY, motionAlpha(dtMs, 60), 0.5);
 			this.aimSettling = this.aimY !== this.lastPointerY;
 		} else this.aimY = this.lastPointerY;
@@ -1683,6 +1686,16 @@ export class MagnificationController {
 					preferredAnchorIndex: anchorInSlice,
 				},
 			);
+			if (lockedIndex >= 0) {
+				const neighbourScaleLimit = Math.max(1,
+					settings.maxScale - Math.min(0.08, (settings.maxScale - 1) * 0.1));
+				for (let i = 0; i < results.length; i++) {
+					results[i].translateY += this.snapAnchorShift;
+					if (i !== lockedIndex - cStart) {
+						results[i].scale = Math.min(results[i].scale, neighbourScaleLimit);
+					}
+				}
+			}
 			if (measure && perf) {
 				const solverEnd = this.win.performance.now();
 				perf.markPhase("collisionSolve", solverEnd);
@@ -2242,8 +2255,8 @@ export class MagnificationController {
 		// §3.2: in DEEP it costs reads only while this group is armed.
 		const measureDeep = perf?.deepAutoScrollIntentActive === true;
 		const eligibilityStart = measureDeep ? this.win.performance.now() : 0;
-		if (!this.pointerExpanded || this.pressed) {
-			this.resetAllScrollIntent(this.pressed ? "pressed" : "collapsed");
+		if (!this.pointerExpanded || this.pressed || this.pointerSnap.locked) {
+			this.resetAllScrollIntent(this.pressed ? "pressed" : this.pointerSnap.locked ? "pointer-snap" : "collapsed");
 			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollEligibility",

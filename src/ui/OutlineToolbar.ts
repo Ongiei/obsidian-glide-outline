@@ -12,12 +12,13 @@ let controlId = 0;
 export class OutlineToolbar {
 	readonly el: HTMLElement;
 	private readonly depth: HTMLInputElement;
-	private readonly output: HTMLElement;
+	private readonly track: HTMLElement;
 	constructor(doc: Document, controls: OutlineControls) {
 		const win = doc.win as Window & {
 			createDiv: typeof createDiv;
 			createSpan: typeof createSpan;
 			createEl: typeof createEl;
+			Node: typeof Node;
 		};
 		this.el = win.createDiv();
 		this.el.className = "glide-outline-toolbar";
@@ -28,6 +29,24 @@ export class OutlineToolbar {
 		name.textContent = "Outline controls";
 		this.el.append(name);
 		this.el.setAttribute("aria-labelledby", name.id);
+		let pointerFocus = false;
+		this.el.addEventListener("pointerdown", () => {
+			pointerFocus = true;
+			this.el.classList.remove("is-keyboard-focus");
+		});
+		this.el.addEventListener("keydown", () => {
+			pointerFocus = false;
+			this.el.classList.add("is-keyboard-focus");
+		});
+		this.el.addEventListener("focusin", () => {
+			if (!pointerFocus) this.el.classList.add("is-keyboard-focus");
+		});
+		this.el.addEventListener("focusout", event => {
+			if (!(event.relatedTarget instanceof win.Node) || !this.el.contains(event.relatedTarget)) {
+				pointerFocus = false;
+				this.el.classList.remove("is-keyboard-focus");
+			}
+		});
 		const button = (label: string): HTMLButtonElement => {
 			const el = win.createEl("button");
 			el.type = "button";
@@ -49,6 +68,7 @@ export class OutlineToolbar {
 		settings.disabled = !controls.onOpenSettings;
 		settings.addEventListener("click", () => controls.onOpenSettings?.());
 		const track = win.createDiv();
+		this.track = track;
 		track.className = "glide-outline-depth";
 		const label = win.createSpan();
 		label.className = "glide-outline-a11y-label";
@@ -61,8 +81,6 @@ export class OutlineToolbar {
 		this.depth.step = "1";
 		this.depth.setAttribute("aria-labelledby", label.id);
 		this.depth.disabled = !controls.onSetDepth;
-		this.output = win.createEl("output");
-		this.output.className = "glide-outline-depth-value";
 		const ticks = win.createDiv();
 		ticks.className = "glide-outline-depth-ticks";
 		ticks.setAttribute("aria-hidden", "true");
@@ -72,7 +90,7 @@ export class OutlineToolbar {
 			ticks.append(tick);
 		}
 		track.append(label, this.depth, ticks);
-		this.el.append(track, this.output);
+		this.el.append(track);
 		this.depth.addEventListener("input", () => controls.onSetDepth?.(Number(this.depth.value), false));
 		this.depth.addEventListener("change", () => controls.onSetDepth?.(Number(this.depth.value), true));
 	}
@@ -81,6 +99,6 @@ export class OutlineToolbar {
 		for (let level = 2; level <= 6; level++) if (settings.showLevels[level - 1]) depth = level;
 		this.depth.value = String(depth);
 		this.depth.setAttribute("aria-valuetext", `H2 through H${depth}; H1 follows plugin settings`);
-		this.output.textContent = `H${depth}`;
+		this.track.style.setProperty("--glide-depth-fill", `${(depth - 1) * 20}%`);
 	}
 }

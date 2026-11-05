@@ -235,6 +235,7 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		flushFrame();
 		vi.advanceTimersByTime(100);
 		flushFrame();
+		runFrames(60); // neighbours converge; the held row's position stays fixed
 		const before = view.viewportEl.scrollTop;
 		const styles = [...view.listEl.children].map(el => el.getAttribute("style"));
 		for (let i = 0; i < 30; i++) {
@@ -270,9 +271,36 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		flushFrame();
 		vi.advanceTimersByTime(100);
 		flushFrame();
+		runFrames(60);
 		const styles = [...view.listEl.children].map(el => el.getAttribute("style"));
 		runFrames(30);
 		expect([...view.listEl.children].map(el => el.getAttribute("style"))).toEqual(styles);
+	});
+
+	it("a held heading stays in place while old peaks decay to one maximum", () => {
+		settings.maxScale = 2;
+		const rows = [...view.listEl.children] as HTMLElement[];
+		rows.forEach((row, i) => {
+			row.getBoundingClientRect = () => ({ top: 100 + i * 24 - view.viewportEl.scrollTop, height: 24, bottom: 124 + i * 24 - view.viewportEl.scrollTop, left: 0, right: 160, width: 160 }) as DOMRect;
+			const card = row.querySelector(".glide-outline-card") as HTMLElement;
+			card.getBoundingClientRect = () => {
+				const top = 100 + i * 24 - view.viewportEl.scrollTop + Number.parseFloat(row.style.getPropertyValue("--glide-shift-y") || "0");
+				return { top, bottom: top + 24, left: 0, right: 160, width: 160, height: 24 } as DOMRect;
+			};
+		});
+		controller.invalidate();
+		pointer("pointerenter", 250);
+		runFrames(30);
+		const card = rows[16].querySelector(".glide-outline-card") as HTMLElement;
+		const r = card.getBoundingClientRect();
+		card.dispatchEvent(new MouseEvent("pointermove", { clientX: 80, clientY: r.top + 12, bubbles: true }));
+		flushFrame();
+		const heldShift = Number.parseFloat(rows[16].style.getPropertyValue("--glide-shift-y") || "0");
+		runFrames(80);
+		const scales = rows.map(row => Number.parseFloat(row.style.getPropertyValue("--glide-scale") || "1"));
+		expect(scales[16]).toBe(2);
+		expect(scales.filter(s => s === 2)).toHaveLength(1);
+		expect(Number.parseFloat(rows[16].style.getPropertyValue("--glide-shift-y") || "0")).toBeCloseTo(heldShift, 1);
 	});
 
 	it("a manual wheel immediately releases a snapped card", () => {
