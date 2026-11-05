@@ -371,7 +371,7 @@ describe("MagnificationController frame-budget hot paths (sections 6/7/9)", () =
 		expect(report.derived.envelopeEnterReuseShare).toBeCloseTo(0.5);
 	});
 
-	it("§六: pointerleave rebuilds when stale, derives when fresh", () => {
+	it("§六: pointerleave defers stale geometry to RAF and derives fresh geometry", () => {
 		// --- stale path: leave WITHOUT a frame running, envelope still dirty.
 		const perfA = new PerfCapture();
 		perfA.start(window);
@@ -379,7 +379,7 @@ describe("MagnificationController frame-budget hot paths (sections 6/7/9)", () =
 		pointer("pointerenter", 200); // sets envelopeDirty, schedules a frame
 		pointer("pointerleave", 50, 10); // no frame yet → envelopeDirty still true
 		const reportA = perfA.stop(window)!;
-		expect(reportA.counters.envelopeSyncRebuildCount).toBe(1);
+		expect(reportA.counters.envelopeSyncRebuildCount).toBe(0);
 		expect(reportA.counters.envelopeDerivedLeaveCount).toBe(0);
 		cA.dispose();
 
@@ -387,6 +387,9 @@ describe("MagnificationController frame-budget hot paths (sections 6/7/9)", () =
 		pointer("pointerenter", 200);
 		vi.advanceTimersByTime(16);
 		flushFrame(); // envelope rebuilt → envelopeDirty = false
+		// Force one frame-owned containment decision to refresh the envelope.
+		window.dispatchEvent(new MouseEvent("pointermove", { clientX: 10, clientY: 200 }));
+		flushFrame();
 		pointer("pointerleave", 50, 10);
 		const report = perf.stop(window)!;
 		expect(report.counters.envelopeDerivedLeaveCount).toBeGreaterThanOrEqual(1);

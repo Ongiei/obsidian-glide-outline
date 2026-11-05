@@ -229,16 +229,16 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		}).not.toThrow();
 	});
 
-	it("snaps a resting card before edge scrolling and holds its displayed motion", () => {
+	it("snaps a resting central card and holds its displayed motion", () => {
 		const card = view.rootEl.querySelector(".glide-outline-card") as HTMLElement;
-		card.dispatchEvent(new MouseEvent("pointerenter", { clientY: 495, bubbles: true }));
+		card.dispatchEvent(new MouseEvent("pointerenter", { clientY: 300, bubbles: true }));
 		flushFrame();
 		vi.advanceTimersByTime(100);
 		flushFrame();
 		const before = view.viewportEl.scrollTop;
 		const styles = [...view.listEl.children].map(el => el.getAttribute("style"));
 		for (let i = 0; i < 30; i++) {
-			card.dispatchEvent(new MouseEvent("pointermove", { clientX: 2, clientY: 497, bubbles: true }));
+			card.dispatchEvent(new MouseEvent("pointermove", { clientX: 2, clientY: 302, bubbles: true }));
 			vi.advanceTimersByTime(16);
 			flushFrame();
 		}
@@ -248,6 +248,31 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		pointer("pointermove", 495);
 		runScrollFrames();
 		expect(view.viewportEl.scrollTop).toBeGreaterThan(before);
+	});
+
+	it.each([105, 495])("edge card at %s scrolls after dwell instead of snapping", (clientY) => {
+		const card = view.rootEl.querySelector(".glide-outline-card") as HTMLElement;
+		card.dispatchEvent(new MouseEvent("pointerenter", { clientY, bubbles: true }));
+		const before = view.viewportEl.scrollTop;
+		runScrollFrames();
+		if (clientY < 300) expect(view.viewportEl.scrollTop).toBeLessThan(before);
+		else expect(view.viewportEl.scrollTop).toBeGreaterThan(before);
+	});
+
+	it.each(["disabled", "dead-end"])("edge card still snaps when edge scrolling is %s", (reason) => {
+		if (reason === "disabled") settings.pointerAutoScroll = false;
+		else {
+			view.viewportEl.scrollTop = 800;
+			view.updateOverflowState();
+		}
+		const card = view.rootEl.querySelector(".glide-outline-card") as HTMLElement;
+		card.dispatchEvent(new MouseEvent("pointerenter", { clientY: 495, bubbles: true }));
+		flushFrame();
+		vi.advanceTimersByTime(100);
+		flushFrame();
+		const styles = [...view.listEl.children].map(el => el.getAttribute("style"));
+		runFrames(30);
+		expect([...view.listEl.children].map(el => el.getAttribute("style"))).toEqual(styles);
 	});
 
 	it("a manual wheel immediately releases a snapped card", () => {
@@ -262,6 +287,7 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 	});
 
 	it("activates the held heading exactly once after snapping", () => {
+		settings.pointerAutoScroll = false;
 		controller.dispose();
 		const jump = vi.fn();
 		controller = new MagnificationController(view, () => settings, null, jump);

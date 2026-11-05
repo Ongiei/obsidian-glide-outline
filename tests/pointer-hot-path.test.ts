@@ -143,6 +143,19 @@ describe("MagnificationController pointer hot path (sections 4/5/7)", () => {
 		querySpy.mockRestore();
 	});
 
+	it("a stale pointerleave performs zero geometry reads and coalesces until RAF", () => {
+		pointer("pointerenter", INSIDE.x, INSIDE.y);
+		const collect = vi.spyOn(view, "collectEnvelope");
+		const rect = vi.spyOn(Element.prototype, "getBoundingClientRect");
+		for (let i = 0; i < 20; i++) pointer("pointerleave", OUTSIDE.x, OUTSIDE.y);
+		expect(collect).not.toHaveBeenCalled();
+		expect(rect).not.toHaveBeenCalled();
+		flushFrame();
+		expect(collect).toHaveBeenCalledTimes(1);
+		rect.mockRestore();
+		collect.mockRestore();
+	});
+
 	it("window pointermove INSIDE the envelope cancels a pending collapse (section 7)", () => {
 		pointer("pointerenter", INSIDE.x, INSIDE.y);
 		settle();
