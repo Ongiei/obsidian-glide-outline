@@ -5,6 +5,7 @@ import { Diagnostics } from "./core/Diagnostics";
 import { PerfCapture } from "./core/PerfCapture";
 import { ColdStartTrace, setActiveColdStartTrace } from "./core/ColdStartTrace";
 import { FULL_MOTION_STATE } from "./utils/motion";
+import { setHeadingDepth } from "./utils/headingDepth";
 import {
 	DEFAULT_SETTINGS,
 	GlideOutlineSettingTab,
@@ -348,6 +349,21 @@ export default class GlideOutlinePlugin extends Plugin {
 			this.editorUpdates,
 			this.diagnostics,
 			this.perf,
+			{
+				onOpenSettings: () => {
+					const settings = (this.app as typeof this.app & {
+						setting?: { open(): void; openTabById(id: string): void };
+					}).setting;
+					if (!settings) { new Notice("Open the plugin settings from preferences."); return; }
+					settings.open();
+					settings.openTabById(this.manifest.id);
+				},
+				onSetDepth: (depth, commit) => {
+					setHeadingDepth(this.settings.showLevels, depth);
+					if (commit) void this.applySettings().catch(() => new Notice("Could not save heading visibility."));
+					else this.previewSettings();
+				},
+			},
 		);
 	}
 

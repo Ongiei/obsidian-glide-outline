@@ -8,6 +8,7 @@ import { HeadingProvider } from "./HeadingProvider";
 import { ActiveHeadingTracker } from "./ActiveHeadingTracker";
 import type { EditorUpdateBridge } from "./EditorUpdateBridge";
 import { GlideOutlineView } from "../ui/GlideOutlineView";
+import type { OutlineControls } from "../ui/OutlineToolbar";
 import { MagnificationController } from "../ui/MagnificationController";
 import {
 	sameHeadingItems,
@@ -88,6 +89,7 @@ export class GlideOutlineController {
 		private readonly diagnostics: Diagnostics | null = null,
 		/** On-demand perf capture (section 3); shared with magnification. */
 		private readonly perf: PerfCapture | null = null,
+		controls: OutlineControls = {},
 	) {
 		markColdStart("controllerAttachStart"); // §十三
 		this.renderComponent.load();
@@ -95,6 +97,7 @@ export class GlideOutlineController {
 			view.contentEl,
 			getSettings,
 			{
+				...controls,
 				// Keyboard activation (Enter / Space, event.detail === 0).
 				onJump: (item) => this.jumpTo(item),
 				renderLabel: (labelEl, item) => this.renderLabel(labelEl, item),
