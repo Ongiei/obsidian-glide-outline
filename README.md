@@ -10,6 +10,7 @@ https://github.com/user-attachments/assets/40130ca1-b9ce-4013-a5f2-bcc778a15e58
 
 ## Features
 
+- **Hover snap for accurate clicks.** Pause briefly on a heading label to hold it still. Small pointer jitter stays locked; moving away or scrolling the wheel releases it. The marker rail remains available for continuous browsing.
 - **Margin rail, not a panel.** A thin column of markers on the left or right edge of the current Markdown editor. No card, no border, no toolbar.
 - **Marker length encodes level.** H1 gets the longest marker, H6 the shortest. Line or dot style.
 - **Active heading highlight.** The heading you are currently reading is tinted with your theme accent colour.

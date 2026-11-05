@@ -110,6 +110,7 @@ export type AutoScrollStopReason =
 	| "zone-exit"
 	| "pointer-left"
 	| "pressed"
+	| "pointer-snap"
 	| "collapsed"
 	| "window-blur"
 	| "manual-wheel"

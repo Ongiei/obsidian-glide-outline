@@ -52,6 +52,7 @@ import {
 } from "../utils/motionInterp";
 import type { MotionItemState } from "../utils/motionInterp";
 import { resolveClickTarget } from "../utils/activation";
+import { PointerSnap } from "../utils/pointerSnap";
 import { closestOwned } from "./mount";
 import type { Diagnostics, ScrollDeltaSource } from "../core/Diagnostics";
 import type { PerfCapture, PerfCounters } from "../core/PerfCapture";
@@ -513,6 +514,9 @@ export class MagnificationController {
 	 * suspended entirely, so target AND displayed motion values are frozen
 	 * and the locked target cannot slide away (section 12). */
 	private pressed: PressedHeadingState | null = null;
+	private readonly pointerSnap = new PointerSnap();
+	private snapTimer = 0;
+	private snapTarget: EventTarget | null = null;
 
 	/**
 	 * Ownership predicate handed to every `closest()` on this hot path.
@@ -762,6 +766,7 @@ export class MagnificationController {
 	}
 
 	dispose(): void {
+		this.clearPointerSnap();
 		this.cancelFrame();
 		this.cancelCollapse();
 		this.clearPressed();
@@ -772,6 +777,7 @@ export class MagnificationController {
 
 	/** Mark the geometry cache stale and remember why (§十五). */
 	private markCacheDirty(reason: GeometryRebuildReason): void {
+		this.clearPointerSnap();
 		this.cacheDirty = true;
 		this.cacheDirtyReason = reason;
 	}
@@ -788,6 +794,7 @@ export class MagnificationController {
 	}
 
 	private onPointerEnter = (event: PointerEvent): void => {
+		this.snapTarget = event.target;
 		// §十二: the first pointer that reaches the rail is the moment the
 		// cold-start trace has been waiting for — an untouched outline is
 		// idle, not fast, so stability is only judged from here on.
@@ -845,6 +852,7 @@ export class MagnificationController {
 	 * into a single frame() run.
 	 */
 	private onPointerMove = (event: PointerEvent): void => {
+		this.snapTarget = event.target;
 		this.perf?.count("pointermoveCount");
 		this.cancelCollapse();
 		if (!this.pointerExpanded) {
@@ -880,6 +888,7 @@ export class MagnificationController {
 	private onPointerLeave = (event: PointerEvent): void => {
 		const related = event.relatedTarget;
 		if (this.isNodeInRoot(related)) return;
+		this.clearPointerSnap();
 		if (this.envelopeDirty) {
 			this.activeRange = this.computeRange();
 			this.rebuildEnvelope();
@@ -942,6 +951,7 @@ export class MagnificationController {
 			return;
 		}
 		this.perf?.count("pointermoveCount");
+		this.clearPointerSnap();
 		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
 		// §十: park the sample; the frame decides whether this was a gap
@@ -999,6 +1009,7 @@ export class MagnificationController {
 			}
 		}
 		if (decision.action !== "outline") return; // native path untouched
+		this.clearPointerSnap();
 		event.preventDefault();
 		event.stopPropagation();
 		// §四.2: counted as a scrollTop mutation / boundary clamp, but NOT
@@ -1271,6 +1282,7 @@ export class MagnificationController {
 	};
 
 	private onWindowBlur = (): void => {
+		this.clearPointerSnap();
 		this.clearPressed();
 		this.resetAllScrollIntent("window-blur");
 		this.pointer.overElement = false;
@@ -1451,6 +1463,28 @@ export class MagnificationController {
 		this.processWindowCheck();
 		if (measure && perf) {
 			perf.markPhase("read", this.win.performance.now());
+		}
+
+		// Freeze the displayed geometry BEFORE clicking, not only after
+		// pointerdown. Rail/gap browsing is unchanged; only real cards snap.
+		const card = closestOwned(this.snapTarget, ".glide-outline-card", this.ownsNode);
+		const row = card ? closestOwned(card, ".glide-outline-row", this.ownsNode) : null;
+		const wait = this.pointerSnap.update(
+			row?.getAttribute("data-key") ?? null,
+			this.lastPointerX, this.lastPointerY, now,
+		);
+		if (wait > 0 && this.snapTimer === 0) {
+			this.snapTimer = this.win.setTimeout(() => {
+				this.snapTimer = 0;
+				this.schedule("pointerMove");
+			}, wait);
+		}
+		if (this.pointerSnap.locked) {
+			this.resetAllScrollIntent("pointer-snap");
+			this.lastMotionTime = Number.NaN;
+			if (measure && perf) perf.endFrameAttribution(this.win.performance.now());
+			this.endFrame();
+			return;
 		}
 
 		if (Number.isNaN(this.lastPointerY)) {
@@ -3020,6 +3054,7 @@ export class MagnificationController {
 	}
 
 	private clearMagnification(): void {
+		this.clearPointerSnap();
 		for (const entry of this.cache) {
 			entry.el.style.removeProperty("--glide-scale");
 			entry.el.style.removeProperty("--glide-shift-y");
@@ -3041,6 +3076,13 @@ export class MagnificationController {
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
 		this.pendingAnchorTarget = null;
+	}
+
+	private clearPointerSnap(): void {
+		this.pointerSnap.clear();
+		this.snapTarget = null;
+		if (this.snapTimer !== 0) this.win.clearTimeout(this.snapTimer);
+		this.snapTimer = 0;
 	}
 
 	/** Bridge rect builder exposed for tests / geometry verification. */

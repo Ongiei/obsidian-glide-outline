@@ -229,6 +229,57 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		}).not.toThrow();
 	});
 
+	it("snaps a resting card before edge scrolling and holds its displayed motion", () => {
+		const card = view.rootEl.querySelector(".glide-outline-card") as HTMLElement;
+		card.dispatchEvent(new MouseEvent("pointerenter", { clientY: 495, bubbles: true }));
+		flushFrame();
+		vi.advanceTimersByTime(100);
+		flushFrame();
+		const before = view.viewportEl.scrollTop;
+		const styles = [...view.listEl.children].map(el => el.getAttribute("style"));
+		for (let i = 0; i < 30; i++) {
+			card.dispatchEvent(new MouseEvent("pointermove", { clientX: 2, clientY: 497, bubbles: true }));
+			vi.advanceTimersByTime(16);
+			flushFrame();
+		}
+		expect(view.viewportEl.scrollTop).toBe(before);
+		expect([...view.listEl.children].map(el => el.getAttribute("style"))).toEqual(styles);
+		// A deliberate move back to the rail releases the aiming pause.
+		pointer("pointermove", 495);
+		runScrollFrames();
+		expect(view.viewportEl.scrollTop).toBeGreaterThan(before);
+	});
+
+	it("a manual wheel immediately releases a snapped card", () => {
+		const card = view.rootEl.querySelector(".glide-outline-card") as HTMLElement;
+		card.dispatchEvent(new MouseEvent("pointerenter", { clientY: 300, bubbles: true }));
+		flushFrame();
+		vi.advanceTimersByTime(100);
+		flushFrame();
+		const before = view.viewportEl.scrollTop;
+		card.dispatchEvent(new WheelEvent("wheel", { deltaY: 40, bubbles: true, cancelable: true }));
+		expect(view.viewportEl.scrollTop).toBe(before + 40);
+	});
+
+	it("activates the held heading exactly once after snapping", () => {
+		controller.dispose();
+		const jump = vi.fn();
+		controller = new MagnificationController(view, () => settings, null, jump);
+		const card = view.rootEl.querySelector(".glide-outline-card") as HTMLElement;
+		card.getBoundingClientRect = () => ({ left: 0, right: 100, top: 480, bottom: 510 }) as DOMRect;
+		card.dispatchEvent(new MouseEvent("pointerenter", { clientY: 495, bubbles: true }));
+		flushFrame();
+		vi.advanceTimersByTime(100);
+		flushFrame();
+		for (const type of ["pointerdown", "pointerup"]) {
+			const event = new MouseEvent(type, { clientY: 495, bubbles: true });
+			Object.defineProperty(event, "pointerId", { value: 1 });
+			card.dispatchEvent(event);
+		}
+		card.dispatchEvent(new MouseEvent("click", { detail: 1, bubbles: true }));
+		expect(jump).toHaveBeenCalledExactlyOnceWith(HEADINGS[0]);
+	});
+
 	/** Dispatch a pointer event with a deterministic timeStamp (px/s math). */
 	function pointerAt(type: string, clientY: number, timeStamp: number): void {
 		const ev = new MouseEvent(type, { clientY, bubbles: true });
