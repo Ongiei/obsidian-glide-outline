@@ -53,6 +53,7 @@ import {
 import type { MotionItemState } from "../utils/motionInterp";
 import { resolveClickTarget } from "../utils/activation";
 import { PointerSnap } from "../utils/pointerSnap";
+import { HoverSession } from "../utils/hoverSession";
 import { closestOwned } from "./mount";
 import type { Diagnostics, ScrollDeltaSource } from "../core/Diagnostics";
 import type { PerfCapture, PerfCounters } from "../core/PerfCapture";
@@ -517,6 +518,10 @@ export class MagnificationController {
 	private readonly pointerSnap = new PointerSnap();
 	private snapTimer = 0;
 	private snapTarget: EventTarget | null = null;
+	private readonly hoverSession = new HoverSession();
+	private snappedRow: HTMLElement | null = null;
+	private aimY = Number.NaN;
+	private aimSettling = false;
 
 	/**
 	 * Ownership predicate handed to every `closest()` on this hot path.
@@ -558,6 +563,8 @@ export class MagnificationController {
 		this.disposables.listen(listEl, "pointerenter", this.onPointerEnter);
 		this.disposables.listen(listEl, "pointermove", this.onPointerMove);
 		this.disposables.listen(listEl, "pointerleave", this.onPointerLeave);
+		this.disposables.listen(view.toolbar.el, "pointerenter", this.onPointerEnter);
+		this.disposables.listen(view.toolbar.el, "pointerleave", this.onPointerLeave);
 
 		// Window-level pointer tracking keeps the envelope honest when the
 		// pointer crosses a transparent gap (e.g. the intra-row marker↔card
@@ -757,6 +764,8 @@ export class MagnificationController {
 	 * is the honest reading of "nothing else touched the outline since".
 	 */
 	noteContextChange(reason: "file-change" | "mode-change"): void {
+		this.hoverSession.clear();
+		this.clearPointerSnap();
 		this.scrollAttribution = { source: reason, ttl: 3 };
 		if (reason === "file-change") this.fileChangeTtl = 3;
 		else this.modeChangeTtl = 3;
@@ -891,7 +900,7 @@ export class MagnificationController {
 	private onPointerLeave = (event: PointerEvent): void => {
 		const related = event.relatedTarget;
 		if (this.isNodeInRoot(related)) return;
-		this.clearPointerSnap();
+		this.snapTarget = null;
 		if (this.envelopeDirty) {
 			this.lastPointerX = event.clientX;
 			this.lastPointerY = event.clientY;
@@ -909,12 +918,7 @@ export class MagnificationController {
 			this.perf?.count("envelopeDerivedLeaveCount");
 		}
 		if (
-			pointInEnvelope(
-				this.envelope,
-				event.clientX,
-				event.clientY,
-				this.clientYToContentY(event.clientY),
-			)
+			this.insideHoverSession(event.clientX, event.clientY)
 		) {
 			// Inside a transparent gap — keep expanded and, when a latched
 			// auto-scroll session is running, keep it running too (§十二:
@@ -934,6 +938,7 @@ export class MagnificationController {
 		}
 		this.pointer.overElement = false;
 		this.pointer.insideEnvelope = false;
+		this.clearPointerSnap();
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
 		this.resetAllScrollIntent("pointer-left");
@@ -962,7 +967,7 @@ export class MagnificationController {
 			return;
 		}
 		this.perf?.count("pointermoveCount");
-		this.clearPointerSnap();
+		this.snapTarget = null;
 		this.lastPointerX = event.clientX;
 		this.lastPointerY = event.clientY;
 		// §十: park the sample; the frame decides whether this was a gap
@@ -1083,12 +1088,7 @@ export class MagnificationController {
 			return;
 		}
 		if (
-			pointInEnvelope(
-				this.envelope,
-				this.lastPointerX,
-				this.lastPointerY,
-				this.clientYToContentY(this.lastPointerY),
-			)
+			this.insideHoverSession(this.lastPointerX, this.lastPointerY)
 		) {
 			// §十二: a window-level move that lands inside the envelope is a
 			// gap crossing, not an exit — the latch (if any) survives.
@@ -1111,6 +1111,7 @@ export class MagnificationController {
 		}
 		this.pointer.overElement = false;
 		this.pointer.insideEnvelope = false;
+		this.clearPointerSnap();
 		this.pointerAnchorEl = null;
 		this.anchorDirty = false;
 		this.resetAllScrollIntent("pointer-left");
@@ -1293,6 +1294,7 @@ export class MagnificationController {
 	};
 
 	private onWindowBlur = (): void => {
+		this.hoverSession.clear();
 		this.clearPointerSnap();
 		this.clearPressed();
 		this.resetAllScrollIntent("window-blur");
@@ -1360,6 +1362,7 @@ export class MagnificationController {
 		this.view.setFollowEnabled(!expanded);
 		this.view.setInteractionState(state);
 		if (!expanded) {
+			this.hoverSession.clear();
 			this.cancelFrame();
 			this.resetAllScrollIntent("collapsed");
 			this.clearMagnification();
@@ -1497,6 +1500,17 @@ export class MagnificationController {
 			edgeScroll ? null : row?.getAttribute("data-key") ?? null,
 			this.lastPointerX, this.lastPointerY, now,
 		);
+		if (edgeScroll) this.pointerSnap.clear();
+		const wasSnapped = this.snappedRow !== null;
+		const nextRow = this.pointerSnap.targetKey
+			? this.cache[this.cacheIndexByKey.get(this.pointerSnap.targetKey) ?? -1]?.el ?? null
+			: null;
+		if (nextRow !== this.snappedRow) {
+			this.snappedRow?.removeAttribute("data-glide-snapped");
+			this.snappedRow = nextRow;
+			nextRow?.setAttribute("data-glide-snapped", "true");
+		}
+		if (wasSnapped && !nextRow) this.aimSettling = true;
 		if (wait === 0 && this.snapTimer !== 0) {
 			this.win.clearTimeout(this.snapTimer);
 			this.snapTimer = 0;
@@ -1508,6 +1522,7 @@ export class MagnificationController {
 			}, wait);
 		}
 		if (this.pointerSnap.locked) {
+			if (!Number.isFinite(this.aimY)) this.aimY = this.lastPointerY;
 			this.resetAllScrollIntent("pointer-snap");
 			this.lastMotionTime = Number.NaN;
 			if (measure && perf) perf.endFrameAttribution(this.win.performance.now());
@@ -1581,7 +1596,11 @@ export class MagnificationController {
 			measureDeep && scrolledSinceLastFrame
 				? this.win.performance.now()
 				: 0;
-		const pointerContentY = this.clientYToContentY(this.lastPointerY);
+		if (this.aimSettling) {
+			this.aimY = stepToward(this.aimY, this.lastPointerY, motionAlpha(dtMs, 60), 0.5);
+			this.aimSettling = this.aimY !== this.lastPointerY;
+		} else this.aimY = this.lastPointerY;
+		const pointerContentY = this.clientYToContentY(this.aimY);
 		const contentWindow = this.contentRangeForViewport();
 		if (measureDeep && scrolledSinceLastFrame && perf) {
 			perf.addPhaseSample(
@@ -2095,7 +2114,7 @@ export class MagnificationController {
 			}
 		}
 		// Keep the loop alive until every displayed value converged.
-		if (converging) this.schedule("motionConverging");
+		if (converging || this.aimSettling) this.schedule("motionConverging");
 
 		if (measure && perf) {
 			// §四: close the frame; any small epilogue remainder lands in
@@ -3003,6 +3022,7 @@ export class MagnificationController {
 			start,
 			end,
 		);
+		if (this.pointerExpanded) this.hoverSession.include(this.envelope);
 		// §七: the view measures client rects; convert the ITEM rects into
 		// content space once, here. From now on an outline scroll leaves
 		// the whole envelope untouched (the rail stays client-space — it
@@ -3107,10 +3127,20 @@ export class MagnificationController {
 	}
 
 	private clearPointerSnap(): void {
+		this.snappedRow?.removeAttribute("data-glide-snapped");
+		this.snappedRow = null;
+		this.aimY = Number.NaN;
+		this.aimSettling = false;
 		this.pointerSnap.clear();
 		this.snapTarget = null;
 		if (this.snapTimer !== 0) this.win.clearTimeout(this.snapTimer);
 		this.snapTimer = 0;
+	}
+
+	private insideHoverSession(x: number, y: number): boolean {
+		this.hoverSession.include(this.envelope);
+		return pointInEnvelope(this.envelope, x, y, this.clientYToContentY(y)) ||
+			this.hoverSession.contains(x, y, this.viewportTop, this.viewportBottom);
 	}
 
 	/** Bridge rect builder exposed for tests / geometry verification. */

@@ -10,6 +10,7 @@ import { bridgeRectFor } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
 import type { PerfCapture } from "../core/PerfCapture";
 import { markColdStart } from "../core/ColdStartTrace";
+import { OutlineToolbar, type OutlineControls } from "./OutlineToolbar";
 import { createOutlineMount } from "./mount";
 import type { MountHostMutationDiagnostics, OutlineMount } from "./mount";
 
@@ -38,7 +39,7 @@ export function headingNeedsMarkdownRenderer(source: string): boolean {
 /** Monotonic id source for sr-only label elements (unique per window). */
 let a11yLabelSeq = 0;
 
-export interface GlideOutlineViewHandlers {
+export interface GlideOutlineViewHandlers extends OutlineControls {
 	onJump(item: HeadingItem): void;
 	/**
 	 * Optional rich-label renderer (Markdown). Called with an empty label
@@ -414,6 +415,7 @@ export interface ItemRecord {
  * and the transparent area over the editor stays clickable.
  */
 export class GlideOutlineView {
+	readonly toolbar: OutlineToolbar;
 	readonly rootEl: HTMLElement;
 	readonly hitZoneEl: HTMLElement;
 	readonly viewportEl: HTMLElement;
@@ -587,6 +589,8 @@ export class GlideOutlineView {
 
 		this.rootEl = this.doc.createElement("div");
 		this.rootEl.className = "glide-outline-root";
+		this.toolbar = new OutlineToolbar(this.doc, handlers);
+		this.rootEl.append(this.toolbar.el);
 
 		this.hitZoneEl = this.doc.createElement("div");
 		this.hitZoneEl.className = "glide-outline-hit-zone";
@@ -842,6 +846,7 @@ export class GlideOutlineView {
 	/** Re-apply CSS variables and position classes after a settings change. */
 	applySettings(): void {
 		const s = this.getSettings();
+		this.toolbar.refresh(s);
 		const root = this.rootEl;
 
 		root.classList.toggle("glide-outline-root--right", s.position === "right");

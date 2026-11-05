@@ -348,6 +348,20 @@ export default class GlideOutlinePlugin extends Plugin {
 			this.editorUpdates,
 			this.diagnostics,
 			this.perf,
+			{
+				onOpenSettings: () => {
+					const settings = (this.app as typeof this.app & {
+						setting?: { open(): void; openTabById(id: string): void };
+					}).setting;
+					if (!settings) { new Notice("Open the plugin settings from preferences."); return; }
+					settings.open();
+					settings.openTabById(this.manifest.id);
+				},
+				onToggleLevel: (level) => {
+					this.settings.showLevels[level - 1] = !this.settings.showLevels[level - 1];
+					void this.applySettings().catch(() => new Notice("Could not save heading visibility."));
+				},
+			},
 		);
 	}
 

@@ -10,15 +10,17 @@ https://github.com/user-attachments/assets/40130ca1-b9ce-4013-a5f2-bcc778a15e58
 
 ## Features
 
-- **Hover snap for accurate clicks.** Pause briefly on a heading label to hold it still. Small pointer jitter stays locked; moving away or scrolling the wheel releases it. Scrollable edge zones take priority over snapping, and the marker rail remains available for continuous browsing.
-- **Margin rail, not a panel.** A thin column of markers on the left or right edge of the current Markdown editor. No card, no border, no toolbar.
+- **Hover snap for accurate clicks.** Pause briefly on a heading label to hold it still. Small pointer movements keep the original target; larger movements release with a smooth handoff. Scrollable edge zones take priority over snapping.
+- **Stable long-to-short browsing.** The outline stays open while you move through shorter headings within the current browsing corridor. Only real cards and markers activate headings; there is no invisible click overlay.
+- **Fixed quick controls.** A faint, hover-revealed control row opens plugin settings and toggles H2–H6 independently. It stays outside the scrolling heading viewport and remains accessible when all headings are hidden.
+- **Margin rail, not a panel.** A thin column of markers on the left or right edge of the current Markdown editor, with no permanent sidebar.
 - **Marker length encodes level.** H1 gets the longest marker, H6 the shortest. Line or dot style.
 - **Active heading highlight.** The heading you are currently reading is tinted with your theme accent colour.
 - **Proximity reveal.** Hover near the rail and labels slide out from the margin toward the text.
 - **Dock magnification.** Cosine falloff scaling centred on the pointer, with gentle vertical displacement so magnified neighbours never overlap.
 - **Instant updates while typing.** Headings are parsed live from the editor on every change, then corrected by Obsidian's metadata cache.
 - **Accurate click-to-jump.** Works in Source Mode, Live Preview and Reading Mode — including duplicate headings — without reopening the file.
-- **Non-blocking by design.** Every drawing layer is pointer-transparent; only the thin marker rail and the actually visible label cards intercept clicks. The editor underneath stays fully interactive.
+- **Non-blocking by design.** Every drawing layer is pointer-transparent; only the thin marker rail, visible label cards and quick-control buttons intercept clicks. The editor underneath stays fully interactive.
 - **Narrow-pane aware.** In split layouts the rail measures its pane and shrinks labels so magnified text never clips; extremely narrow panes fall back to markers-only compact mode.
 - **Customisable label cards.** Background opacity, border, corner radius, shadow, padding and text shadow — down to a pure-text mode with no chrome at all.
 - **Optional Markdown labels.** Render inline formatting (bold, code, links…) inside heading labels, powered by Obsidian's own renderer.

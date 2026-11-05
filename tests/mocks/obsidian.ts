@@ -64,6 +64,10 @@ export class Notice {
 export class Plugin {}
 export class MarkdownView {}
 
+export function setIcon(el: HTMLElement, icon: string): void {
+	el.dataset.icon = icon;
+}
+
 export const MarkdownRenderer = {
 	render: async (): Promise<void> => {},
 };
