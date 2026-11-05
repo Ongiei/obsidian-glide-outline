@@ -49,4 +49,27 @@ describe("fixed outline controls", () => {
 		view.dispose();
 		host.remove();
 	});
+
+	it("puts every label inside the capsule and fills the cumulative H2–H4 span", () => {
+		const s = structuredClone(DEFAULT_SETTINGS);
+		s.showLevels = [true, true, true, true, false, false];
+		const toolbar = new OutlineToolbar(document, { onSetDepth: () => undefined });
+		toolbar.refresh(s);
+		expect(toolbar.el.querySelector("output")).toBeNull();
+		expect(toolbar.el.querySelector(".glide-outline-depth-ticks")!.textContent).toBe("H2H3H4H5H6");
+		expect((toolbar.el.querySelector(".glide-outline-depth") as HTMLElement).style.getPropertyValue("--glide-depth-fill")).toBe("60%");
+	});
+
+	it("pointer focus does not hold the toolbar opaque; keyboard focus remains visible", () => {
+		const toolbar = new OutlineToolbar(document, { onSetDepth: () => undefined });
+		const slider = toolbar.el.querySelector("input")!;
+		slider.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
+		slider.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+		toolbar.el.dispatchEvent(new Event("pointerleave"));
+		expect(toolbar.el.classList.contains("is-keyboard-focus")).toBe(false);
+		slider.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+		expect(toolbar.el.classList.contains("is-keyboard-focus")).toBe(true);
+		slider.dispatchEvent(new FocusEvent("focusout", { bubbles: true, relatedTarget: document.body }));
+		expect(toolbar.el.classList.contains("is-keyboard-focus")).toBe(false);
+	});
 });

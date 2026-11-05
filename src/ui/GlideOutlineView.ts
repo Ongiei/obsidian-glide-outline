@@ -534,6 +534,7 @@ export class GlideOutlineView {
 	private playheadGeometryRefreshCount = 0;
 	/** §五: which clause of `shouldShowCenterPlayhead()` last decided. */
 	private playheadVisibleReason = "init";
+	private activeTargetClamped = false;
 	/** §四/§十三: counters for tests and diagnostics. */
 	private readonly activeFollowDiag = {
 		requestCount: 0,
@@ -808,16 +809,9 @@ export class GlideOutlineView {
 		const previous = this.interactionState;
 		this.interactionState = state;
 		if (previous === "collapsed" && state !== "collapsed") {
-			// §十一: an EXPANSION must show the current heading straight
-			// away, so the in-flight follow is finished instantly rather
-			// than left to slide under the pointer.
-			//
-			// §十二: `pressed` is different — it freezes. The list stays
-			// exactly where the user grabbed it; snapping under a held
-			// pointer would yank the row out from under them. The session
-			// is only cancelled, and the pending target survives for the
-			// next collapse.
-			if (state !== "pressed") this.finishActiveFollowImmediately();
+			// Expansion and press both preserve the thumbnail's observed
+			// scroll position. Cancel the in-flight follow without jumping
+			// under the pointer; its pending target survives for collapse.
 			this.cancelActiveFollowSession(
 				state === "pressed" ? "cancelled-pressed" : "cancelled-expanded",
 			);
@@ -1883,6 +1877,8 @@ export class GlideOutlineView {
 		const activeCenter = measured.rowTop + measured.rowHeight / 2;
 		const maxScrollTop = Math.max(0, measured.scrollHeight - measured.clientHeight);
 		const target = Math.max(0, Math.min(maxScrollTop, activeCenter - playheadY));
+		this.activeTargetClamped = Math.abs(target - (activeCenter - playheadY)) > CENTER_ALIGNMENT_TOLERANCE_PX;
+		this.updatePlayheadState();
 		const diag = this.activeFollowDiag;
 		diag.lastRowContentCenter = activeCenter;
 		diag.lastPlayheadY = playheadY;
@@ -1983,8 +1979,8 @@ export class GlideOutlineView {
 		if (!this.itemRecords.has(this.activeKey)) {
 			return { visible: false, reason: "active-row-not-rendered" };
 		}
-		if (this.items[0]?.key === this.activeKey && this.topCenterSpacerPx === 0) {
-			return { visible: false, reason: "first-row-start-aligned" };
+		if (this.activeTargetClamped || (this.items[0]?.key === this.activeKey && this.topCenterSpacerPx === 0)) {
+			return { visible: false, reason: "start-aligned" };
 		}
 		if (this.rootEl.classList.contains("is-empty")) {
 			return { visible: false, reason: "root-empty" };

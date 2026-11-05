@@ -490,14 +490,21 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			);
 		});
 
-		it("expanding centres the active row before the rail opens", () => {
+		it("expanding preserves the thumbnail scroll position instead of snapping", () => {
 			view.setActiveKey(keyAt(110));
 			flushRaf(2);
+			const before = view.viewportEl.scrollTop;
 			view.setInteractionState("expanded-pointer");
-			expect(view.viewportEl.scrollTop).toBeCloseTo(
-				centeredTarget(110),
-				1,
-			);
+			expect(view.viewportEl.scrollTop).toBe(before);
+			flushRaf();
+			expect(view.viewportEl.scrollTop).toBe(before);
+		});
+
+		it("near-start clamped headings keep their real marker, not a false centre dot", () => {
+			mockRowLayout(ROW_H, 0);
+			followTo(3);
+			expect(view.viewportEl.scrollTop).toBe(0);
+			expect(view.isPlayheadVisible()).toBe(false);
 		});
 
 		it("expands without scrolling when there is no active heading", () => {

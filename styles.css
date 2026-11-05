@@ -633,7 +633,7 @@
 	inset-inline-end: auto;
 }
 :where([data-glide-outline-owner]) .glide-outline-toolbar:hover,
-:where([data-glide-outline-owner]) .glide-outline-toolbar:focus-within {
+:where([data-glide-outline-owner]) .glide-outline-toolbar.is-keyboard-focus {
 	opacity: 1;
 }
 :where([data-glide-outline-owner]) .glide-outline-toolbar .glide-outline-control {
@@ -669,52 +669,57 @@
 	opacity: 0.5;
 }
 :where([data-glide-outline-owner]) .glide-outline-depth {
-	display: grid;
-	grid-template-rows: 20px 10px;
-	width: 130px;
-	flex: 0 1 130px;
+	position: relative;
+	align-self: center;
+	box-sizing: border-box;
+	width: 170px;
+	height: 28px;
+	flex: 0 1 170px;
+	border: 1px solid var(--background-modifier-border-hover);
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--background-primary) 85%, transparent);
+	overflow: hidden;
 	pointer-events: auto;
 }
+:where([data-glide-outline-owner]) .glide-outline-depth::before {
+	content: "";
+	position: absolute;
+	inset: 2px auto 2px 2px;
+	width: calc(var(--glide-depth-fill, 20%) - 4px);
+	border-radius: inherit;
+	background: color-mix(in srgb, var(--interactive-accent) 16%, transparent);
+	pointer-events: none;
+	transition: width 100ms ease;
+}
 :where([data-glide-outline-owner]) .glide-outline-depth input {
+	position: absolute;
+	inset: 0;
 	width: 100%;
 	min-width: 65px;
 	margin: 0;
-	accent-color: var(--interactive-accent);
-	appearance: none;
-	height: 20px;
-	background: transparent;
+	height: 100%;
+	opacity: 0;
+	cursor: ew-resize;
+	z-index: 1;
 }
-:where([data-glide-outline-owner]) .glide-outline-depth input[type="range"]::-webkit-slider-runnable-track {
-	height: 2px;
-	border-radius: var(--radius-s);
-	background: var(--background-modifier-border-hover);
-}
-:where([data-glide-outline-owner]) .glide-outline-depth input[type="range"]::-webkit-slider-thumb {
-	appearance: none;
-	width: 12px;
-	height: 12px;
-	margin-top: -5px;
-	border: 0;
-	border-radius: 50%;
-	background: var(--interactive-accent);
-	box-shadow: none;
-}
-:where([data-glide-outline-owner]) .glide-outline-depth input:focus-visible {
+:where([data-glide-outline-owner]) .glide-outline-toolbar.is-keyboard-focus .glide-outline-depth {
 	outline: 2px solid var(--interactive-accent);
-	outline-offset: 1px;
+	outline-offset: -2px;
 }
 :where([data-glide-outline-owner]) .glide-outline-depth-ticks {
+	position: absolute;
+	inset: 0;
 	display: flex;
-	justify-content: space-between;
-	font-size: 9px;
-	line-height: 10px;
+	align-items: center;
+	justify-content: space-around;
+	font-size: 10px;
+	font-weight: 500;
 	color: var(--text-muted);
+	pointer-events: none;
 }
-:where([data-glide-outline-owner]) .glide-outline-depth-value {
-	align-self: center;
-	margin-inline-start: 6px;
-	font-size: var(--font-smallest);
-	color: var(--text-muted);
+:where([data-glide-outline-owner]) .glide-outline-depth-ticks span {
+	flex: 1;
+	text-align: center;
 }
 
 /* --------------------------------------------------------------------------
