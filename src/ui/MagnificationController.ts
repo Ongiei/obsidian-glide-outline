@@ -794,6 +794,8 @@ export class MagnificationController {
 	}
 
 	private onPointerEnter = (event: PointerEvent): void => {
+		this.windowCheckPending = false;
+		this.pendingPointerSample = null;
 		this.snapTarget = event.target;
 		// §十二: the first pointer that reaches the rail is the moment the
 		// cold-start trace has been waiting for — an untouched outline is
@@ -852,6 +854,8 @@ export class MagnificationController {
 	 * into a single frame() run.
 	 */
 	private onPointerMove = (event: PointerEvent): void => {
+		this.windowCheckPending = false;
+		this.pendingPointerSample = null;
 		this.snapTarget = event.target;
 		this.perf?.count("pointermoveCount");
 		this.cancelCollapse();
@@ -881,18 +885,25 @@ export class MagnificationController {
 	 * "authoritative" does not mean "re-read layout". Motion is the only
 	 * thing that moves these rects between frames, and motion is pure
 	 * math on the row cache — so the warm path derives and reads nothing.
-	 * A synchronous rebuild is left ONLY for a structurally stale
-	 * envelope (rows or expansion changed), where the cached rects
-	 * describe a layout that no longer exists.
+	 * A structurally stale envelope is checked in the next frame's read
+	 * phase. Never force layout in the leave handler after motion writes.
 	 */
 	private onPointerLeave = (event: PointerEvent): void => {
 		const related = event.relatedTarget;
 		if (this.isNodeInRoot(related)) return;
 		this.clearPointerSnap();
 		if (this.envelopeDirty) {
-			this.activeRange = this.computeRange();
-			this.rebuildEnvelope();
-			this.perf?.count("envelopeSyncRebuildCount");
+			this.lastPointerX = event.clientX;
+			this.lastPointerY = event.clientY;
+			this.pointer.overElement = false;
+			this.pointerAnchorEl = null;
+			this.anchorDirty = false;
+			this.windowCheckPending = true;
+			// Provisional grace: a frame-fresh inside decision cancels it;
+			// a hidden/throttled window still eventually collapses on exit.
+			this.armCollapse();
+			this.schedule("envelopeCheck");
+			return;
 		} else {
 			this.updateEnvelopeFromMotion();
 			this.perf?.count("envelopeDerivedLeaveCount");
@@ -1469,10 +1480,27 @@ export class MagnificationController {
 		// pointerdown. Rail/gap browsing is unchanged; only real cards snap.
 		const card = closestOwned(this.snapTarget, ".glide-outline-card", this.ownsNode);
 		const row = card ? closestOwned(card, ".glide-outline-row", this.ownsNode) : null;
+		// Edge browsing has priority over aiming. Otherwise the 100ms
+		// snap cancels the edge's 140ms dwell before it can ever scroll.
+		const overflow = this.view.getOverflowState();
+		const edgeScroll = computeEdgeScrollIntent({
+			pointerY: this.lastPointerY,
+			viewportTop: this.viewportTop,
+			viewportBottom: this.viewportBottom,
+			maxSpeed: AUTO_SCROLL_MAX_SPEED * settings.pointerAutoScrollSpeed,
+			triggerZonePx: settings.pointerAutoScrollZone,
+			canScrollUp: overflow.canScrollUp,
+			canScrollDown: overflow.canScrollDown,
+			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
+		}).velocity !== 0;
 		const wait = this.pointerSnap.update(
-			row?.getAttribute("data-key") ?? null,
+			edgeScroll ? null : row?.getAttribute("data-key") ?? null,
 			this.lastPointerX, this.lastPointerY, now,
 		);
+		if (wait === 0 && this.snapTimer !== 0) {
+			this.win.clearTimeout(this.snapTimer);
+			this.snapTimer = 0;
+		}
 		if (wait > 0 && this.snapTimer === 0) {
 			this.snapTimer = this.win.setTimeout(() => {
 				this.snapTimer = 0;
