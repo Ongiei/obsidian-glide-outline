@@ -17,6 +17,8 @@ import {
 import { matchPreviewHeadings } from "../utils/previewHeadings";
 import { FULL_MOTION_STATE } from "../utils/motion";
 import { ScrollCorrector } from "./ScrollCorrector";
+import { EditorPositionAdapter } from "./EditorPositionAdapter";
+import type { CmViewLike } from "./EditorPositionAdapter";
 import type { JumpLandingEvaluation } from "./ScrollCorrector";
 import { evaluateJumpLanding } from "./jumpLanding";
 import type { Diagnostics } from "./Diagnostics";
@@ -39,8 +41,7 @@ const JUMP_MAX_CORRECTIONS = 3;
 const JUMP_SETTLE_TIMEOUT_MS = 700;
 
 /** Minimal CM surface for jump scrolling (accessed defensively). */
-interface CmView {
-	scrollDOM: HTMLElement;
+interface CmView extends CmViewLike {
 	/**
 	 * §五: the content origin. Needed to convert document space
 	 * (`lineBlockAt`) into scroll space; Obsidian puts the inline title and
@@ -71,10 +72,16 @@ export class GlideOutlineController {
 	/** Owns the lifecycle of rendered Markdown labels (Phase 7). */
 	private readonly renderComponent = new Component();
 	private items: HeadingItem[] = [];
+	private renderedSourcePath: string | null = null;
+	private contextPath: string;
+	private contextMode: string;
 	private disposed = false;
 	private unsubscribeEditorUpdates: (() => void) | null = null;
 	/** In-flight editor jump correction; a new jump cancels the old one. */
 	private corrector: ScrollCorrector | null = null;
+	private jumpRevision = 0;
+	private previewJumpFrame = 0;
+	private previewJumpWindow: Window | null = null;
 	/**
 	 * Reading-Mode headings we temporarily made focusable. They are
 	 * Obsidian's nodes, so the attribute must never outlive us.
@@ -91,6 +98,8 @@ export class GlideOutlineController {
 		private readonly perf: PerfCapture | null = null,
 		controls: OutlineControls = {},
 	) {
+		this.contextPath = view.file?.path ?? "";
+		this.contextMode = view.getMode();
 		markColdStart("controllerAttachStart"); // §十三
 		this.renderComponent.load();
 		this.outlineView = new GlideOutlineView(
@@ -115,8 +124,10 @@ export class GlideOutlineController {
 			(item) => this.jumpTo(item),
 			this.perf,
 		);
-		this.tracker = new ActiveHeadingTracker(view, (key) =>
-			this.outlineView.setActiveKey(key),
+		this.tracker = new ActiveHeadingTracker(
+			view,
+			(key) => this.outlineView.setActiveKey(key),
+			() => this.cancelPendingJump(),
 		);
 		// P0-2: consume the workspace-wide CM update feed, but only the
 		// updates that belong to THIS view's editor (identity check).
@@ -152,6 +163,7 @@ export class GlideOutlineController {
 	handleEditorChange(editor: Editor, info: unknown): void {
 		if (this.disposed) return;
 		if (info !== this.view && editor !== this.view.editor) return;
+		this.cancelPendingJump();
 		this.refreshFromEditor();
 	}
 
@@ -164,6 +176,14 @@ export class GlideOutlineController {
 	/** Same view, different file (file-open) or mode switch (layout-change). */
 	handleContextChange(reason: "file-change" | "mode-change" = "mode-change"): void {
 		if (this.disposed) return;
+		const path = this.view.file?.path ?? "";
+		const mode = this.view.getMode();
+		if (path !== this.contextPath || mode !== this.contextMode) {
+			this.cancelPendingJump();
+			this.tracker.resetContext();
+			this.contextPath = path;
+			this.contextMode = mode;
+		}
 		// §十: leave a short-lived attribution note so a large scrollTop
 		// swing caused by the context switch is classified correctly.
 		this.magnification.noteContextChange(reason);
@@ -175,7 +195,7 @@ export class GlideOutlineController {
 		if (this.disposed) return;
 		this.outlineView.applySettings();
 		// Level filter may have changed — re-render from the full model.
-		this.outlineView.setItems(this.items);
+		this.outlineView.setItems(this.items, this.view.file?.path ?? "");
 		this.magnification.invalidate();
 		this.tracker.setItems(this.outlineView.getItems());
 	}
@@ -183,8 +203,7 @@ export class GlideOutlineController {
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
-		this.corrector?.dispose();
-		this.corrector = null;
+		this.cancelPendingJump();
 		this.unsubscribeEditorUpdates?.();
 		this.unsubscribeEditorUpdates = null;
 		this.tracker.dispose();
@@ -220,8 +239,10 @@ export class GlideOutlineController {
 	 * Render inline Markdown into a label element (Phase 7).
 	 * Falls back to plain text when rendering fails for any reason.
 	 */
-	private renderLabel(labelEl: HTMLElement, item: HeadingItem): void {
+	private renderLabel(labelEl: HTMLElement, item: HeadingItem): () => void {
 		const sourcePath = this.view.file?.path ?? "";
+		const component = this.renderComponent.addChild(new Component());
+		let active = true;
 		// §十三: label rendering is Obsidian's, not ours — this only times
 		// it. A cold start that opens a note with a hundred rich headings
 		// pays for a hundred of these before anything can settle, and that
@@ -232,14 +253,19 @@ export class GlideOutlineController {
 			item.displaySource,
 			labelEl,
 			sourcePath,
-			this.renderComponent,
+			component,
 		)
 			.then(() => {
 				noteColdStartMarkdownLabel(coldStartClock() - startedAt);
 			})
 			.catch(() => {
-				labelEl.textContent = item.text;
+				if (active) labelEl.textContent = item.text;
 			});
+		return () => {
+			if (!active) return;
+			active = false;
+			this.renderComponent.removeChild(component);
+		};
 	}
 
 	private setItems(items: HeadingItem[]): void {
@@ -248,18 +274,21 @@ export class GlideOutlineController {
 		// offsetHeight sweep is not. If heading identity, content and line
 		// positions are all unchanged, the existing view/tracker snapshot is
 		// already authoritative and no downstream work is needed.
-		if (sameHeadingItems(items, this.items)) return;
+		const sourcePath = this.view.file?.path ?? "";
+		if (sourcePath === this.renderedSourcePath && sameHeadingItems(items, this.items)) return;
+		this.renderedSourcePath = sourcePath;
 		const keysChanged = !sameHeadingKeys(items, this.items);
 		this.items = items;
 		// Always push to the view: even when identities are unchanged, line
 		// numbers may have shifted (view stores them for jumps via the model).
-		this.outlineView.setItems(items);
+		this.outlineView.setItems(items, sourcePath);
 		this.tracker.setItems(this.outlineView.getItems());
 		if (keysChanged) this.magnification.invalidate();
 	}
 
 	private jumpTo(item: HeadingItem): void {
 		if (this.disposed) return;
+		this.cancelPendingJump();
 		// Motion is always full — smooth jumps everywhere.
 		const behavior: ScrollBehavior = FULL_MOTION_STATE.smoothJump
 			? "smooth"
@@ -277,6 +306,32 @@ export class GlideOutlineController {
 		// mistaken for a user cursor move). Armed inside jumpInEditor where
 		// the clamped target line is known.
 		this.jumpInEditor(item, behavior);
+	}
+
+	/** One cancellation boundary for editor correction and preview retries. */
+	private cancelPendingJump(): void {
+		this.jumpRevision++;
+		this.corrector?.dispose();
+		this.corrector = null;
+		if (this.previewJumpFrame) {
+			this.previewJumpWindow?.cancelAnimationFrame(this.previewJumpFrame);
+		}
+		this.previewJumpFrame = 0;
+		this.previewJumpWindow = null;
+	}
+
+	/** Also guards late callbacks if the host changes context before its event. */
+	private captureJumpContext(): () => boolean {
+		const revision = this.jumpRevision;
+		const path = this.view.file?.path;
+		const mode = this.view.getMode();
+		const editor = this.view.editor;
+		const getCm = () => (editor as unknown as { cm?: { state?: { doc?: unknown } } }).cm;
+		const cm = getCm();
+		const document = cm?.state?.doc;
+		return () => !this.disposed && revision === this.jumpRevision &&
+			path === this.view.file?.path && mode === this.view.getMode() &&
+			editor === this.view.editor && cm === getCm() && document === cm?.state?.doc;
 	}
 
 	/**
@@ -364,6 +419,7 @@ export class GlideOutlineController {
 		const scroller = cm.scrollDOM;
 		const win = this.view.contentEl.ownerDocument.defaultView;
 		const smooth = behavior === "smooth";
+		const isCurrent = this.captureJumpContext();
 		if (!win) {
 			// Detached document — no timers available; jump uncorrected.
 			cm.dispatch({ effects: this.scrollEffect(offset) });
@@ -377,7 +433,7 @@ export class GlideOutlineController {
 			timeoutMs: JUMP_SETTLE_TIMEOUT_MS,
 			evaluate,
 			requestScroll: (desiredScrollTop) => {
-				if (this.disposed) return;
+				if (!isCurrent()) return;
 				try {
 					// §四: the ONLY scroll primitive of the normal path.
 					scroller.scrollTo({
@@ -389,7 +445,7 @@ export class GlideOutlineController {
 				}
 			},
 			requestInstantFallback: () => {
-				if (this.disposed) return;
+				if (!isCurrent()) return;
 				try {
 					// Not measurable at all: CM's own effect can measure
 					// its way there, which no smooth target could.
@@ -468,14 +524,7 @@ export class GlideOutlineController {
 				documentTop = null;
 			}
 
-			let contentOriginOffset: number | null = null;
-			const contentDOM = cm.contentDOM;
-			if (typeof contentDOM?.getBoundingClientRect === "function") {
-				contentOriginOffset =
-					contentDOM.getBoundingClientRect().top -
-					scrollerRect.top +
-					scrollTop;
-			}
+			const contentOriginOffset = new EditorPositionAdapter(cm).contentOriginOffset();
 
 			return {
 				scrollTop,
@@ -536,8 +585,13 @@ export class GlideOutlineController {
 		if (this.scrollPreviewToItem(item, behavior)) return;
 		this.view.setEphemeralState({ line: item.line });
 		const win = this.view.contentEl.ownerDocument.defaultView;
-		win?.requestAnimationFrame(() => {
-			if (this.disposed) return;
+		if (!win) return;
+		const isCurrent = this.captureJumpContext();
+		this.previewJumpWindow = win;
+		this.previewJumpFrame = win.requestAnimationFrame(() => {
+			this.previewJumpFrame = 0;
+			this.previewJumpWindow = null;
+			if (!isCurrent()) return;
 			this.scrollPreviewToItem(item, "auto");
 		});
 	}

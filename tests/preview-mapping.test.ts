@@ -170,4 +170,26 @@ describe("matchPreviewHeadings (P0-4)", () => {
 		const preview = buildPreview([{ tag: "h3", text: "Title", line: 3 }]);
 		expect(matchPreviewHeadings(preview, items)).toHaveLength(0);
 	});
+
+	it("leaves a virtualized duplicate without a source line unmatched", () => {
+		const items = [heading(2, "Notes", 10, 0), heading(2, "Notes", 100, 1), heading(2, "Notes", 200, 2)];
+		const preview = buildPreview([{ tag: "h2", text: "Notes" }]);
+		expect(matchPreviewHeadings(preview, items)).toEqual([]);
+	});
+
+	it("retains reliable source lines when other duplicates are ambiguous", () => {
+		const items = [heading(2, "Notes", 10, 0), heading(2, "Notes", 100, 1), heading(2, "Notes", 200, 2)];
+		const preview = buildPreview([
+			{ tag: "h2", text: "Notes" }, { tag: "h2", text: "Notes", line: 200 },
+		]);
+		expect(matchPreviewHeadings(preview, items).map((match) => match.modelIndex)).toEqual([2]);
+	});
+
+	it("does not override conflicting line anchors with occurrence order", () => {
+		const items = [heading(2, "Notes", 10, 0), heading(2, "Notes", 100, 1)];
+		const preview = buildPreview([
+			{ tag: "h2", text: "Notes" }, { tag: "h2", text: "Notes", line: 10 },
+		]);
+		expect(matchPreviewHeadings(preview, items).map((match) => match.modelIndex)).toEqual([0]);
+	});
 });
