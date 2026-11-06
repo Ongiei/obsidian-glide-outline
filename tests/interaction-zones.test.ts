@@ -184,6 +184,30 @@ describe("interaction zones: rail versus 126 heading cards", () => {
 			expect(f.view.viewportEl.scrollTop).toBe(900);
 		}
 	});
+	it.each(["left", "right"] as const)("%s sequential heading transfers do not accumulate a column translation", side => {
+		f = fixture(side);
+		f.settings.pointerFollowEnabled = false;
+		f.settings.pointerAutoScroll = false;
+		f.settings.maxScale = 1.85;
+		f.view.viewportEl.scrollTop = 0;
+		const state = f.controller as unknown as { snapAnchorShift: number; pointerSnap: { targetKey: string | null } };
+		const visit = (i: number) => {
+			const card = f.card(i), rect = card.getBoundingClientRect();
+			const x = side === "left" ? rect.left + 30 : rect.right - 30;
+			f.event(card, "pointermove", x, (rect.top + rect.bottom) / 2);
+			step(50);
+			expect(state.pointerSnap.targetKey).toBe(f.items[i].key);
+		};
+		const first = f.card(0).getBoundingClientRect();
+		f.event(f.card(0), "pointerenter", side === "left" ? first.left + 30 : first.right - 30, (first.top + first.bottom) / 2);
+		step(50);
+		const origin = state.snapAnchorShift;
+		for (const i of [1, 2, 3, 4, 5, 6, 7, 6, 5, 4, 3, 2, 1, 0]) {
+			visit(i);
+			expect(state.snapAnchorShift).toBeCloseTo(origin, 5);
+			expect(f.view.viewportEl.scrollTop).toBe(0);
+		}
+	});
 	it.each(["left", "right"] as const)("D: %s micro-moves keep one owner despite alternating DOM targets", side => {
 		f = fixture(side);
 		const i = f.nearest(280), card = f.card(i), r = card.getBoundingClientRect();

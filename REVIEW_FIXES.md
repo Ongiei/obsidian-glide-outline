@@ -101,3 +101,21 @@ Chinese host language now supplies Chinese tabs, setting names, descriptions,
 options and reset-button text. Actual-host checks clicked all four tabs and
 verified Chinese panels and 34 search aliases. The earlier native-group counts
 above describe the superseded implementation, not the current interface.
+
+## Sequential selection drift correction — 2026-11-07
+
+Neighbour handoffs previously copied the new heading's displayed collision
+shift into snapAnchorShift, which was then added to every solved row. Repeated
+handoffs therefore accumulated displacement into the whole-column origin.
+The origin is now captured once per continuous snap session, retained across
+handoffs, and reset on release. The new focus settles using the existing
+interpolation. Real movement of at least 6px onto a live adjacent card may
+transfer ownership outside the current card even if the old acquired rectangle
+still overlaps it; smaller pointer noise retains the original owner.
+
+Left/right regressions walk from heading 0 to 7 and back. The previous code
+failed with a 23.01px origin change on the first handoff. An actual Test Vaults
+run at 1.85× scale and 2.5× follow strength completed 24 transfers (12 down and
+12 back), sampled 202 frames, with zero origin drift, zero list scroll and
+0.02px return-position difference. This is programmatic runtime evidence, not
+a substitute for physical-mouse acceptance. No release or tag is created.
