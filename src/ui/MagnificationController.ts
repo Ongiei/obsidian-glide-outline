@@ -1508,20 +1508,22 @@ export class MagnificationController {
 			canScrollDown: overflow.canScrollDown,
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
 		}).velocity !== 0;
-		const deliberateGesture = Math.abs(this.kinematics.velocityY) > POINTER_FOLLOW_MIN_SPEED &&
-			!this.pointerSnap.inDeadband(this.lastPointerX, this.lastPointerY);
+		const held = this.pointerSnap.holds(this.lastPointerX, this.lastPointerY);
+		const deliberateGesture = settings.pointerFollowEnabled && overflow.hasOverflow &&
+			now - this.kinematics.lastSampleTime <= 90 &&
+			Math.abs(this.kinematics.velocityY) > POINTER_FOLLOW_MIN_SPEED && !held;
 		const scrollOwnsPointer = edgeScroll || this.edgeIntent.latched || this.edgeCoasting ||
 			Math.abs(this.integrator.appliedVelocity) > 8 || deliberateGesture;
 		if (scrollOwnsPointer) this.pointerSnap.clear();
-		const held = this.pointerSnap.holds(this.lastPointerX, this.lastPointerY);
 		// Only acquisition reads one real card rect, in the READ phase.
 		// Once held, geometry is frozen and speed/acceleration cannot eject it.
-		const canAcquire = !scrollOwnsPointer && !this.aimSettling;
+		// Visual release easing must not block acquiring a valid new card.
+		const canAcquire = !scrollOwnsPointer;
 		const bounds = !held && canAcquire && card ? card.getBoundingClientRect() : undefined;
 		const staleHit = bounds && bounds.right > bounds.left && bounds.bottom > bounds.top &&
 			!pointInRect(bounds, this.lastPointerX, this.lastPointerY);
 		this.pointerSnap.update(
-			(!canAcquire && !held) || staleHit ? null : row?.getAttribute("data-key") ?? null,
+			!canAcquire || staleHit ? null : row?.getAttribute("data-key") ?? null,
 			this.lastPointerX, this.lastPointerY, now, bounds,
 		);
 		const wasSnapped = this.snappedRow !== null;

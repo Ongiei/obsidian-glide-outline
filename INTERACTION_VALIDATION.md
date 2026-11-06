@@ -12,7 +12,7 @@ Local comparison branch: codex/interaction-baseline-a128b5d.
   measured rail, not assumed screen coordinates.
 - Hover Snap previously reset both intents, the applied velocity and the
   pointer sample ring. It now yields to rail-edge intent, meaningful pointer
-  motion outside the snap deadband, or an already-moving integrator.
+  motion outside the snap retention geometry, or an already-moving integrator.
   Pressed Target Lock remains independent and immediately freezes motion.
 - Edge owns the integrator while eligible, rather than adding an opposing
   follow velocity. Rail exit brakes the existing velocity before follow
@@ -58,3 +58,36 @@ jitter on enlarged cards, rapid reversal/deceleration, long-to-short gap
 crossings and click accuracy after scrolling. Compare the existing zone
 setting with 40px manually; this draft does not overwrite user preferences.
 Do not merge or release until those checks are approved.
+
+## Follow-up review: snap ownership and endpoint symmetry
+
+- Reproduced a controller-level mismatch: `PointerSnap.holds` accepts the
+  acquired card plus tolerance OR the 18px deadband, but the controller
+  checked only that deadband before clearing the lock for pointer velocity.
+  A fast move inside a tall card therefore lost its valid owner. Both now
+  use the same retention predicate; rail edge and already-running scroll
+  still win. Follow must also be enabled, have overflow and have a fresh
+  sample before it can claim a new gesture.
+- Release used to force one empty ownership frame in `PointerSnap.update`,
+  followed by a controller acquisition embargo until `aimSettling` ended.
+  A valid neighbouring card now takes ownership immediately when no scroll
+  owns the gesture. Visual release easing continues only when there is no
+  valid new target. Press target locking remains unchanged.
+- No solver, collision taper, envelope algorithm, maximum speed, damping,
+  edge depth or saved setting was changed in this follow-up. The retained
+  geometry is still frozen at acquisition; subjective behaviour at the
+  boundary of a card that grows during magnification needs real mouse QA.
+- Removed the bottom half-viewport spacer to match the already-zero top
+  spacer. Endpoint active-follow now clamps to the actual scroll extent;
+  the existing clamped-target path hides the misleading centre playhead.
+  Expansion does not change layout or the endpoint scroll position.
+- Settings now uses the native `settings` gear, with a 24px round hit/hover
+  surface aligned to the 24px depth control. Resting Hx remains unpainted.
+- Regression coverage adds fast in-card movement, disabled-follow handoff,
+  slow handoff during release easing, left/right 1–3px jitter with alternating
+  DOM hits, and last-row bottom alignment across expansion. These complement
+  existing continuous-edge, press locking, no-overlap and idle-RAF tests.
+
+These checks establish deterministic decision behaviour, not proof of
+subjectively smooth physical-pointer interaction. Test Vaults human acceptance
+is still required before merging this draft.

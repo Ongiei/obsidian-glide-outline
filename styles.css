@@ -641,9 +641,10 @@
 	box-sizing: border-box;
 	display: grid;
 	place-items: center;
-	flex: 0 0 30px;
-	height: 30px;
-	border-radius: var(--radius-s);
+	flex: 0 0 24px;
+	height: 24px;
+	align-self: center;
+	border-radius: 50%;
 	color: var(--text-muted);
 	font-size: var(--font-smallest);
 	cursor: pointer;

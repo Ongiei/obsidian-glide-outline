@@ -63,7 +63,7 @@ export class OutlineToolbar {
 		const settings = button("Open plugin settings");
 		const icon = win.createSpan();
 		icon.setAttribute("aria-hidden", "true");
-		setIcon(icon, "settings-2");
+		setIcon(icon, "settings");
 		settings.append(icon);
 		settings.disabled = !controls.onOpenSettings;
 		settings.addEventListener("click", () => controls.onOpenSettings?.());

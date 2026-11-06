@@ -126,6 +126,56 @@ describe("interaction zones: rail versus 126 heading cards", () => {
 		const state = f.controller as unknown as { kinematics: { samples: { length: number } } };
 		expect(state.kinematics.samples.length).toBe(2);
 	});
+	it("retains a snap during a fast move inside the acquired tall card", () => {
+		f = fixture();
+		const card = f.card(f.nearest(280));
+		card.getBoundingClientRect = () => ({ left: 136, right: 600, top: 250, bottom: 350 }) as DOMRect;
+		f.event(card, "pointerenter", f.cardX, 280); step(40);
+		const state = f.controller as unknown as { pointerSnap: { targetKey: string | null } };
+		const key = state.pointerSnap.targetKey;
+		expect(key).not.toBeNull();
+		f.event(card, "pointermove", f.cardX, 281); step();
+		f.event(card, "pointermove", f.cardX, 310); step();
+		expect(state.pointerSnap.targetKey).toBe(key);
+		expect(f.view.viewportEl.scrollTop).toBe(900);
+	});
+	it("does not let disabled follow cancel a fast card-to-card handoff", () => {
+		f = fixture(); f.settings.pointerFollowEnabled = false; f.settings.pointerAutoScroll = false;
+		const a = f.card(f.nearest(280)), b = f.card(f.nearest(350));
+		a.getBoundingClientRect = () => ({ left: 136, right: 600, top: 270, bottom: 300 }) as DOMRect;
+		b.getBoundingClientRect = () => ({ left: 136, right: 600, top: 330, bottom: 370 }) as DOMRect;
+		f.event(a, "pointerenter", f.cardX, 280); step(40);
+		f.event(a, "pointermove", f.cardX, 281); step();
+		f.event(b, "pointermove", f.cardX, 350); step();
+		const state = f.controller as unknown as { pointerSnap: { targetKey: string | null } };
+		expect(state.pointerSnap.targetKey).toBe(b.closest(".glide-outline-row")?.getAttribute("data-key"));
+	});
+	it.each(["left", "right"] as const)("D: %s micro-moves keep one owner despite alternating DOM targets", side => {
+		f = fixture(side);
+		const i = f.nearest(280), card = f.card(i), r = card.getBoundingClientRect();
+		const x = (r.left + r.right) / 2, y = (r.top + r.bottom) / 2;
+		f.event(card, "pointerenter", x, y); step(40);
+		const state = f.controller as unknown as { pointerSnap: { targetKey: string | null } };
+		const key = state.pointerSnap.targetKey;
+		expect(key).not.toBeNull();
+		for (let n = 0; n < 30; n++) {
+			f.event(f.card(i + n % 2), "pointermove", x + n % 3, y + n % 3); step();
+			expect(state.pointerSnap.targetKey).toBe(key);
+			expect(f.view.listEl.querySelectorAll("[data-glide-snapped]")).toHaveLength(1);
+		}
+	});
+	it("acquires a slow neighbouring card without waiting for visual release easing", () => {
+		f = fixture(); f.settings.pointerAutoScroll = false;
+		const a = f.card(f.nearest(280)), b = f.card(f.nearest(350));
+		a.getBoundingClientRect = () => ({ left: 136, right: 600, top: 270, bottom: 300 }) as DOMRect;
+		b.getBoundingClientRect = () => ({ left: 136, right: 600, top: 330, bottom: 370 }) as DOMRect;
+		f.event(a, "pointerenter", f.cardX, 280); step(40);
+		// A slow move across a real gap first releases the held heading.
+		f.event(f.view.listEl, "pointermove", f.cardX, 329); step();
+		f.event(b, "pointermove", f.cardX, 330); step();
+		const state = f.controller as unknown as { pointerSnap: { targetKey: string | null } };
+		expect(state.pointerSnap.targetKey).toBe(b.closest(".glide-outline-row")?.getAttribute("data-key"));
+	});
 	it("B: entering the rail end overrides a nearby old card snap", () => {
 		f = fixture();
 		const card = f.card(f.nearest(490));

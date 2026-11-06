@@ -2061,16 +2061,12 @@ export class GlideOutlineView {
 				lastRecord = record;
 			}
 			if (firstRecord !== undefined && lastRecord !== undefined) {
-				const centreY = this.playheadViewportY;
 				const firstRowHeight = firstRecord.rowEl.offsetHeight || 0;
 				const lastRowHeight = lastRecord.rowEl.offsetHeight || 0;
-				// The first heading starts below the toolbar, not halfway
-				// down the pane. Later headings may still follow the playhead.
+				// Neither end needs half a viewport of empty content. Interior
+				// headings follow the playhead; endpoints clamp to the real list.
 				const topSpacer = 0;
-				const bottomSpacer = Math.max(
-					0,
-					clientHeight - centreY - lastRowHeight / 2,
-				);
+				const bottomSpacer = 0;
 				this.firstRowHeightPx = firstRowHeight;
 				this.lastRowHeightPx = lastRowHeight;
 				this.topCenterSpacerPx = topSpacer;

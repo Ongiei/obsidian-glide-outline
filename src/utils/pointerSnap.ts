@@ -35,7 +35,10 @@ export class PointerSnap {
 		// DOM hits may change as neighbours move or a tiny hand movement
 		// crosses a gap. Keep the ORIGINAL target through that deadband.
 		if (this.holds(x, y)) return 0;
-		if (this.locked) { this.clear(); return 0; }
+		// A valid neighbouring card can take over in this same frame.
+		// Releasing first and waiting another frame creates a visible gap
+		// in target ownership even during a deliberate slow handoff.
+		if (this.locked) this.clear();
 		if (!key) { this.clear(); return 0; }
 		this.key = key;
 		this.x = x;
