@@ -57,11 +57,9 @@ function previewHeadingText(element: HTMLElement): string {
  * 1. SOURCE LINE (authoritative): when the DOM carries `data-line`
  *    (element or wrapping section), match `HeadingItem.line` exactly.
  *    Immune to duplicate texts and virtualization holes.
- * 2. OCCURRENCE (fallback): level + normalized text + the occurrence
- *    index of that (level, text) pair — counted independently in the DOM
- *    (document order) and in the model — so "Notes" #2 in the DOM maps to
- *    "Notes" #2 in the model, never to #1. This mirrors the occurrence
- *    component of the model's identity keys.
+ * 2. OCCURRENCE (fallback): only when ALL copies of a (level, text)
+ *    pair are rendered. With missing copies, occurrence indices are
+ *    ambiguous; leave those elements unmatched so jumps use source lines.
  *
  * Headings inside embedded notes or callouts are excluded — they exist in
  * the rendered DOM but never in the model. Obsidian may virtualize
@@ -89,21 +87,19 @@ export function matchPreviewHeadings(
 		}
 	}
 
-	const domOccurrenceCounts = new Map<string, number>();
+	const domOccurrences = new Map<string, HTMLElement[]>();
+	for (const element of elements) {
+		const base = `${element.tagName.charAt(1)}::${previewHeadingText(element)}`;
+		const list = domOccurrences.get(base) ?? [];
+		list.push(element);
+		domOccurrences.set(base, list);
+	}
 	const used = new Set<number>();
-	const matches: PreviewHeadingMatch[] = [];
+	const matches = new Map<HTMLElement, PreviewHeadingMatch>();
 
+	// Reserve every authoritative match before considering any fallback.
 	for (const element of elements) {
 		const level = Number(element.tagName.charAt(1));
-		const text = previewHeadingText(element);
-		const base = `${level}::${text}`;
-		// The DOM occurrence counter advances for EVERY rendered heading of
-		// this (level, text) — including ones that end up line-matched — so
-		// later occurrence fallbacks stay aligned with document order.
-		const occurrence = domOccurrenceCounts.get(base) ?? 0;
-		domOccurrenceCounts.set(base, occurrence + 1);
-
-		// Strategy 1: reliable source line info.
 		const line = readPreviewSourceLine(element);
 		if (line !== null) {
 			const modelIndex = byLine.get(line);
@@ -113,19 +109,30 @@ export function matchPreviewHeadings(
 				items[modelIndex].level === level
 			) {
 				used.add(modelIndex);
-				matches.push({ modelIndex, element, matchedBy: "line" });
-				continue;
+				matches.set(element, { modelIndex, element, matchedBy: "line" });
 			}
 		}
-
-		// Strategy 2: occurrence-aware (level + text + duplicate index).
-		const candidates = modelOccurrences.get(base);
-		if (!candidates || occurrence >= candidates.length) continue;
-		const modelIndex = candidates[occurrence];
-		if (used.has(modelIndex)) continue;
-		used.add(modelIndex);
-		matches.push({ modelIndex, element, matchedBy: "occurrence" });
 	}
 
-	return matches;
+	for (const [base, copies] of domOccurrences) {
+		const candidates = modelOccurrences.get(base);
+		if (!candidates || copies.length !== candidates.length) continue;
+		// Conflicting line anchors mean even equal counts are not reliable.
+		if (copies.some((element, i) => {
+			const line = readPreviewSourceLine(element);
+			return line !== null && line !== items[candidates[i]].line;
+		})) continue;
+		for (let i = 0; i < copies.length; i++) {
+			const element = copies[i];
+			const modelIndex = candidates[i];
+			if (matches.has(element) || used.has(modelIndex)) continue;
+			used.add(modelIndex);
+			matches.set(element, { modelIndex, element, matchedBy: "occurrence" });
+		}
+	}
+
+	return elements.flatMap((element) => {
+		const match = matches.get(element);
+		return match ? [match] : [];
+	});
 }

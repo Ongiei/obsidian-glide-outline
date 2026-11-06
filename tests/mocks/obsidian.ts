@@ -41,8 +41,29 @@ export class Setting {
 }
 
 export class Component {
-	load(): void {}
-	unload(): void {}
+	private children = new Set<Component>();
+	private cleanups: Array<() => void> = [];
+	private loaded = false;
+	load(): void {
+		this.loaded = true;
+		for (const child of this.children) child.load();
+	}
+	unload(): void {
+		this.loaded = false;
+		for (const child of this.children) child.unload();
+		this.children.clear();
+		for (const cleanup of this.cleanups.splice(0)) cleanup();
+	}
+	addChild<T extends Component>(child: T): T {
+		this.children.add(child);
+		if (this.loaded) child.load();
+		return child;
+	}
+	removeChild<T extends Component>(child: T): T {
+		if (this.children.delete(child)) child.unload();
+		return child;
+	}
+	register(cleanup: () => void): void { this.cleanups.push(cleanup); }
 }
 
 /**

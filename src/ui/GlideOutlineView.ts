@@ -45,7 +45,7 @@ export interface GlideOutlineViewHandlers extends OutlineControls {
 	 * Optional rich-label renderer (Markdown). Called with an empty label
 	 * element; when absent, plain text is used.
 	 */
-	renderLabel?(labelEl: HTMLElement, item: HeadingItem): void;
+	renderLabel?(labelEl: HTMLElement, item: HeadingItem): void | (() => void);
 	/** Fired after row geometry was re-measured (magnification cache is stale). */
 	onMetricsChanged?(): void;
 }
@@ -392,6 +392,8 @@ export interface ItemRecord {
 	/** What the label currently displays (text or rendered source). */
 	renderedContent: string;
 	renderedRich: boolean;
+	renderedContext: string;
+	cleanupRender?: () => void;
 }
 
 /**
@@ -415,6 +417,7 @@ export interface ItemRecord {
  * and the transparent area over the editor stays clickable.
  */
 export class GlideOutlineView {
+	private renderContext = "";
 	readonly toolbar: OutlineToolbar;
 	readonly rootEl: HTMLElement;
 	readonly hitZoneEl: HTMLElement;
@@ -671,7 +674,8 @@ export class GlideOutlineView {
 	}
 
 	/** Keyed reconciliation — DOM nodes survive as long as heading identity does. */
-	setItems(items: readonly HeadingItem[]): void {
+	setItems(items: readonly HeadingItem[], renderContext = this.renderContext): void {
+		this.renderContext = renderContext;
 		if (this.disposed) return;
 		const settings = this.getSettings();
 		const visible = items.filter((item) => settings.showLevels[item.level - 1]);
@@ -681,6 +685,7 @@ export class GlideOutlineView {
 		const nextKeys = new Set(visible.map((item) => item.key));
 		for (const [key, record] of this.itemRecords) {
 			if (!nextKeys.has(key)) {
+				record.cleanupRender?.();
 				this.cardResizeObserver?.unobserve(record.cardEl);
 				record.rowEl.remove();
 				this.itemRecords.delete(key);
@@ -962,6 +967,7 @@ export class GlideOutlineView {
 		this.activeFollowPending = false;
 		this.pendingActiveFollow = null;
 		this.metricsScheduled = false;
+		for (const record of this.itemRecords.values()) record.cleanupRender?.();
 		this.itemRecords.clear();
 		// §五: the playhead goes with the root; drop the references too so
 		// nothing can resurrect it against a detached tree.
@@ -2187,6 +2193,7 @@ export class GlideOutlineView {
 			lastWrittenRowHeight: Number.NaN,
 			renderedContent: "",
 			renderedRich: false,
+			renderedContext: "",
 		};
 	}
 
@@ -2219,16 +2226,27 @@ export class GlideOutlineView {
 			!!this.handlers.renderLabel &&
 			headingNeedsMarkdownRenderer(item.displaySource);
 		const content = rich ? item.displaySource : item.text;
-		if (record.renderedContent === content && record.renderedRich === rich) {
+		if (record.renderedContent === content && record.renderedRich === rich &&
+			record.renderedContext === this.renderContext) {
 			return;
+		}
+		record.cleanupRender?.();
+		record.cleanupRender = undefined;
+		// Each async render owns its element. A late host render can only
+		// mutate the detached old label, never overwrite the current one.
+		if (rich || record.renderedRich) {
+			const replacement = this.doc.createElement("span");
+			replacement.className = labelEl.className;
+			labelEl.replaceWith(replacement);
+			record.labelEl = replacement;
 		}
 		record.renderedContent = content;
 		record.renderedRich = rich;
+		record.renderedContext = this.renderContext;
 		if (rich && this.handlers.renderLabel) {
-			labelEl.textContent = "";
-			this.handlers.renderLabel(labelEl, item);
+			record.cleanupRender = this.handlers.renderLabel(record.labelEl, item) ?? undefined;
 		} else {
-			labelEl.textContent = item.text;
+			record.labelEl.textContent = item.text;
 		}
 	}
 }

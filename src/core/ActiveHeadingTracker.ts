@@ -164,6 +164,7 @@ export class ActiveHeadingTracker {
 	constructor(
 		private readonly view: MarkdownView,
 		private readonly onChange: (key: string | null) => void,
+		private readonly onNavigationInterrupt: () => void = () => {},
 	) {
 		const win = view.contentEl.ownerDocument.defaultView;
 		if (!win) throw new Error("glide-outline: detached document");
@@ -224,6 +225,8 @@ export class ActiveHeadingTracker {
 			this.onUserScrollGesture(event, "touch"),
 		);
 		listen("pointerdown", (event) => {
+			const target = event.target as Partial<Element> | null;
+			if (!target?.closest?.(OWNED_SELECTOR)) this.onNavigationInterrupt();
 			// A body click that places the caret is NOT a scroll intent —
 			// the cursor rule owns it. Only a scrollbar-gutter hit or a
 			// middle-button autoscroll counts as an explicit scroll gesture.
@@ -258,6 +261,12 @@ export class ActiveHeadingTracker {
 		return this.source;
 	}
 
+	/** A new file/mode must not inherit the previous document's intent. */
+	resetContext(): void {
+		this.clearViewportIntent();
+		this.breakToViewport();
+	}
+
 	/**
 	 * CM update feed (P0-2). Priority: an explicit caret move beats a
 	 * scroll; a scroll (without caret movement) never demotes "cursor";
@@ -267,6 +276,10 @@ export class ActiveHeadingTracker {
 	 */
 	handleEditorUpdate(update: EditorUpdateSummary): void {
 		if (this.disposed) return;
+		if (update.docChanged) {
+			this.onNavigationInterrupt();
+			this.releaseJump();
+		}
 		if (update.selectionSet) {
 			if (this.cursorGuardLine !== null) {
 				const line = this.currentCursorLine();
@@ -445,6 +458,9 @@ export class ActiveHeadingTracker {
 	/** Arm an explicit viewport intent; auto-disarms after the TTL. */
 	private armViewportIntent(kind: ViewportIntentKind): void {
 		if (this.disposed) return;
+		// Stop physical correction on the gesture itself, even before a
+		// scroll consumes the intent or after the highlight lock has settled.
+		this.onNavigationInterrupt();
 		const now = this.nowMs();
 		this.pendingViewportIntent = {
 			kind,
@@ -532,6 +548,7 @@ export class ActiveHeadingTracker {
 		// own nodes stay recognisable no matter how a theme re-skins them.
 		const target = event.target as Partial<Element> | null;
 		if (target?.closest?.(OWNED_SELECTOR)) return;
+		this.onNavigationInterrupt();
 		this.clearJumpTimers();
 		this.clearCursorGuard();
 		this.jumpKey = null;
@@ -542,6 +559,7 @@ export class ActiveHeadingTracker {
 
 	/** A real user caret move: clears jump lock, guard and focus hold. */
 	private interruptWithUserCursor(): void {
+		this.onNavigationInterrupt();
 		this.clearJumpTimers();
 		this.clearCursorGuard();
 		// A real caret move is the highest-priority intent — disarm any
