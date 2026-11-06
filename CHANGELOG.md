@@ -2,6 +2,22 @@
 
 All notable changes to Glide Outline will be documented in this file.
 
+## 0.1.9 — stable heading selection and restored settings tabs
+
+- Prevent cumulative whole-column drift during sequential heading selection.
+- Distinguish neighbouring selection from sustained pointer-follow browsing,
+  retaining the layout anchor across gaps and transferring directly to live cards.
+- Restore the four-tab settings interface on modern hosts, with Chinese labels,
+  descriptions and options in Chinese Obsidian, plus page search aliases.
+- Cancel stale navigation corrections, share editor coordinate origins, reject
+  stale metadata snapshots and disambiguate duplicate preview headings.
+- Isolate rich-label rendering by source file and component lifecycle; respect
+  primary-pointer activation and clean up edge dwell and temporary focus state.
+- Cache maximum row height, binary-search active source headings and separate
+  model, geometry and appearance settings invalidation.
+- Validate source and release metadata with the current project-local official
+  lint plugin and zero permitted warnings.
+
 ## 0.1.7 — centred active heading and smoother navigation
 
 - Keep the active heading centred in the collapsed rail with one bounded,
