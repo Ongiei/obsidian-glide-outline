@@ -1556,7 +1556,11 @@ export class MagnificationController {
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
 		}).velocity !== 0;
 		const held = this.pointerSnap.holds(this.lastPointerX, this.lastPointerY);
-		const adjacentAim = !held && !edgeScroll ? this.adjacentAim(now, settings) : null;
+		// After a handoff the new anchor can settle away from its acquired
+		// rect. Real movement onto its live neighbour must not be trapped
+		// inside that old frozen rect; sub-6px noise still keeps its owner.
+		const adjacentAim = !edgeScroll && (!held || this.pointerSnap.hasMoved(this.lastPointerX, this.lastPointerY))
+			? this.adjacentAim(now, settings) : null;
 		const deliberateGesture = settings.pointerFollowEnabled && overflow.hasOverflow &&
 			now - this.kinematics.lastSampleTime <= 90 &&
 			Math.abs(this.kinematics.velocityY) > POINTER_FOLLOW_MIN_SPEED && !held && !adjacentAim;
@@ -1567,7 +1571,7 @@ export class MagnificationController {
 		// Inside the frozen hold, speed/acceleration cannot eject the target.
 		// Visual release easing must not block acquiring a valid new card.
 		const canAcquire = !scrollOwnsPointer;
-		const bounds = !held && canAcquire ? adjacentAim?.bounds ?? card?.getBoundingClientRect() : undefined;
+		const bounds = canAcquire ? adjacentAim?.bounds ?? (!held ? card?.getBoundingClientRect() : undefined) : undefined;
 		const staleHit = bounds && bounds.right > bounds.left && bounds.bottom > bounds.top &&
 			!pointInRect(bounds, this.lastPointerX, this.lastPointerY);
 		// A gap keeps its existing owner without changing the frozen hold.
@@ -1575,6 +1579,7 @@ export class MagnificationController {
 			this.pointerSnap.update(
 				!canAcquire || staleHit ? null : adjacentAim?.key ?? row?.getAttribute("data-key") ?? null,
 				this.lastPointerX, this.lastPointerY, now, bounds,
+				!!adjacentAim && adjacentAim.key !== this.pointerSnap.targetKey,
 			);
 		}
 		const wasSnapped = this.snappedRow !== null;
@@ -1585,9 +1590,14 @@ export class MagnificationController {
 			this.snappedRow?.removeAttribute("data-glide-snapped");
 			this.snappedRow = nextRow;
 			nextRow?.setAttribute("data-glide-snapped", "true");
-			this.snapAnchorShift = nextRow
-				? this.cache[this.cacheIndexByEl.get(nextRow) ?? -1]?.motion.displayedShift ?? 0
-				: 0;
+			// Capture the column origin once per snap session. A neighbour's
+			// displayed shift includes collision displacement from the old
+			// focus; adopting it on every transfer accumulates that push into
+			// a permanent whole-column translation.
+			if (!nextRow) this.snapAnchorShift = 0;
+			else if (!wasSnapped) {
+				this.snapAnchorShift = this.cache[this.cacheIndexByEl.get(nextRow) ?? -1]?.motion.displayedShift ?? 0;
+			}
 		}
 		if (wasSnapped && !nextRow) this.aimSettling = true;
 		if (this.pointerSnap.locked) {
