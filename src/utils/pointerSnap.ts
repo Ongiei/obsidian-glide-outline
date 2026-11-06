@@ -19,8 +19,12 @@ export class PointerSnap {
 	}
 
 	holds(x: number, y: number): boolean {
-		return this.locked && (Math.hypot(x - this.x, y - this.y) <= POINTER_SNAP_RELEASE_PX ||
+		return this.locked && (this.inDeadband(x, y) ||
 			(this.bounds !== null && pointInRect(this.bounds, x, y)));
+	}
+
+	inDeadband(x: number, y: number): boolean {
+		return this.locked && Math.hypot(x - this.x, y - this.y) <= POINTER_SNAP_RELEASE_PX;
 	}
 
 	update(key: string | null, x: number, y: number, now: number, rect?: Rect): number {

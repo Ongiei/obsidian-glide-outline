@@ -108,4 +108,41 @@ describe("interaction zones: rail versus 126 heading cards", () => {
 		f.event(f.view.hitZoneEl, "pointerenter", f.railX, 497); step(50);
 		expect(f.view.viewportEl.scrollTop).toBe(900);
 	});
+	it("A: a deliberate card gesture releases hover snap without losing its samples", () => {
+		f = fixture(); f.settings.pointerAutoScroll = false;
+		const card = f.card(f.nearest(280));
+		f.event(card, "pointerenter", f.cardX, 290); step(40);
+		const before = f.view.viewportEl.scrollTop;
+		for (let i = 0; i < 7; i++) {
+			f.event(card, "pointermove", f.cardX, 295 + i * 10); step();
+		}
+		expect(f.view.viewportEl.scrollTop).toBeGreaterThan(before + 2);
+	});
+	it("hover stability does not clear the real pointer sample ring", () => {
+		f = fixture(); const card = f.card(f.nearest(280));
+		f.event(card, "pointerenter", f.cardX, 290); step(40);
+		f.event(card, "pointermove", f.cardX, 291); step();
+		f.event(card, "pointermove", f.cardX, 292); step();
+		const state = f.controller as unknown as { kinematics: { samples: { length: number } } };
+		expect(state.kinematics.samples.length).toBe(2);
+	});
+	it("B: entering the rail end overrides a nearby old card snap", () => {
+		f = fixture();
+		const card = f.card(f.nearest(490));
+		card.getBoundingClientRect = () => ({ left: 130, right: 500, top: 475, bottom: 510 }) as DOMRect;
+		f.event(card, "pointerenter", 136, 490); step(40);
+		const before = f.view.viewportEl.scrollTop;
+		f.event(f.view.hitZoneEl, "pointermove", 126, 497); step(40);
+		expect(f.view.viewportEl.scrollTop).toBeGreaterThan(before + 10);
+	});
+	it("edge intent owns the integrator instead of summing opposing follow velocity", () => {
+		f = fixture();
+		f.event(f.view.hitZoneEl, "pointerenter", f.railX, 497); step(40);
+		f.event(f.view.hitZoneEl, "pointermove", f.railX, 496); step();
+		f.event(f.view.hitZoneEl, "pointermove", f.railX, 480); step();
+		const state = f.controller as unknown as { integrator: { edgeIntentVelocity: number; kineticIntentVelocity: number; combinedTargetVelocity: number } };
+		expect(state.integrator.edgeIntentVelocity).toBeGreaterThan(0);
+		expect(state.integrator.kineticIntentVelocity).toBe(0);
+		expect(state.integrator.combinedTargetVelocity).toBe(state.integrator.edgeIntentVelocity);
+	});
 });

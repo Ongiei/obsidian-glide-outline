@@ -8,6 +8,7 @@ import {
 	PointerSampleRing,
 	POINTER_FOLLOW_DECAY_TAU_MS,
 	POINTER_FOLLOW_MAX_SHARE,
+	POINTER_FOLLOW_MIN_SPEED,
 	type EdgeIntentState,
 	type PointerKinematicsState,
 	type ScrollIntegratorState,
@@ -486,6 +487,8 @@ export class MagnificationController {
 	private lastSampleEventId = "";
 	/** §十四: a kinetic session is live (nonzero target last frame). */
 	private kineticActive = false;
+	/** An exiting edge session brakes before yielding to a new follow. */
+	private edgeCoasting = false;
 	/** Shared integrator that combines the two intents. */
 	private integrator: ScrollIntegratorState = {
 		edgeIntentVelocity: 0,
@@ -1498,11 +1501,15 @@ export class MagnificationController {
 			canScrollDown: overflow.canScrollDown,
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
 		}).velocity !== 0;
+		const deliberateGesture = Math.abs(this.kinematics.velocityY) > POINTER_FOLLOW_MIN_SPEED &&
+			!this.pointerSnap.inDeadband(this.lastPointerX, this.lastPointerY);
+		const scrollOwnsPointer = edgeScroll || this.edgeIntent.latched || this.edgeCoasting ||
+			Math.abs(this.integrator.appliedVelocity) > 8 || deliberateGesture;
+		if (scrollOwnsPointer) this.pointerSnap.clear();
 		const held = this.pointerSnap.holds(this.lastPointerX, this.lastPointerY);
 		// Only acquisition reads one real card rect, in the READ phase.
 		// Once held, geometry is frozen and speed/acceleration cannot eject it.
-		const canAcquire = !edgeScroll && !this.edgeIntent.latched &&
-			Math.abs(this.integrator.appliedVelocity) <= 4 && !this.aimSettling;
+		const canAcquire = !scrollOwnsPointer && !this.aimSettling;
 		const bounds = !held && canAcquire && card ? card.getBoundingClientRect() : undefined;
 		this.pointerSnap.update(
 			!canAcquire && !held ? null : row?.getAttribute("data-key") ?? null,
@@ -1523,7 +1530,6 @@ export class MagnificationController {
 		if (wasSnapped && !nextRow) this.aimSettling = true;
 		if (this.pointerSnap.locked) {
 			if (!Number.isFinite(this.aimY)) this.aimY = this.lastPointerY;
-			this.resetAllScrollIntent("pointer-snap");
 			// Hold the focus, not an unfinished frame. Old peaks must keep
 			// shrinking while the selected card settles to its single peak.
 		}
@@ -2263,8 +2269,8 @@ export class MagnificationController {
 		// §3.2: in DEEP it costs reads only while this group is armed.
 		const measureDeep = perf?.deepAutoScrollIntentActive === true;
 		const eligibilityStart = measureDeep ? this.win.performance.now() : 0;
-		if (!this.pointerExpanded || this.pressed || this.pointerSnap.locked) {
-			this.resetAllScrollIntent(this.pressed ? "pressed" : this.pointerSnap.locked ? "pointer-snap" : "collapsed");
+		if (!this.pointerExpanded || this.pressed) {
+			this.resetAllScrollIntent(this.pressed ? "pressed" : "collapsed");
 			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollEligibility",
@@ -2338,6 +2344,7 @@ export class MagnificationController {
 		const edgeEligible = this.railRect.right > this.railRect.left &&
 			pointInRect(this.railRect, this.lastPointerX, this.lastPointerY);
 		let edgeTarget = 0;
+		let edgeOwnsScroll = false;
 		let edgeStopReason: string | null = null;
 		if (edgeEligible) {
 			const result = computeRailEdgeScrollIntent({
@@ -2354,6 +2361,8 @@ export class MagnificationController {
 			});
 			edgeTarget = result.velocity;
 			edgeStopReason = result.stopReason;
+			edgeOwnsScroll = edgeTarget !== 0 || (edge.latched && this.withinZoneHysteresis(zonePx));
+			if (edgeTarget !== 0) this.edgeCoasting = false;
 			// Dwell gate — EDGE only (§九: kinetic has no dwell). Brushing
 			// an edge never yanks the intended click target.
 			if (edgeTarget !== 0 && !edge.dwellPassed) {
@@ -2392,8 +2401,8 @@ export class MagnificationController {
 		// ---- KINETIC intent (§九/§十二: independent eligibility) --------
 		// §四.2 kineticIntentMath: pointer-follow velocity math.
 		const kineticMathStart = measureDeep ? this.win.performance.now() : 0;
-		const kineticEligible =
-			pointer.overElement || pointer.insideEnvelope;
+		const kineticEligible = (pointer.overElement || pointer.insideEnvelope) &&
+			!edgeOwnsScroll && !this.edgeCoasting && !this.pointerSnap.locked;
 		let kineticTarget = 0;
 		if (kineticEligible) {
 			kineticTarget = computeKineticIntentVelocity({
@@ -2420,8 +2429,11 @@ export class MagnificationController {
 				this.kineticActive = false;
 				perf?.countKineticStopReason("decayed");
 			}
-		} else if (this.kineticActive || kin.velocityY !== 0) {
+		} else if (!pointer.overElement && !pointer.insideEnvelope) {
 			this.stopKineticIntent("pointer-left");
+		} else if (this.kineticActive) {
+			this.kineticActive = false;
+			perf?.countKineticStopReason(edgeOwnsScroll ? "edge-priority" : "hover-stable");
 		}
 		if (measureDeep && perf) {
 			perf.addPhaseSample(
@@ -2473,11 +2485,12 @@ export class MagnificationController {
 		integ.kineticIntentVelocity = kineticTarget;
 		const combined = Math.min(
 			combinedMaxSpeed,
-			Math.max(-combinedMaxSpeed, edgeTarget + kineticTarget),
+			Math.max(-combinedMaxSpeed, edgeOwnsScroll ? edgeTarget : kineticTarget),
 		);
 		integ.combinedTargetVelocity = combined;
 
 		if (combined === 0 && integ.appliedVelocity === 0) {
+			this.edgeCoasting = false;
 			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollIntegrator",
@@ -2685,6 +2698,7 @@ export class MagnificationController {
 	 */
 	private stopEdgeIntent(reason: AutoScrollStopReason): void {
 		const edge = this.edgeIntent;
+		if (edge.latched && this.integrator.appliedVelocity !== 0) this.edgeCoasting = true;
 		const hadSession =
 			edge.latched || edge.dwellPassed || edge.dwellTimer !== 0;
 		if (edge.dwellTimer !== 0) {
@@ -2740,6 +2754,7 @@ export class MagnificationController {
 		integ.combinedTargetVelocity = 0;
 		integ.appliedVelocity = 0;
 		integ.lastFrameTime = Number.NaN;
+		this.edgeCoasting = false;
 	}
 
 	/** Map the DOM-hit anchor element to its cache index (-1 = blank).
