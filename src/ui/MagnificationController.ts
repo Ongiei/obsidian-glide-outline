@@ -1,7 +1,7 @@
 import { computeCollisionFreeMagnification } from "../utils/geometry";
 import { type AutoScrollStopReason } from "../utils/overflow";
 import {
-	computeEdgeScrollIntent,
+	computeRailEdgeScrollIntent,
 	computeKineticIntentVelocity,
 	predictedPointerY,
 	resolveEdgeZones,
@@ -25,6 +25,7 @@ import {
 	bridgeRectFor,
 	emptyRect,
 	pointInEnvelope,
+	pointInRect,
 	translateEnvelopeItemsY,
 } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
@@ -451,6 +452,8 @@ export class MagnificationController {
 	/** Viewport bounds cached alongside the item cache — no per-frame rect. */
 	private viewportTop = 0;
 	private viewportBottom = 0;
+	/** Fixed interaction rail measured only with the discrete layout cache. */
+	private railRect: Rect = emptyRect();
 	/** §八 four-field pointer interaction state (replaces `pointerInside`). */
 	private pointer: PointerInteractionState = idlePointerState();
 	/** Timestamp base for the motion interpolation step (section 11). */
@@ -930,8 +933,9 @@ export class MagnificationController {
 			this.anchorDirty = false;
 			// §十/§十二: a gap crossing keeps the KINETIC intent alive (the
 			// gesture continues); only an unlatched EDGE session stops.
-			if (!this.edgeIntent.latched) {
-				this.stopEdgeIntent("pointer-left");
+			if (!pointInRect(this.railRect, event.clientX, event.clientY)) {
+				this.stopEdgeIntent("outside-rail");
+				this.schedule("autoScrollSettling");
 			}
 			this.cancelCollapse();
 			return;
@@ -1482,7 +1486,9 @@ export class MagnificationController {
 		// Edge browsing has priority over aiming. Otherwise the 100ms
 		// snap cancels the edge's 140ms dwell before it can ever scroll.
 		const overflow = this.view.getOverflowState();
-		const edgeScroll = computeEdgeScrollIntent({
+		const edgeScroll = computeRailEdgeScrollIntent({
+			pointerX: this.lastPointerX,
+			railRect: this.railRect,
 			pointerY: this.lastPointerY,
 			viewportTop: this.viewportTop,
 			viewportBottom: this.viewportBottom,
@@ -1495,9 +1501,11 @@ export class MagnificationController {
 		const held = this.pointerSnap.holds(this.lastPointerX, this.lastPointerY);
 		// Only acquisition reads one real card rect, in the READ phase.
 		// Once held, geometry is frozen and speed/acceleration cannot eject it.
-		const bounds = !held && !edgeScroll && !this.aimSettling && card ? card.getBoundingClientRect() : undefined;
+		const canAcquire = !edgeScroll && !this.edgeIntent.latched &&
+			Math.abs(this.integrator.appliedVelocity) <= 4 && !this.aimSettling;
+		const bounds = !held && canAcquire && card ? card.getBoundingClientRect() : undefined;
 		this.pointerSnap.update(
-			(edgeScroll || this.aimSettling) && !held ? null : row?.getAttribute("data-key") ?? null,
+			!canAcquire && !held ? null : row?.getAttribute("data-key") ?? null,
 			this.lastPointerX, this.lastPointerY, now, bounds,
 		);
 		const wasSnapped = this.snappedRow !== null;
@@ -2327,12 +2335,14 @@ export class MagnificationController {
 		// gate, latch bookkeeping.
 		const edgeMathStart = measureDeep ? this.win.performance.now() : 0;
 		const edge = this.edgeIntent;
-		const edgeEligible =
-			pointer.overElement || (edge.latched && pointer.insideEnvelope);
+		const edgeEligible = this.railRect.right > this.railRect.left &&
+			pointInRect(this.railRect, this.lastPointerX, this.lastPointerY);
 		let edgeTarget = 0;
 		let edgeStopReason: string | null = null;
 		if (edgeEligible) {
-			const result = computeEdgeScrollIntent({
+			const result = computeRailEdgeScrollIntent({
+				pointerX: this.lastPointerX,
+				railRect: this.railRect,
 				pointerY: this.lastPointerY,
 				viewportTop: this.viewportTop,
 				viewportBottom: this.viewportBottom,
@@ -2370,7 +2380,7 @@ export class MagnificationController {
 			edge.dwellPassed ||
 			edge.dwellTimer !== 0
 		) {
-			this.stopEdgeIntent("pointer-left");
+			this.stopEdgeIntent("outside-rail");
 		}
 		if (measureDeep && perf) {
 			perf.addPhaseSample(
@@ -2657,6 +2667,7 @@ export class MagnificationController {
 
 	/** §十一: pointer within (preZone + hysteresis) of either edge? */
 	private withinZoneHysteresis(zonePx: number): boolean {
+		if (!pointInRect(this.railRect, this.lastPointerX, this.lastPointerY)) return false;
 		const height = this.viewportBottom - this.viewportTop;
 		if (!(height > 0) || !Number.isFinite(this.lastPointerY)) return false;
 		const { preZone } = resolveEdgeZones(height, zonePx);
@@ -2891,6 +2902,8 @@ export class MagnificationController {
 		const viewportRect = this.view.viewportEl.getBoundingClientRect();
 		this.viewportTop = viewportRect.top;
 		this.viewportBottom = viewportRect.bottom;
+		const rail = this.view.hitZoneEl.getBoundingClientRect();
+		this.railRect = { left: rail.left, right: rail.right, top: rail.top, bottom: rail.bottom };
 		this.currentScrollTop = this.view.viewportEl.scrollTop;
 		this.commandedScrollTop = this.currentScrollTop;
 		const children = this.view.listEl.children;

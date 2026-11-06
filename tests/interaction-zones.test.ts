@@ -1,0 +1,111 @@
+// @vitest-environment jsdom
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_SETTINGS } from "../src/settings";
+import { GlideOutlineView } from "../src/ui/GlideOutlineView";
+import { MagnificationController } from "../src/ui/MagnificationController";
+
+/** Realistic layout without browser layout: 126 mixed-height/length rows,
+ * real rail bounds, transformed card bounds, synchronous scroll delivery. */
+function fixture(side: "left" | "right" = "left") {
+	const host = document.createElement("div");
+	document.body.append(host);
+	const settings = structuredClone(DEFAULT_SETTINGS);
+	settings.position = side;
+	settings.pointerAutoScrollZone = 40;
+	const heights = Array.from({ length: 126 }, (_, i) => i % 7 === 0 ? 42 : 24);
+	let total = 0;
+	const tops = heights.map(height => { const top = total; total += height + 6; return top; });
+	const items = heights.map((_, i) => ({ key: `heading-${i}`, text: i % 4 === 0 ? "Long title ".repeat(12) : `Title ${i}`, displaySource: `Title ${i}`, level: 2 + i % 5, line: i * 3 }));
+	const jump = vi.fn();
+	const view = new GlideOutlineView(host, () => settings, { onJump: jump });
+	view.setItems(items);
+	const railLeft = side === "left" ? 100 : 700;
+	const railX = railLeft + 14;
+	const cardX = side === "left" ? 280 : 540;
+	const rect = (left: number, top: number, width: number, height: number) => ({ left, top, right: left + width, bottom: top + height, width, height, x: left, y: top, toJSON: () => ({}) }) as DOMRect;
+	view.viewportEl.getBoundingClientRect = () => rect(100, 100, 628, 400);
+	view.hitZoneEl.getBoundingClientRect = () => rect(railLeft, 100, 28, 400);
+	Object.defineProperties(view.viewportEl, { clientHeight: { value: 400, configurable: true }, scrollHeight: { value: total, configurable: true } });
+	let scroll = 900;
+	Object.defineProperty(view.viewportEl, "scrollTop", { configurable: true, get: () => scroll, set: (n: number) => {
+		const next = Math.max(0, Math.min(total - 400, n));
+		if (next === scroll) return;
+		scroll = next;
+		view.viewportEl.dispatchEvent(new Event("scroll"));
+	} });
+	const rows = [...view.listEl.children] as HTMLElement[];
+	rows.forEach((row, i) => {
+		row.getBoundingClientRect = () => rect(100, 100 + tops[i] - scroll, 628, heights[i]);
+		const marker = row.querySelector(".glide-outline-marker") as HTMLElement;
+		const card = row.querySelector(".glide-outline-card") as HTMLElement;
+		const shift = () => Number.parseFloat(row.style.getPropertyValue("--glide-shift-y") || "0");
+		const scale = () => Number.parseFloat(row.style.getPropertyValue("--glide-scale") || "1");
+		marker.getBoundingClientRect = () => rect(railLeft, 100 + tops[i] - scroll + shift(), 28, heights[i]);
+		card.getBoundingClientRect = () => {
+			const s = scale(), width = (i % 4 === 0 ? 540 : 160) * s;
+			return rect(side === "left" ? 136 : 692 - width, 100 + tops[i] - scroll + shift() - heights[i] * (s - 1) / 2, width, heights[i] * s);
+		};
+	});
+	view.getBaseCardHeight = key => heights[items.findIndex(item => item.key === key)] ?? 24;
+	view.updateOverflowState();
+	const controller = new MagnificationController(view, () => settings, null, jump);
+	const event = (target: EventTarget, type: string, x: number, y: number) => {
+		const e = new MouseEvent(type, { clientX: x, clientY: y, bubbles: true, cancelable: true });
+		Object.defineProperties(e, { timeStamp: { value: performance.now() }, pointerId: { value: 1 } });
+		target.dispatchEvent(e);
+	};
+	const card = (i: number) => rows[i].querySelector(".glide-outline-card") as HTMLElement;
+	const nearest = (y: number) => rows.reduce((a, row, i) => Math.abs(card(i).getBoundingClientRect().top - y) < Math.abs(card(a).getBoundingClientRect().top - y) ? i : a, 0);
+	return { host, settings, view, controller, rows, items, card, nearest, event, railX, cardX, jump, dispose: () => { controller.dispose(); host.remove(); } };
+}
+
+describe("interaction zones: rail versus 126 heading cards", () => {
+	let raf: Map<number, FrameRequestCallback>, nextId: number;
+	let f: ReturnType<typeof fixture>;
+	const step = (n = 1) => { for (let i = 0; i < n; i++) { vi.advanceTimersByTime(16); const queue = [...raf.values()]; raf.clear(); queue.forEach(cb => cb(performance.now())); } };
+	beforeEach(() => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+		raf = new Map(); nextId = 0;
+		vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => { raf.set(++nextId, cb); return nextId; });
+		vi.stubGlobal("cancelAnimationFrame", (id: number) => raf.delete(id));
+		vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+	});
+	afterEach(() => { f?.dispose(); vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+	it.each(["left", "right"] as const)("B: %s rail bottom keeps scrolling past changing rows", side => {
+		f = fixture(side);
+		f.event(f.view.hitZoneEl, "pointerenter", f.railX, 497);
+		step(35);
+		const first = f.view.viewportEl.scrollTop;
+		expect(first).toBeGreaterThan(900);
+		step(35);
+		expect(f.view.viewportEl.scrollTop).toBeGreaterThan(first);
+	});
+	it.each(["left", "right"] as const)("C: a wide %s card at the bottom never starts edge scrolling", side => {
+		f = fixture(side);
+		f.settings.pointerFollowEnabled = false;
+		f.event(f.card(f.nearest(490)), "pointerenter", f.cardX, 497);
+		step(50);
+		expect(f.view.viewportEl.scrollTop).toBe(900);
+	});
+	it("leaving the rail for a card brakes without restarting or reversing edge scroll", () => {
+		f = fixture(); f.settings.pointerFollowEnabled = false;
+		f.event(f.view.hitZoneEl, "pointerenter", f.railX, 497); step(35);
+		const before = f.view.viewportEl.scrollTop;
+		f.event(f.card(f.nearest(490)), "pointermove", f.cardX, 497);
+		step(); const firstDelta = f.view.viewportEl.scrollTop - before;
+		expect(firstDelta).toBeGreaterThan(0); // coast down, not a snap reset
+		step(30); const stopped = f.view.viewportEl.scrollTop;
+		step(30); expect(f.view.viewportEl.scrollTop).toBe(stopped);
+		expect(stopped - before).toBeLessThan(50);
+	});
+	it("a stationary rail pointer outside the 40px end bands does not scroll", () => {
+		f = fixture(); f.event(f.view.hitZoneEl, "pointerenter", f.railX, 420); step(50);
+		expect(f.view.viewportEl.scrollTop).toBe(900);
+	});
+	it("an unmeasurable rail fails closed, never falling back to the root width", () => {
+		f = fixture(); f.view.hitZoneEl.getBoundingClientRect = () => ({ left: 0, right: 0, top: 0, bottom: 0 }) as DOMRect;
+		f.event(f.view.hitZoneEl, "pointerenter", f.railX, 497); step(50);
+		expect(f.view.viewportEl.scrollTop).toBe(900);
+	});
+});

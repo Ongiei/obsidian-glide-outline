@@ -130,6 +130,7 @@ describe("scroll pipeline diagnostics wiring (§八/§九)", () => {
 			onJump: () => undefined,
 		});
 		view.setItems(HEADINGS);
+		view.hitZoneEl.getBoundingClientRect = () => ({ left: 0, right: 28, top: VIEWPORT_TOP, bottom: VIEWPORT_BOTTOM }) as DOMRect;
 
 		Object.defineProperty(view.viewportEl, "clientHeight", {
 			configurable: true,

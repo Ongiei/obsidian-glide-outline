@@ -99,6 +99,7 @@ export const VELOCITY_ASSIST_MAX_SHARE = 0.5;
  * PerfCapture's stop-reason histogram uniform across both layers.
  */
 export type AutoScrollStopReason =
+	| "outside-rail"
 	// Pure-math reasons (computePointerAutoScroll):
 	| "disabled"
 	| "reduced-motion"
