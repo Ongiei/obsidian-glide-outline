@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/40130ca1-b9ce-4013-a5f2-bcc778a15e58
 - **Accurate click-to-jump.** Works in Source Mode, Live Preview and Reading Mode — including duplicate headings — without reopening the file.
 - **Non-blocking by design.** Every drawing layer is pointer-transparent; only the thin marker rail, visible label cards and quick-control buttons intercept clicks. The editor underneath stays fully interactive.
 - **Narrow-pane aware.** In split layouts the rail measures its pane and shrinks labels so magnified text never clips; extremely narrow panes fall back to markers-only compact mode.
-- **Customisable label cards.** Background opacity, border, corner radius, shadow, padding and text shadow — down to a pure-text mode with no chrome at all.
+- **Customisable label cards.** Background opacity, border, corner radius, shadow and padding — down to a pure-text mode with no chrome at all.
 - **Optional Markdown labels.** Render inline formatting (bold, code, links…) inside heading labels, powered by Obsidian's own renderer.
 - **Pop-out window safe.** All DOM checks use the owning window, so the rail works in detached editor windows.
 - **Accessible.** Keyboard focus keeps the outline open, Enter/Space activation, and hidden labels provide screen-reader names without Obsidian's hover tooltips.
@@ -48,10 +48,11 @@ pnpm install
 pnpm run dev     # watch build
 pnpm run build   # type-check + production build
 pnpm run lint
+pnpm run check:community
 pnpm test
 ```
 
-Symlink (or copy) the repository into `<vault>/.obsidian/plugins/glide-outline/` for live testing.
+Copy only `main.js`, `manifest.json`, and `styles.css` into the designated test vault described in CONTRIBUTING.md. Preserve its `data.json`.
 
 ### Manual stress test
 
@@ -72,7 +73,7 @@ Structural properties of the fixture are pinned by `tests/stress-fixture.test.ts
 
 ## Settings
 
-Settings are grouped into **General**, **Appearance**, **Motion** and **Advanced** tabs, plus a one-click **Restore default appearance** button (position, shown levels and Markdown rendering are preserved).
+On Obsidian 1.13+, settings use native groups and appear in global settings search. Older versions retain the **General**, **Appearance**, **Motion** and **Advanced** tabs. Both share the same controls and the **Restore default appearance** action (position, shown levels and Markdown rendering are preserved).
 
 | Setting | Default | Description |
 | --- | --- | --- |

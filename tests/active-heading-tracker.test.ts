@@ -123,6 +123,22 @@ describe("ActiveHeadingTracker hybrid model (P0-2)", () => {
 		expect(tracker.getSource()).toBe("viewport");
 	});
 
+	it("measures logarithmically many headings while following a long editor", () => {
+		tracker.dispose();
+		const fake = makeFakeView(state);
+		fake.view.editor.lineCount = () => 10_001;
+		const cm = (fake.view.editor as unknown as { cm: { lineBlockAt(pos: number): { top: number; height: number } } }).cm;
+		const measure = vi.spyOn(cm, "lineBlockAt");
+		tracker = new ActiveHeadingTracker(fake.view, (key) => activeKeys.push(key));
+		const items = Array.from({ length: 10_000 }, (_, i) => heading(2, `Section ${i}`, i));
+		tracker.setItems(items);
+		fake.scroller.scrollTop = 125_000;
+		flushFrame();
+		expect(activeKeys.at(-1)).toBe(items[6251].key);
+		expect(measure.mock.calls.length).toBeLessThanOrEqual(14);
+		fake.contentEl.remove();
+	});
+
 	it("a caret move switches to the cursor source and uses the head line", () => {
 		state.cursorLine = 12; // inside Beta's section (10 ≤ 12 < 20)
 		tracker.handleEditorUpdate(update({ selectionSet: true }));

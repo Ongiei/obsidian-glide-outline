@@ -8,8 +8,9 @@ esbuild, Vitest (jsdom), ESLint, and pnpm.
 ```bash
 pnpm install
 pnpm run build     # tsc --noEmit + esbuild production bundle
-pnpm run lint      # eslint src tests
+pnpm run lint      # source, tests and release metadata (zero warnings)
 pnpm test          # vitest run
+pnpm run check:community  # official lint rules for source and release metadata
 ```
 
 Run all three before opening a pull request — CI runs the same pipeline.
@@ -36,7 +37,7 @@ After **every** source change, rebuild and copy the three artifacts into the
 **single** integration test vault:
 
 ```
-/Users/ongiei/Documents/obsidian-eudic-bridge/integration-vault/.obsidian/plugins/glide-outline/
+/Users/ongiei/Documents/Obsidian Vault/Test Vaults/.obsidian/plugins/glide-outline/
 ```
 
 Copy only `main.js`, `manifest.json`, and `styles.css`. **Do not** overwrite
@@ -52,5 +53,5 @@ squash-merged, so the per-commit history is for review clarity, not permanence.
 
 Releases are cut from `main` only when explicitly requested. Bump
 `manifest.json`, `package.json`, and `versions.json` together, tag
-`vX.Y.Z` **without** a `v` prefix, and publish a GitHub Release with the three
+`X.Y.Z` **without** a `v` prefix, and publish a GitHub Release with the three
 build artifacts (`main.js`, `manifest.json`, `styles.css`) attached.

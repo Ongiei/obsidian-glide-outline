@@ -127,6 +127,13 @@ export class PointerSampleRing {
 		return (b.y - a.y) / dt;
 	}
 
+	/** Net travel in the sample window. Aiming can be fast but very short. */
+	displacementY(now: number): number {
+		const first = this.samples.find(sample => sample.time >= now - this.windowMs);
+		const last = this.samples[this.samples.length - 1];
+		return first && last ? last.y - first.y : 0;
+	}
+
 	/** True while the ring holds a fresh, multi-sample gesture. */
 	get active(): boolean {
 		return this.samples.length >= 2;

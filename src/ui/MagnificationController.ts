@@ -369,6 +369,7 @@ export class MagnificationController {
 	/** §六 Cached CONTENT centers / heights for the range binary searches. */
 	private centers: number[] = [];
 	private heights: number[] = [];
+	private maxRowHeight = 0;
 	/** Per-item DISPLAYED shifts fed back into the solver (visual→base). */
 	private shifts: number[] = [];
 	/**
@@ -764,9 +765,13 @@ export class MagnificationController {
 	}
 
 	/** Called when the heading list or settings changed (centers are stale). */
-	invalidate(): void {
-		this.markCacheDirty("invalidate");
-		this.envelopeDirty = true;
+	invalidate(geometryChanged = true): void {
+		if (geometryChanged) {
+			this.markCacheDirty("invalidate");
+			this.envelopeDirty = true;
+		} else {
+			this.clearPointerSnap();
+		}
 		this.perf?.count("cacheInvalidationCount");
 		if (this.isExpanded()) this.schedule("settings");
 	}
@@ -1427,6 +1432,44 @@ export class MagnificationController {
 		}
 	}
 
+	/** Resolve short vertical aiming from the held card's immediate neighbours.
+	 * Speed alone cannot distinguish a 3px/16ms aiming step from browsing.
+	 * Keep the old anchor through the gap; transfer only onto the real next
+	 * card. A sweep beyond that neighbour remains eligible for pointer follow.
+	 * Called only after leaving the frozen hold, in the frame's read phase. */
+	private adjacentAim(now: number, settings: GlideOutlineSettings): { key: string; bounds: DOMRect } | null {
+		const key = this.pointerSnap.targetKey;
+		const index = key ? this.cacheIndexByKey.get(key) : undefined;
+		if (index === undefined) return null;
+		const current = this.cache[index];
+		// Sustained travel over roughly one magnified row is browsing,
+		// even when many intermediate events happen to hit neighbouring cards.
+		if (settings.pointerFollowEnabled && now - this.kinematics.lastSampleTime <= 90 &&
+			Math.abs(this.kinematics.samples.displacementY(this.kinematics.lastSampleTime)) >=
+			Math.max(48, current.height * settings.maxScale)) return null;
+		const currentCard = current.el.querySelector<HTMLElement>(".glide-outline-card");
+		if (!currentCard) return null;
+		const bounds = currentCard.getBoundingClientRect();
+		if (!(bounds.bottom > bounds.top && bounds.right > bounds.left)) return null;
+		const x = this.lastPointerX, y = this.lastPointerY;
+		if (pointInRect(bounds, x, y)) return { key: current.key, bounds };
+		const direction = y < bounds.top ? -1 : y > bounds.bottom ? 1 : 0;
+		const next = this.cache[index + direction];
+		if (!direction || !next) return null;
+		const nextCard = next.el.querySelector<HTMLElement>(".glide-outline-card");
+		if (!nextCard) return null;
+		const nextBounds = nextCard.getBoundingClientRect();
+		if (!(nextBounds.bottom > nextBounds.top && nextBounds.right > nextBounds.left)) return null;
+		if (pointInRect(nextBounds, x, y)) return { key: next.key, bounds: nextBounds };
+		// Bridge only the common horizontal extent of these two headings.
+		// Moving out sideways or past the neighbour is a browsing gesture.
+		const inGap = x >= Math.max(bounds.left, nextBounds.left) &&
+			x <= Math.min(bounds.right, nextBounds.right) &&
+			(direction > 0 ? y > bounds.bottom && y < nextBounds.top :
+				y < bounds.top && y > nextBounds.bottom);
+		return inGap ? { key: current.key, bounds } : null;
+	}
+
 	/**
 	 * The coordinated frame: READ phase → PURE CALC → WRITE phase
 	 * (section 13). This is the ONLY place that reads rects or writes
@@ -1498,8 +1541,7 @@ export class MagnificationController {
 		// Rail/gap browsing is unchanged; only real cards snap.
 		const card = closestOwned(this.snapTarget, ".glide-outline-card", this.ownsNode);
 		const row = card ? closestOwned(card, ".glide-outline-row", this.ownsNode) : null;
-		// Edge browsing has priority over aiming. Otherwise the 100ms
-		// snap cancels the edge's 140ms dwell before it can ever scroll.
+		// Edge browsing has priority over aiming, including its dwell.
 		const overflow = this.view.getOverflowState();
 		const edgeScroll = computeRailEdgeScrollIntent({
 			pointerX: this.lastPointerX,
@@ -1514,23 +1556,27 @@ export class MagnificationController {
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
 		}).velocity !== 0;
 		const held = this.pointerSnap.holds(this.lastPointerX, this.lastPointerY);
+		const adjacentAim = !held && !edgeScroll ? this.adjacentAim(now, settings) : null;
 		const deliberateGesture = settings.pointerFollowEnabled && overflow.hasOverflow &&
 			now - this.kinematics.lastSampleTime <= 90 &&
-			Math.abs(this.kinematics.velocityY) > POINTER_FOLLOW_MIN_SPEED && !held;
+			Math.abs(this.kinematics.velocityY) > POINTER_FOLLOW_MIN_SPEED && !held && !adjacentAim;
 		const scrollOwnsPointer = edgeScroll || this.edgeIntent.latched || this.edgeCoasting ||
 			Math.abs(this.integrator.appliedVelocity) > 8 || deliberateGesture;
 		if (scrollOwnsPointer) this.pointerSnap.clear();
-		// Only acquisition reads one real card rect, in the READ phase.
-		// Once held, geometry is frozen and speed/acceleration cannot eject it.
+		// Read card geometry only for acquisition or neighbouring selection.
+		// Inside the frozen hold, speed/acceleration cannot eject the target.
 		// Visual release easing must not block acquiring a valid new card.
 		const canAcquire = !scrollOwnsPointer;
-		const bounds = !held && canAcquire && card ? card.getBoundingClientRect() : undefined;
+		const bounds = !held && canAcquire ? adjacentAim?.bounds ?? card?.getBoundingClientRect() : undefined;
 		const staleHit = bounds && bounds.right > bounds.left && bounds.bottom > bounds.top &&
 			!pointInRect(bounds, this.lastPointerX, this.lastPointerY);
-		this.pointerSnap.update(
-			!canAcquire || staleHit ? null : row?.getAttribute("data-key") ?? null,
-			this.lastPointerX, this.lastPointerY, now, bounds,
-		);
+		// A gap keeps its existing owner without changing the frozen hold.
+		if (!canAcquire || !adjacentAim || adjacentAim.key !== this.pointerSnap.targetKey) {
+			this.pointerSnap.update(
+				!canAcquire || staleHit ? null : adjacentAim?.key ?? row?.getAttribute("data-key") ?? null,
+				this.lastPointerX, this.lastPointerY, now, bounds,
+			);
+		}
 		const wasSnapped = this.snappedRow !== null;
 		const nextRow = this.pointerSnap.targetKey
 			? this.cache[this.cacheIndexByKey.get(this.pointerSnap.targetKey) ?? -1]?.el ?? null
@@ -2855,6 +2901,7 @@ export class MagnificationController {
 		return computeActiveMotionRange({
 			centers: this.centers,
 			heights: this.heights,
+			maxRowHeight: this.maxRowHeight,
 			viewportTop: window.top,
 			viewportBottom: window.bottom,
 			pointerY: this.clientYToContentY(this.lastPointerY),
@@ -2988,6 +3035,7 @@ export class MagnificationController {
 		const nextByKey = new Map<string, number>();
 		const centers: number[] = [];
 		const heights: number[] = [];
+		let maxRowHeight = 0;
 		const layout: { center: number; height: number }[] = [];
 		const shifts: number[] = [];
 		let rectReads = 1; // the viewport rect above
@@ -3018,6 +3066,7 @@ export class MagnificationController {
 				rect.top + rect.height / 2,
 			);
 			const height = measured > 0 ? measured : rect.height;
+			if (Number.isFinite(height)) maxRowHeight = Math.max(maxRowHeight, height);
 			const index = next.length;
 			// §五/§六/§九: rows that carry residual motion across the
 			// rebuild seed the new dirty set, so the next frame keeps
@@ -3063,6 +3112,7 @@ export class MagnificationController {
 		this.cacheIndexByKey = nextByKey;
 		this.centers = centers;
 		this.heights = heights;
+		this.maxRowHeight = maxRowHeight;
 		this.layout = layout;
 		this.shifts = shifts;
 		// §九: republish the dirty set against the NEW indices. Recorded as

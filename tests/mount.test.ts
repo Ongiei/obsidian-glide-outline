@@ -107,10 +107,23 @@ describe("owned mount wrapper", () => {
 		expect(host.style.position).toBe("absolute");
 	});
 
+	it("preserves an explicit static position and its priority across overlapping mounts", () => {
+		host.style.setProperty("position", "static", "important");
+		const first = createOutlineMount(host);
+		expect(host.style.position).toBe("");
+		const second = createOutlineMount(host);
+		first.dispose();
+		expect(host.getAttribute("data-glide-outline-anchor")).toBe(second.instanceId);
+		second.dispose();
+		expect(host.hasAttribute("data-glide-outline-anchor")).toBe(false);
+		expect(host.style.position).toBe("static");
+		expect(host.style.getPropertyPriority("position")).toBe("important");
+	});
+
 	it("restores a foreign inline position written after we anchored", () => {
 		// jsdom reports `static` for an unstyled div, so the mount anchors.
 		const mount = createOutlineMount(host);
-		expect(host.style.position).toBe("relative");
+		expect(host.hasAttribute("data-glide-outline-anchor")).toBe(true);
 
 		// Another actor takes over the property — we must not clobber it.
 		host.style.position = "sticky";
@@ -135,7 +148,7 @@ describe("mount host-mutation diagnostics (§十一)", () => {
 		expect(d.mountHostComputedPosition).toBe("static");
 		expect(d.mountHostInlinePositionBefore).toBe("");
 		expect(d.mountMutatedHostPosition).toBe(true);
-		expect(d.mountHostInlinePositionAfter).toBe("relative");
+		expect(d.mountHostInlinePositionAfter).toBe("");
 		expect(d.mountRestoredHostPosition).toBe(false);
 		expect(d.staleMountsRemoved).toBe(0);
 
@@ -409,7 +422,7 @@ describe("styles.css is scoped fail-closed", () => {
 		return selectors.filter(Boolean);
 	}
 
-	it("prefixes every selector of every rule with the ownership scope", () => {
+	it("scopes UI styles to owned nodes and host anchoring to one temporary attribute", () => {
 		for (const list of topLevelSelectors()) {
 			// At-rules (@media, @keyframes …) carry no selector of their own;
 			// their nested rules are checked by the same scan at depth 0.
@@ -419,7 +432,7 @@ describe("styles.css is scoped fail-closed", () => {
 				if (!trimmed) continue;
 				// Percentage keyframe stops are not selectors.
 				if (/^(from|to|[\d.]+%)$/.test(trimmed)) continue;
-				expect(trimmed.startsWith(SCOPE), trimmed).toBe(true);
+				expect(trimmed.startsWith(SCOPE) || trimmed === "[data-glide-outline-anchor]", trimmed).toBe(true);
 			}
 		}
 	});
@@ -430,7 +443,7 @@ describe("styles.css is scoped fail-closed", () => {
 		expect(stripped).not.toMatch(/^\[data-glide-outline-owner\]/m);
 	});
 
-	it("no longer styles the host by class (anchoring is inline + reversible)", () => {
+	it("keeps host anchoring scoped to a temporary owned attribute", () => {
 		expect(stripped).not.toContain(".glide-outline-host");
 	});
 

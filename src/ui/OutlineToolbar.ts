@@ -98,8 +98,12 @@ export class OutlineToolbar {
 		let depth = 2;
 		for (let level = 2; level <= 6; level++) if (settings.showLevels[level - 1]) depth = level;
 		this.depth.value = String(depth);
-		this.track.dataset.depth = `H${depth}`;
-		this.depth.setAttribute("aria-valuetext", `H2 through H${depth}; H1 follows plugin settings`);
-		this.track.style.setProperty("--glide-depth-fill", `${(depth - 1) * 20}%`);
+		const continuous = settings.showLevels.slice(1).every((shown, i) => shown === (i + 2 <= depth));
+		this.track.dataset.depth = continuous ? `H${depth}` : "Custom";
+		const selected = settings.showLevels.flatMap((shown, i) => shown ? [`H${i + 1}`] : []);
+		this.depth.setAttribute("aria-valuetext", continuous
+			? `H2 through H${depth}; H1 follows plugin settings`
+			: `Custom selection: ${selected.join(", ") || "none"}; adjusting sets a continuous range; H1 follows plugin settings`);
+		this.track.style.setProperty("--glide-depth-fill", continuous ? `${(depth - 1) * 20}%` : "0%");
 	}
 }

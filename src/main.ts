@@ -76,8 +76,8 @@ export default class GlideOutlinePlugin extends Plugin {
 			}),
 		);
 		this.registerEvent(
-			this.app.metadataCache.on("changed", (file: TFile) => {
-				this.controller?.handleMetadataChanged(file);
+			this.app.metadataCache.on("changed", (file: TFile, data: string) => {
+				this.controller?.handleMetadataChanged(file, data);
 			}),
 		);
 		this.registerEvent(
@@ -117,7 +117,7 @@ export default class GlideOutlinePlugin extends Plugin {
 		// disabled by the OS" from "wrong heading" from "wrong drop point".
 		this.addCommand({
 			id: "copy-diagnostics",
-			name: "Copy Glide Outline diagnostics",
+			name: "Copy diagnostics",
 			callback: async () => {
 				await this.copyDiagnostics();
 			},
@@ -137,7 +137,7 @@ export default class GlideOutlinePlugin extends Plugin {
 		// ungated: it is end-user triage, not a developer tool.
 		this.addCommand({
 			id: "perf-capture-start",
-			name: "Start Glide Outline performance capture (light)",
+			name: "Start performance capture (light)",
 			checkCallback: (checking: boolean): boolean => {
 				if (!this.settings.developerMode) return false;
 				if (checking) return true;
@@ -145,7 +145,7 @@ export default class GlideOutlinePlugin extends Plugin {
 					new Notice("Glide Outline: capture already running.");
 					return true;
 				}
-				this.perf.start(window, "light");
+				this.perf.start(this.lifecycle.currentView?.contentEl.ownerDocument.defaultView ?? window, "light");
 				new Notice(
 					"Glide Outline: light performance capture started. " +
 						"Interact with the outline, then run the stop command.",
@@ -155,7 +155,7 @@ export default class GlideOutlinePlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "perf-capture-start-deep",
-			name: "Start Glide Outline performance capture (deep)",
+			name: "Start performance capture (deep)",
 			checkCallback: (checking: boolean): boolean => {
 				if (!this.settings.developerMode) return false;
 				if (checking) return true;
@@ -163,7 +163,7 @@ export default class GlideOutlinePlugin extends Plugin {
 					new Notice("Glide Outline: capture already running.");
 					return true;
 				}
-				this.perf.start(window, "deep");
+				this.perf.start(this.lifecycle.currentView?.contentEl.ownerDocument.defaultView ?? window, "deep");
 				new Notice(
 					"Glide Outline: DEEP performance capture started. " +
 						"It samples every sub-phase and costs more per " +
@@ -174,7 +174,7 @@ export default class GlideOutlinePlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "perf-capture-stop",
-			name: "Stop and copy Glide Outline performance capture",
+			name: "Stop and copy performance capture",
 			checkCallback: (checking: boolean): boolean => {
 				if (!this.settings.developerMode) return false;
 				if (checking) return true;

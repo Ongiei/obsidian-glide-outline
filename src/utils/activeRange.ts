@@ -13,6 +13,8 @@ export interface ActiveMotionRangeInput {
 	centers: readonly number[];
 	/** Cached unscaled row heights (same order as `centers`). */
 	heights: readonly number[];
+	/** Maximum height from the same geometry revision; avoids a per-frame scan. */
+	maxRowHeight?: number;
 	/** Outline viewport bounds in the same coordinate system. */
 	viewportTop: number;
 	viewportBottom: number;
@@ -211,10 +213,12 @@ export function computeActiveMotionRange(
 	const n = centers.length;
 	if (n === 0) return emptyActiveRange();
 
-	let maxRowHeight = 0;
-	for (let i = 0; i < n; i++) {
-		const h = heights[i];
-		if (Number.isFinite(h) && h > maxRowHeight) maxRowHeight = h;
+	let maxRowHeight = input.maxRowHeight ?? 0;
+	if (input.maxRowHeight === undefined) {
+		for (let i = 0; i < n; i++) {
+			const h = heights[i];
+			if (Number.isFinite(h) && h > maxRowHeight) maxRowHeight = h;
+		}
 	}
 	const allowance = displacementAllowance(input.maxScale, maxRowHeight);
 	const radius = Math.max(0, input.radius);

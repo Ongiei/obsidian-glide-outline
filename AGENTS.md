@@ -11,7 +11,7 @@ Follow them exactly.
 
 2. **Deploy to the single test vault only.**
    Copy `main.js` / `manifest.json` / `styles.css` to:
-   `/Users/ongiei/Documents/obsidian-eudic-bridge/integration-vault/.obsidian/plugins/glide-outline/`
+   `/Users/ongiei/Documents/Obsidian Vault/Test Vaults/.obsidian/plugins/glide-outline/`
    - Never overwrite that vault's `data.json`.
    - Never deploy to the main Obsidian library.
 

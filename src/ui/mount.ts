@@ -21,9 +21,9 @@
  *    positioned, so it needs the host to be a containing block. Rather than
  *    permanently branding the host with a class, we check first: when the
  *    host is already positioned — which it is in current Obsidian — we write
- *    nothing at all. Only a `static` host gets an inline `position: relative`,
- *    recorded here and restored verbatim on dispose, and only if nobody else
- *    has written over it in the meantime.
+ *    nothing at all. A `static` host gets a temporary, instance-owned anchor
+ *    attribute styled by styles.css. An explicit inline `static` is suspended
+ *    while mounted and restored only if nobody else has replaced it.
  *
  * Mounting is idempotent: any owned wrapper already sitting in the host (a
  * previous instance that was never disposed, e.g. after a reload mid-frame)
@@ -34,6 +34,9 @@
 export const OWNER_ATTR = "data-glide-outline-owner";
 export const OWNER_VALUE = "glide-outline";
 export const INSTANCE_ATTR = "data-glide-outline-instance";
+export const ANCHOR_ATTR = "data-glide-outline-anchor";
+
+const anchorSnapshots = new WeakMap<HTMLElement, { position: string; priority: string; cleared: boolean }>();
 
 /** Matches any node Glide Outline owns — never a foreign lookalike. */
 export const OWNED_SELECTOR = `[${OWNER_ATTR}="${OWNER_VALUE}"]`;
@@ -58,11 +61,11 @@ export interface MountHostMutationDiagnostics {
 	mountHostComputedPosition: string;
 	/** host.style.position BEFORE any write of ours ("" when unset). */
 	mountHostInlinePositionBefore: string;
-	/** True when we wrote inline `position: relative` onto the host. */
+	/** True when a temporary anchor was needed on the host. */
 	mountMutatedHostPosition: boolean;
 	/** host.style.position after mount (== before when not mutated). */
 	mountHostInlinePositionAfter: string;
-	/** True once dispose verbatim-restored the host's inline position. */
+	/** True once cleanup leaves the original inline position restored. */
 	mountRestoredHostPosition: boolean;
 	/** Owned wrappers from earlier instances swept away at mount. */
 	staleMountsRemoved: number;
@@ -112,9 +115,17 @@ export function createOutlineMount(hostEl: HTMLElement): OutlineMount {
 		win && typeof win.getComputedStyle === "function"
 			? win.getComputedStyle(hostEl).position
 			: "";
-	const anchored = hostPosition === "static";
-	const previousInlinePosition = anchored ? hostEl.style.position : null;
-	if (anchored) hostEl.setCssProps({ position: "relative" });
+	const anchored = hostPosition === "static" || hostEl.hasAttribute(ANCHOR_ATTR);
+	const anchorSnapshot = anchorSnapshots.get(hostEl) ?? {
+		position: inlinePositionBefore,
+		priority: hostEl.style.getPropertyPriority("position"),
+		cleared: inlinePositionBefore === "static",
+	};
+	if (anchored) {
+		anchorSnapshots.set(hostEl, anchorSnapshot);
+		hostEl.setAttribute(ANCHOR_ATTR, instanceId);
+		if (hostEl.style.position === "static") hostEl.style.removeProperty("position");
+	}
 
 	hostEl.appendChild(mountEl);
 
@@ -145,12 +156,13 @@ export function createOutlineMount(hostEl: HTMLElement): OutlineMount {
 			mountEl.remove();
 			// Restore only what we wrote, and only if it is still ours —
 			// another actor may legitimately have changed it since.
-			if (anchored && hostEl.style.position === "relative") {
-				hostEl.setCssProps({ position: previousInlinePosition ?? "" });
-				if (hostEl.getAttribute("style") === "") {
-					hostEl.removeAttribute("style");
+			if (anchored && hostEl.getAttribute(ANCHOR_ATTR) === instanceId) {
+				hostEl.removeAttribute(ANCHOR_ATTR);
+				if (anchorSnapshot.cleared && hostEl.style.position === "") {
+					hostEl.style.setProperty("position", anchorSnapshot.position, anchorSnapshot.priority);
 				}
-				diagnostics.mountRestoredHostPosition = true;
+				anchorSnapshots.delete(hostEl);
+				diagnostics.mountRestoredHostPosition = hostEl.style.position === anchorSnapshot.position;
 			}
 			diagnostics.mountHostInlinePositionAfter = hostEl.style.position;
 		},

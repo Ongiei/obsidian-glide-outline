@@ -10,6 +10,7 @@ import type { EditorUpdateBridge } from "./EditorUpdateBridge";
 import { GlideOutlineView } from "../ui/GlideOutlineView";
 import type { OutlineControls } from "../ui/OutlineToolbar";
 import { MagnificationController } from "../ui/MagnificationController";
+import { settingsImpact } from "../ui/settingsImpact";
 import {
 	sameHeadingItems,
 	sameHeadingKeys,
@@ -75,6 +76,7 @@ export class GlideOutlineController {
 	private renderedSourcePath: string | null = null;
 	private contextPath: string;
 	private contextMode: string;
+	private appliedSettings: ReturnType<typeof settingsImpact>;
 	private disposed = false;
 	private unsubscribeEditorUpdates: (() => void) | null = null;
 	/** In-flight editor jump correction; a new jump cancels the old one. */
@@ -100,6 +102,7 @@ export class GlideOutlineController {
 	) {
 		this.contextPath = view.file?.path ?? "";
 		this.contextMode = view.getMode();
+		this.appliedSettings = settingsImpact(getSettings());
 		markColdStart("controllerAttachStart"); // §十三
 		this.renderComponent.load();
 		this.outlineView = new GlideOutlineView(
@@ -167,9 +170,13 @@ export class GlideOutlineController {
 		this.refreshFromEditor();
 	}
 
-	handleMetadataChanged(file: TFile): void {
+	handleMetadataChanged(file: TFile, data?: string): void {
 		if (this.disposed) return;
 		if (file.path !== this.view.file?.path) return;
+		// Cache events may lag live typing. Accept the authoritative parse
+		// only when it describes the editor's current document snapshot.
+		if (data !== undefined && this.view.getMode() !== "preview" &&
+			data !== this.view.editor.getValue()) return;
 		this.refreshFromCache();
 	}
 
@@ -194,11 +201,20 @@ export class GlideOutlineController {
 
 	applySettings(): void {
 		if (this.disposed) return;
-		this.outlineView.applySettings();
-		// Level filter may have changed — re-render from the full model.
-		this.outlineView.setItems(this.items, this.view.file?.path ?? "");
-		this.magnification.invalidate();
-		this.tracker.setItems(this.outlineView.getItems());
+		const next = settingsImpact(this.getSettings());
+		const sourcePath = this.view.file?.path ?? "";
+		const modelChanged = next.model !== this.appliedSettings.model || sourcePath !== this.renderedSourcePath;
+		const geometryChanged = modelChanged || next.geometry !== this.appliedSettings.geometry;
+		if (geometryChanged || next.appearance !== this.appliedSettings.appearance) {
+			this.outlineView.applySettings(geometryChanged);
+		}
+		if (modelChanged) {
+			this.outlineView.setItems(this.items, sourcePath);
+			this.renderedSourcePath = sourcePath;
+			this.tracker.setItems(this.outlineView.getItems());
+		}
+		this.appliedSettings = next;
+		this.magnification.invalidate(geometryChanged);
 	}
 
 	dispose(): void {
@@ -283,6 +299,7 @@ export class GlideOutlineController {
 		// Always push to the view: even when identities are unchanged, line
 		// numbers may have shifted (view stores them for jumps via the model).
 		this.outlineView.setItems(items, sourcePath);
+		this.appliedSettings.model = settingsImpact(this.getSettings()).model;
 		this.tracker.setItems(this.outlineView.getItems());
 		if (keysChanged) this.magnification.invalidate();
 	}
