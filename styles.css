@@ -1045,3 +1045,10 @@
 	pointer-events: none;
 	user-select: none;
 }
+
+/* Native settings host for the existing tabbed interface. */
+:where([data-glide-outline-owner]).glide-settings-custom {
+	display: block;
+	border: 0;
+	padding: 0;
+}

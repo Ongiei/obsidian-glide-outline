@@ -1,55 +1,44 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from "vitest";
-import type { App, Setting, SettingDefinition, SettingDefinitionGroup, SettingGroup, ToggleComponent } from "obsidian";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import * as obsidian from "obsidian";
+import type { App, Setting, SettingDefinition } from "obsidian";
 import type GlideOutlinePlugin from "../src/main";
 import { DEFAULT_SETTINGS, GlideOutlineSettingTab } from "../src/settings";
 
 function fixture() {
-	const plugin = {
-		settings: structuredClone(DEFAULT_SETTINGS),
-		applySettings: vi.fn().mockResolvedValue(undefined),
-		previewSettings: vi.fn(),
-	};
-	const tab = new GlideOutlineSettingTab({} as App, plugin as unknown as GlideOutlinePlugin);
-	const groups = tab.getSettingDefinitions() as SettingDefinitionGroup[];
-	const rows = groups.flatMap((group) => group.items ?? []) as SettingDefinition[];
-	return { plugin, tab, groups, rows };
+ const plugin = { settings: structuredClone(DEFAULT_SETTINGS), applySettings: vi.fn(), previewSettings: vi.fn() };
+ const tab = new GlideOutlineSettingTab({} as App, plugin as unknown as GlideOutlinePlugin);
+ return { plugin, tab };
 }
-
-describe("searchable settings with shared legacy controls", () => {
-	it("exposes all sections without constructing controls or saving settings", () => {
-		const { plugin, groups, rows } = fixture();
-		const names = rows.map((row) => row.name);
-		expect(names).toEqual(expect.arrayContaining([
-			"Enable outline", "Position", "H1", "H6", "Developer mode",
-			"Restore default appearance", "Level indentation (legacy)",
-		]));
-		expect(names.length).toBeGreaterThan(30);
-		expect(new Set(names).size).toBe(names.length);
-		expect(groups.every((group) => group.items?.length)).toBe(true);
-		expect(plugin.applySettings).not.toHaveBeenCalled();
-		expect(plugin.previewSettings).not.toHaveBeenCalled();
-	});
-
-	it("native controls share the legacy values and persistence callback", async () => {
-		const { plugin, rows } = fixture();
-		let change: (value: boolean) => unknown = () => {};
-		let displayed: boolean | null = null;
-		const toggle = {
-			setValue(value: boolean) { displayed = value; return this; },
-			onChange(callback: (value: boolean) => unknown) { change = callback; return this; },
-		} as unknown as ToggleComponent;
-		const setting = {
-			settingEl: document.createElement("div"),
-			addToggle(callback: (control: ToggleComponent) => unknown) { callback(toggle); },
-		} as unknown as Setting;
-		const definition = rows.find((row) => row.name === "Enable outline");
-		if (!definition?.render) throw new Error("Missing searchable outline toggle");
-		definition.render(setting, {} as SettingGroup);
-		expect(displayed).toBe(true);
-		await change(false);
-		expect(plugin.settings.enabled).toBe(false);
-		expect(plugin.applySettings).toHaveBeenCalledTimes(1);
-		expect(setting.settingEl.getAttribute("data-glide-outline-owner")).toBe("glide-outline");
-	});
+afterEach(() => vi.restoreAllMocks());
+describe("native search preserves the tabbed settings interface", () => {
+ it("indexes settings terms without constructing or saving controls", () => {
+  const {tab,plugin} = fixture();
+  const definitions = tab.getSettingDefinitions() as SettingDefinition[];
+  expect(definitions).toHaveLength(1);
+  expect(definitions[0].aliases).toEqual(expect.arrayContaining(["Enable outline", "Position", "Restore default appearance"]));
+  expect(definitions[0].aliases?.length).toBeGreaterThan(30);
+  expect(plugin.applySettings).not.toHaveBeenCalled();
+ });
+ it("uses the same tab renderer on modern and legacy hosts", () => {
+  const {tab} = fixture();
+  const render = vi.spyOn(tab as unknown as {renderTabs: (el: HTMLElement) => void}, "renderTabs").mockImplementation(() => {});
+  const host = document.createElement("div");
+  host.empty = () => host.replaceChildren();
+  host.addClass = name => host.classList.add(name);
+  const definition = tab.getSettingDefinitions()[0] as SettingDefinition;
+  if (!definition.render) throw Error("Missing tab renderer");
+  definition.render({settingEl:host} as unknown as Setting, {} as obsidian.SettingGroup);
+  expect(render).toHaveBeenCalledWith(host);
+  tab.display();
+  expect(render).toHaveBeenCalledTimes(2);
+ });
+ it("provides Chinese search labels when Obsidian uses Chinese", () => {
+  vi.spyOn(obsidian, "getLanguage").mockReturnValue("zh");
+  const {tab} = fixture();
+  const definition = tab.getSettingDefinitions()[0] as SettingDefinition;
+  expect(definition.name).toBe("插件设置");
+  expect(definition.aliases).toContain("启用大纲");
+  expect(definition.aliases).toContain("恢复默认外观");
+ });
 });

@@ -92,3 +92,5 @@ export function setIcon(el: HTMLElement, icon: string): void {
 export const MarkdownRenderer = {
 	render: async (): Promise<void> => {},
 };
+
+export function getLanguage(): string { return "en"; }
