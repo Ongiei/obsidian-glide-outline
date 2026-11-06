@@ -1,13 +1,14 @@
 import { computeCollisionFreeMagnification } from "../utils/geometry";
 import { type AutoScrollStopReason } from "../utils/overflow";
 import {
-	computeEdgeScrollIntent,
+	computeRailEdgeScrollIntent,
 	computeKineticIntentVelocity,
 	predictedPointerY,
 	resolveEdgeZones,
 	PointerSampleRing,
 	POINTER_FOLLOW_DECAY_TAU_MS,
 	POINTER_FOLLOW_MAX_SHARE,
+	POINTER_FOLLOW_MIN_SPEED,
 	type EdgeIntentState,
 	type PointerKinematicsState,
 	type ScrollIntegratorState,
@@ -25,6 +26,7 @@ import {
 	bridgeRectFor,
 	emptyRect,
 	pointInEnvelope,
+	pointInRect,
 	translateEnvelopeItemsY,
 } from "../utils/envelope";
 import type { PointerEnvelope, Rect } from "../utils/envelope";
@@ -451,6 +453,8 @@ export class MagnificationController {
 	/** Viewport bounds cached alongside the item cache — no per-frame rect. */
 	private viewportTop = 0;
 	private viewportBottom = 0;
+	/** Fixed interaction rail measured only with the discrete layout cache. */
+	private railRect: Rect = emptyRect();
 	/** §八 four-field pointer interaction state (replaces `pointerInside`). */
 	private pointer: PointerInteractionState = idlePointerState();
 	/** Timestamp base for the motion interpolation step (section 11). */
@@ -483,6 +487,15 @@ export class MagnificationController {
 	private lastSampleEventId = "";
 	/** §十四: a kinetic session is live (nonzero target last frame). */
 	private kineticActive = false;
+	/** An exiting edge session brakes before yielding to a new follow. */
+	private edgeCoasting = false;
+	private interactionTrace: Record<string, unknown>[] = [];
+	private interactionRecording = false;
+
+	getInteractionDiagnostics(): readonly Record<string, unknown>[] {
+		if (!this.getSettings().developerMode) this.interactionTrace = [];
+		return this.interactionTrace;
+	}
 	/** Shared integrator that combines the two intents. */
 	private integrator: ScrollIntegratorState = {
 		edgeIntentVelocity: 0,
@@ -930,8 +943,9 @@ export class MagnificationController {
 			this.anchorDirty = false;
 			// §十/§十二: a gap crossing keeps the KINETIC intent alive (the
 			// gesture continues); only an unlatched EDGE session stops.
-			if (!this.edgeIntent.latched) {
-				this.stopEdgeIntent("pointer-left");
+			if (!pointInRect(this.railRect, event.clientX, event.clientY)) {
+				this.stopEdgeIntent("outside-rail");
+				this.schedule("autoScrollSettling");
 			}
 			this.cancelCollapse();
 			return;
@@ -1482,7 +1496,9 @@ export class MagnificationController {
 		// Edge browsing has priority over aiming. Otherwise the 100ms
 		// snap cancels the edge's 140ms dwell before it can ever scroll.
 		const overflow = this.view.getOverflowState();
-		const edgeScroll = computeEdgeScrollIntent({
+		const edgeScroll = computeRailEdgeScrollIntent({
+			pointerX: this.lastPointerX,
+			railRect: this.railRect,
 			pointerY: this.lastPointerY,
 			viewportTop: this.viewportTop,
 			viewportBottom: this.viewportBottom,
@@ -1493,11 +1509,21 @@ export class MagnificationController {
 			enabled: settings.pointerAutoScroll && overflow.hasOverflow,
 		}).velocity !== 0;
 		const held = this.pointerSnap.holds(this.lastPointerX, this.lastPointerY);
+		const deliberateGesture = settings.pointerFollowEnabled && overflow.hasOverflow &&
+			now - this.kinematics.lastSampleTime <= 90 &&
+			Math.abs(this.kinematics.velocityY) > POINTER_FOLLOW_MIN_SPEED && !held;
+		const scrollOwnsPointer = edgeScroll || this.edgeIntent.latched || this.edgeCoasting ||
+			Math.abs(this.integrator.appliedVelocity) > 8 || deliberateGesture;
+		if (scrollOwnsPointer) this.pointerSnap.clear();
 		// Only acquisition reads one real card rect, in the READ phase.
 		// Once held, geometry is frozen and speed/acceleration cannot eject it.
-		const bounds = !held && !edgeScroll && !this.aimSettling && card ? card.getBoundingClientRect() : undefined;
+		// Visual release easing must not block acquiring a valid new card.
+		const canAcquire = !scrollOwnsPointer;
+		const bounds = !held && canAcquire && card ? card.getBoundingClientRect() : undefined;
+		const staleHit = bounds && bounds.right > bounds.left && bounds.bottom > bounds.top &&
+			!pointInRect(bounds, this.lastPointerX, this.lastPointerY);
 		this.pointerSnap.update(
-			(edgeScroll || this.aimSettling) && !held ? null : row?.getAttribute("data-key") ?? null,
+			!canAcquire || staleHit ? null : row?.getAttribute("data-key") ?? null,
 			this.lastPointerX, this.lastPointerY, now, bounds,
 		);
 		const wasSnapped = this.snappedRow !== null;
@@ -1515,7 +1541,6 @@ export class MagnificationController {
 		if (wasSnapped && !nextRow) this.aimSettling = true;
 		if (this.pointerSnap.locked) {
 			if (!Number.isFinite(this.aimY)) this.aimY = this.lastPointerY;
-			this.resetAllScrollIntent("pointer-snap");
 			// Hold the focus, not an unfinished frame. Old peaks must keep
 			// shrinking while the selected card settles to its single peak.
 		}
@@ -1662,7 +1687,9 @@ export class MagnificationController {
 			snap?: boolean;
 		}[] = [];
 		if (!collisionEmpty) {
-			const anchorIndex = this.resolveAnchorIndex();
+			// Continuous pointer inversion drives Dock motion while browsing;
+			// moving DOM hits must not feed back into the solver's focus.
+			const anchorIndex = lockedIndex;
 			const activeLayout = this.layout.slice(cStart, cEnd + 1);
 			const activeShifts = this.shifts.slice(cStart, cEnd + 1);
 			const anchorInSlice =
@@ -2119,6 +2146,21 @@ export class MagnificationController {
 			}
 		}
 		// Keep the loop alive until every displayed value converged.
+		const recording = settings.developerMode && measure;
+		if (recording && !this.interactionRecording) this.interactionTrace = [];
+		this.interactionRecording = recording;
+		if (!settings.developerMode) this.interactionTrace.length = 0;
+		if (recording) {
+			this.interactionTrace.push({ time: now, x: this.lastPointerX, y: this.lastPointerY,
+				region: pointInRect(this.railRect, this.lastPointerX, this.lastPointerY) ? "Rail" :
+					closestOwned(this.snapTarget, ".glide-outline-card", this.ownsNode) ? "Card" : this.pointer.insideEnvelope ? "Gap" : "Outside",
+				edgeZone: this.edgeIntent.dwellTimer !== 0 || this.edgeIntent.latched,
+				edgeActive: this.integrator.edgeIntentVelocity !== 0,
+				followActive: this.integrator.kineticIntentVelocity !== 0,
+				snapKey: this.pointerSnap.targetKey, anchorKey: this.pointerAnchorEl?.dataset.key ?? null,
+				velocity: this.integrator.appliedVelocity, edgeStopReason: this.edgeIntent.lastStopReason });
+			if (this.interactionTrace.length > 300) this.interactionTrace.shift();
+		}
 		if (converging || this.aimSettling) this.schedule("motionConverging");
 
 		if (measure && perf) {
@@ -2255,8 +2297,8 @@ export class MagnificationController {
 		// §3.2: in DEEP it costs reads only while this group is armed.
 		const measureDeep = perf?.deepAutoScrollIntentActive === true;
 		const eligibilityStart = measureDeep ? this.win.performance.now() : 0;
-		if (!this.pointerExpanded || this.pressed || this.pointerSnap.locked) {
-			this.resetAllScrollIntent(this.pressed ? "pressed" : this.pointerSnap.locked ? "pointer-snap" : "collapsed");
+		if (!this.pointerExpanded || this.pressed) {
+			this.resetAllScrollIntent(this.pressed ? "pressed" : "collapsed");
 			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollEligibility",
@@ -2301,6 +2343,10 @@ export class MagnificationController {
 			);
 			if (Math.abs(kin.velocityY) < 1) kin.velocityY = 0;
 		}
+		// Stale pointer samples are not sustained intent. Stop requesting
+		// follow after one sample window, then let the integrator brake.
+		if (now - kin.lastSampleTime > 90) kin.velocityY = 0;
+		kin.predictedY = predictedPointerY(this.lastPointerY, kin.velocityY);
 		if (measureDeep && perf) {
 			perf.addPhaseSample(
 				"scrollEligibility",
@@ -2327,12 +2373,15 @@ export class MagnificationController {
 		// gate, latch bookkeeping.
 		const edgeMathStart = measureDeep ? this.win.performance.now() : 0;
 		const edge = this.edgeIntent;
-		const edgeEligible =
-			pointer.overElement || (edge.latched && pointer.insideEnvelope);
+		const edgeEligible = this.railRect.right > this.railRect.left &&
+			pointInRect(this.railRect, this.lastPointerX, this.lastPointerY);
 		let edgeTarget = 0;
+		let edgeOwnsScroll = false;
 		let edgeStopReason: string | null = null;
 		if (edgeEligible) {
-			const result = computeEdgeScrollIntent({
+			const result = computeRailEdgeScrollIntent({
+				pointerX: this.lastPointerX,
+				railRect: this.railRect,
 				pointerY: this.lastPointerY,
 				viewportTop: this.viewportTop,
 				viewportBottom: this.viewportBottom,
@@ -2344,6 +2393,8 @@ export class MagnificationController {
 			});
 			edgeTarget = result.velocity;
 			edgeStopReason = result.stopReason;
+			edgeOwnsScroll = edgeTarget !== 0 || (edge.latched && this.withinZoneHysteresis(zonePx));
+			if (edgeTarget !== 0) this.edgeCoasting = false;
 			// Dwell gate — EDGE only (§九: kinetic has no dwell). Brushing
 			// an edge never yanks the intended click target.
 			if (edgeTarget !== 0 && !edge.dwellPassed) {
@@ -2370,7 +2421,7 @@ export class MagnificationController {
 			edge.dwellPassed ||
 			edge.dwellTimer !== 0
 		) {
-			this.stopEdgeIntent("pointer-left");
+			this.stopEdgeIntent("outside-rail");
 		}
 		if (measureDeep && perf) {
 			perf.addPhaseSample(
@@ -2382,8 +2433,8 @@ export class MagnificationController {
 		// ---- KINETIC intent (§九/§十二: independent eligibility) --------
 		// §四.2 kineticIntentMath: pointer-follow velocity math.
 		const kineticMathStart = measureDeep ? this.win.performance.now() : 0;
-		const kineticEligible =
-			pointer.overElement || pointer.insideEnvelope;
+		const kineticEligible = (pointer.overElement || pointer.insideEnvelope) &&
+			!edgeOwnsScroll && !this.edgeCoasting && !this.pointerSnap.locked;
 		let kineticTarget = 0;
 		if (kineticEligible) {
 			kineticTarget = computeKineticIntentVelocity({
@@ -2410,8 +2461,11 @@ export class MagnificationController {
 				this.kineticActive = false;
 				perf?.countKineticStopReason("decayed");
 			}
-		} else if (this.kineticActive || kin.velocityY !== 0) {
+		} else if (!pointer.overElement && !pointer.insideEnvelope) {
 			this.stopKineticIntent("pointer-left");
+		} else if (this.kineticActive) {
+			this.kineticActive = false;
+			perf?.countKineticStopReason(edgeOwnsScroll ? "edge-priority" : "hover-stable");
 		}
 		if (measureDeep && perf) {
 			perf.addPhaseSample(
@@ -2463,11 +2517,12 @@ export class MagnificationController {
 		integ.kineticIntentVelocity = kineticTarget;
 		const combined = Math.min(
 			combinedMaxSpeed,
-			Math.max(-combinedMaxSpeed, edgeTarget + kineticTarget),
+			Math.max(-combinedMaxSpeed, edgeOwnsScroll ? edgeTarget : kineticTarget),
 		);
 		integ.combinedTargetVelocity = combined;
 
 		if (combined === 0 && integ.appliedVelocity === 0) {
+			this.edgeCoasting = false;
 			if (measureDeep && perf) {
 				perf.addPhaseSample(
 					"scrollIntegrator",
@@ -2657,6 +2712,7 @@ export class MagnificationController {
 
 	/** §十一: pointer within (preZone + hysteresis) of either edge? */
 	private withinZoneHysteresis(zonePx: number): boolean {
+		if (!pointInRect(this.railRect, this.lastPointerX, this.lastPointerY)) return false;
 		const height = this.viewportBottom - this.viewportTop;
 		if (!(height > 0) || !Number.isFinite(this.lastPointerY)) return false;
 		const { preZone } = resolveEdgeZones(height, zonePx);
@@ -2674,6 +2730,7 @@ export class MagnificationController {
 	 */
 	private stopEdgeIntent(reason: AutoScrollStopReason): void {
 		const edge = this.edgeIntent;
+		if (edge.latched && this.integrator.appliedVelocity !== 0) this.edgeCoasting = true;
 		const hadSession =
 			edge.latched || edge.dwellPassed || edge.dwellTimer !== 0;
 		if (edge.dwellTimer !== 0) {
@@ -2729,6 +2786,7 @@ export class MagnificationController {
 		integ.combinedTargetVelocity = 0;
 		integ.appliedVelocity = 0;
 		integ.lastFrameTime = Number.NaN;
+		this.edgeCoasting = false;
 	}
 
 	/** Map the DOM-hit anchor element to its cache index (-1 = blank).
@@ -2891,6 +2949,8 @@ export class MagnificationController {
 		const viewportRect = this.view.viewportEl.getBoundingClientRect();
 		this.viewportTop = viewportRect.top;
 		this.viewportBottom = viewportRect.bottom;
+		const rail = this.view.hitZoneEl.getBoundingClientRect();
+		this.railRect = { left: rail.left, right: rail.right, top: rail.top, bottom: rail.bottom };
 		this.currentScrollTop = this.view.viewportEl.scrollTop;
 		this.commandedScrollTop = this.currentScrollTop;
 		const children = this.view.listEl.children;
@@ -3143,7 +3203,8 @@ export class MagnificationController {
 	private insideHoverSession(x: number, y: number): boolean {
 		this.hoverSession.include(this.envelope);
 		return pointInEnvelope(this.envelope, x, y, this.clientYToContentY(y)) ||
-			this.hoverSession.contains(x, y, this.viewportTop, this.viewportBottom);
+			this.hoverSession.contains(x, this.clientYToContentY(y), this.currentScrollTop,
+				this.currentScrollTop + this.viewportBottom - this.viewportTop);
 	}
 
 	/** Bridge rect builder exposed for tests / geometry verification. */

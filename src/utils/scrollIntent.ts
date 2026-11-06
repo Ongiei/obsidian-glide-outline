@@ -1,3 +1,5 @@
+import { pointInRect, type Rect } from "./envelope";
+
 /**
  * §七–§九 Unified scroll-intent primitives.
  *
@@ -164,6 +166,21 @@ export interface EdgeScrollIntentResult {
 	velocity: number;
 	/** Why the velocity is 0; null while actively scrolling. */
 	stopReason: string | null;
+}
+
+/** Interaction geometry is the fixed rail, never the root/card/envelope. */
+export function computeRailEdgeScrollIntent(
+	input: EdgeScrollIntentInput & { pointerX: number; railRect: Rect },
+): EdgeScrollIntentResult {
+	const rail = input.railRect;
+	if (!(rail.right > rail.left && rail.bottom > rail.top) ||
+		!pointInRect(rail, input.pointerX, input.pointerY)) {
+		return { velocity: 0, stopReason: "outside-rail" };
+	}
+	return computeEdgeScrollIntent({ ...input,
+		viewportTop: Math.max(input.viewportTop, rail.top),
+		viewportBottom: Math.min(input.viewportBottom, rail.bottom),
+	});
 }
 
 /**

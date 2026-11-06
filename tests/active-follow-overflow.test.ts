@@ -191,12 +191,14 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			expect(centeredTarget(60)).toBe(1440);
 		});
 
-		it("centres the last row at maxScrollTop thanks to the bottom spacer", () => {
-			expect(followTo(ROW_COUNT - 1)).toBeCloseTo(
-				centeredTarget(ROW_COUNT - 1),
-				1,
-			);
-			expect(centeredTarget(ROW_COUNT - 1)).toBe(MAX_SCROLL_TOP);
+		it("ends the last row at the bottom without artificial centering space", () => {
+			mockRowLayout(ROW_H, 0);
+			mockViewport(0, ROW_COUNT * ROW_H);
+			expect(followTo(ROW_COUNT - 1)).toBeCloseTo(ROW_COUNT * ROW_H - CLIENT_H, 1);
+			expect(view.getActiveFollowDiagnostics().bottomCenterSpacerPx).toBe(0);
+			expect(view.isPlayheadVisible()).toBe(false);
+			view.setInteractionState("expanded-pointer");
+			expect(view.viewportEl.scrollTop).toBeCloseTo(ROW_COUNT * ROW_H - CLIENT_H, 1);
 		});
 
 		it("reports the row centre and playhead used for the decision", () => {
@@ -237,7 +239,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			// Spacers are derived from clientHeight / 2 − rowHeight / 2.
 			const d = view.getActiveFollowDiagnostics();
 			expect(d.topCenterSpacerPx).toBe(0);
-			expect(d.bottomCenterSpacerPx).toBe(SPACER);
+			expect(d.bottomCenterSpacerPx).toBe(0);
 		});
 
 		it("re-measures the spacers when the viewport is resized", () => {
@@ -247,7 +249,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			flushRaf();
 			const d = view.getActiveFollowDiagnostics();
 			expect(d.topCenterSpacerPx).toBe(0);
-			expect(d.bottomCenterSpacerPx).toBe(TALLER / 2 - ROW_H / 2);
+			expect(d.bottomCenterSpacerPx).toBe(0);
 		});
 
 		it("clamps the spacers to zero when a row is taller than the viewport", () => {
@@ -947,7 +949,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			);
 		});
 
-		it("bumps the revision only when the spacers really move", () => {
+		it("updates resized playhead geometry without adding endpoint spacers", () => {
 			const before = view.getActiveFollowDiagnostics();
 			defineNumber(view.viewportEl, "clientHeight", 600);
 			view.applySettings();
@@ -955,7 +957,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			expect(after.lastGeometryRevision).toBeGreaterThan(
 				before.lastGeometryRevision,
 			);
-			expect(after.centerSpacerMutationCount).toBeGreaterThan(
+			expect(after.centerSpacerMutationCount).toBe(
 				before.centerSpacerMutationCount,
 			);
 		});
@@ -1105,7 +1107,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 		it("writes the computed heights onto the elements", () => {
 			const [top, bottom] = spacers();
 			expect(top.style.height).toBe("0px");
-			expect(bottom.style.height).toBe(`${SPACER}px`);
+			expect(bottom.style.height).toBe("0px");
 		});
 
 		it("reports the geometry it sized itself from", () => {
@@ -1116,7 +1118,7 @@ describe("center-playhead active follow in a 126-row outline (§五–§十四)"
 			expect(d.firstRowHeight).toBe(ROW_H);
 			expect(d.lastRowHeight).toBe(ROW_H);
 			expect(d.topCenterSpacerPx).toBe(0);
-			expect(d.bottomCenterSpacerPx).toBe(CLIENT_H / 2 - ROW_H / 2);
+			expect(d.bottomCenterSpacerPx).toBe(0);
 			expect(d.centerSpacerRefreshCount).toBeGreaterThan(0);
 		});
 

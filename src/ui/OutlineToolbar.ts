@@ -63,7 +63,7 @@ export class OutlineToolbar {
 		const settings = button("Open plugin settings");
 		const icon = win.createSpan();
 		icon.setAttribute("aria-hidden", "true");
-		setIcon(icon, "settings-2");
+		setIcon(icon, "settings");
 		settings.append(icon);
 		settings.disabled = !controls.onOpenSettings;
 		settings.addEventListener("click", () => controls.onOpenSettings?.());
@@ -98,6 +98,7 @@ export class OutlineToolbar {
 		let depth = 2;
 		for (let level = 2; level <= 6; level++) if (settings.showLevels[level - 1]) depth = level;
 		this.depth.value = String(depth);
+		this.track.dataset.depth = `H${depth}`;
 		this.depth.setAttribute("aria-valuetext", `H2 through H${depth}; H1 follows plugin settings`);
 		this.track.style.setProperty("--glide-depth-fill", `${(depth - 1) * 20}%`);
 	}

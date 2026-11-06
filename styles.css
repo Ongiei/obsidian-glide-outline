@@ -641,9 +641,10 @@
 	box-sizing: border-box;
 	display: grid;
 	place-items: center;
-	flex: 0 0 30px;
-	height: 30px;
-	border-radius: var(--radius-s);
+	flex: 0 0 24px;
+	height: 24px;
+	align-self: center;
+	border-radius: 50%;
 	color: var(--text-muted);
 	font-size: var(--font-smallest);
 	cursor: pointer;
@@ -672,16 +673,48 @@
 	position: relative;
 	align-self: center;
 	box-sizing: border-box;
-	width: 170px;
-	height: 28px;
-	flex: 0 1 170px;
-	border: 1px solid var(--background-modifier-border-hover);
+	width: 28px;
+	height: 24px;
+	font-size: 10px;
+	font-weight: 500;
+	line-height: 1;
+	flex: 0 0 auto;
+	border: 1px solid transparent;
 	border-radius: 999px;
-	background: color-mix(in srgb, var(--background-primary) 85%, transparent);
+	background: transparent;
 	overflow: hidden;
 	pointer-events: auto;
+	transition: width 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+:where([data-glide-outline-owner]) .glide-outline-depth:hover,
+:where([data-glide-outline-owner]) .glide-outline-depth:active,
+:where([data-glide-outline-owner]) .is-keyboard-focus .glide-outline-depth {
+	width: 142px;
+	border-color: var(--background-modifier-border-hover);
+	background: color-mix(in srgb, var(--background-primary) 85%, transparent);
+}
+:where([data-glide-outline-owner]) .glide-outline-depth::after {
+	content: attr(data-depth);
+	position: absolute;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	font: inherit;
+	color: var(--text-muted);
+	pointer-events: none;
+}
+:where([data-glide-outline-owner]) .glide-outline-depth:hover::after,
+:where([data-glide-outline-owner]) .glide-outline-depth:active::after,
+:where([data-glide-outline-owner]) .is-keyboard-focus .glide-outline-depth::after {
+	opacity: 0;
+}
+:where([data-glide-outline-owner]) .glide-outline-depth:hover .glide-outline-depth-ticks,
+:where([data-glide-outline-owner]) .glide-outline-depth:active .glide-outline-depth-ticks,
+:where([data-glide-outline-owner]) .is-keyboard-focus .glide-outline-depth-ticks {
+	opacity: 1;
 }
 :where([data-glide-outline-owner]) .glide-outline-depth::before {
+	opacity: 0;
 	content: "";
 	position: absolute;
 	inset: 2px auto 2px 2px;
@@ -691,11 +724,16 @@
 	pointer-events: none;
 	transition: width 100ms ease;
 }
+:where([data-glide-outline-owner]) .glide-outline-depth:hover::before,
+:where([data-glide-outline-owner]) .glide-outline-depth:active::before,
+:where([data-glide-outline-owner]) .is-keyboard-focus .glide-outline-depth::before {
+	opacity: 1;
+}
 :where([data-glide-outline-owner]) .glide-outline-depth input {
 	position: absolute;
 	inset: 0;
 	width: 100%;
-	min-width: 65px;
+	min-width: 0;
 	margin: 0;
 	height: 100%;
 	opacity: 0;
@@ -707,13 +745,15 @@
 	outline-offset: -2px;
 }
 :where([data-glide-outline-owner]) .glide-outline-depth-ticks {
+	opacity: 0;
+	min-width: 140px;
+	transition: opacity 100ms ease;
 	position: absolute;
 	inset: 0;
 	display: flex;
 	align-items: center;
 	justify-content: space-around;
-	font-size: 10px;
-	font-weight: 500;
+	font: inherit;
 	color: var(--text-muted);
 	pointer-events: none;
 }

@@ -136,6 +136,7 @@ describe("large scroll delta snapshots + source attribution (§十)", () => {
 			onJump: () => undefined,
 		});
 		view.setItems(HEADINGS);
+		view.hitZoneEl.getBoundingClientRect = () => ({ left: 0, right: 28, top: 100, bottom: 500 }) as DOMRect;
 
 		Object.defineProperty(view.viewportEl, "clientHeight", {
 			configurable: true,

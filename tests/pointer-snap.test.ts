@@ -21,7 +21,7 @@ describe("pointer aiming snap", () => {
 		snap.update(null, 0, 15, 115);
 		expect(snap.locked).toBe(true);
 		snap.update("b", 0, 19, 120);
-		expect(snap.locked).toBe(false);
+		expect(snap.targetKey).toBe("b");
 		snap.update("b", 0, 19, 220);
 		expect(snap.locked).toBe(true);
 		expect(snap.targetKey).toBe("b");

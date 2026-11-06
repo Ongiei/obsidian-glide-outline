@@ -191,11 +191,11 @@ describe("MagnificationController pointer hot path (sections 4/5/7)", () => {
 		expect(view.isExpanded()).toBe(false);
 	});
 
-	it("keeps a long-title session open over shorter headings without extending click targets", () => {
+	it("does not lend a long title's width to distant shorter headings", () => {
 		view.viewportEl.getBoundingClientRect = () => ({ top: 0, bottom: 400, height: 400, left: 0, right: 240, width: 240 }) as DOMRect;
 		pointer("pointerenter", 180, 30);
 		windowPointer(180, 30);
-		flushFrame(); // learns the long card's width
+		flushFrame();
 		const short = structuredClone(STUB_ENVELOPE);
 		short.items[0].cardRect.right = 80;
 		short.items[0].bridgeRect.right = 89;
@@ -206,7 +206,7 @@ describe("MagnificationController pointer hot path (sections 4/5/7)", () => {
 		flushFrame();
 		vi.advanceTimersByTime(180);
 		flushFrame();
-		expect(view.isExpanded()).toBe(true);
+		expect(view.isExpanded()).toBe(false);
 		// Retention is geometry-only: no overlay receives editor clicks.
 		expect(view.rootEl.querySelector(".glide-outline-interaction-surface")).toBeNull();
 		windowPointer(500, 200);

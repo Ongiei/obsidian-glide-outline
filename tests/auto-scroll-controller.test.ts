@@ -117,6 +117,7 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 				toJSON: () => ({}),
 			}) as DOMRect;
 		view.updateOverflowState();
+		view.hitZoneEl.getBoundingClientRect = () => ({ left: 0, right: 28, top: VIEWPORT_TOP, bottom: VIEWPORT_BOTTOM }) as DOMRect;
 
 		controller = new MagnificationController(view, () => settings);
 	});
@@ -251,13 +252,12 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		expect(view.viewportEl.scrollTop).toBeGreaterThan(before);
 	});
 
-	it.each([105, 495])("edge card at %s scrolls after dwell instead of snapping", (clientY) => {
+	it.each([105, 495])("card outside the rail at %s remains selectable without edge scrolling", (clientY) => {
 		const card = view.rootEl.querySelector(".glide-outline-card") as HTMLElement;
-		card.dispatchEvent(new MouseEvent("pointerenter", { clientY, bubbles: true }));
+		card.dispatchEvent(new MouseEvent("pointerenter", { clientX: 80, clientY, bubbles: true }));
 		const before = view.viewportEl.scrollTop;
 		runScrollFrames();
-		if (clientY < 300) expect(view.viewportEl.scrollTop).toBeLessThan(before);
-		else expect(view.viewportEl.scrollTop).toBeGreaterThan(before);
+		expect(view.viewportEl.scrollTop).toBe(before);
 	});
 
 	it.each(["disabled", "dead-end"])("edge card still snaps when edge scrolling is %s", (reason) => {
