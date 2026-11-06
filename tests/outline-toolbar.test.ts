@@ -56,6 +56,7 @@ describe("fixed outline controls", () => {
 		const toolbar = new OutlineToolbar(document, { onSetDepth: () => undefined });
 		toolbar.refresh(s);
 		expect(toolbar.el.querySelector("output")).toBeNull();
+		expect((toolbar.el.querySelector(".glide-outline-depth") as HTMLElement).dataset.depth).toBe("H4");
 		expect(toolbar.el.querySelector(".glide-outline-depth-ticks")!.textContent).toBe("H2H3H4H5H6");
 		expect((toolbar.el.querySelector(".glide-outline-depth") as HTMLElement).style.getPropertyValue("--glide-depth-fill")).toBe("60%");
 	});
