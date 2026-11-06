@@ -73,7 +73,7 @@ Structural properties of the fixture are pinned by `tests/stress-fixture.test.ts
 
 ## Settings
 
-On Obsidian 1.13+, settings use native groups and appear in global settings search. Older versions retain the **General**, **Appearance**, **Motion** and **Advanced** tabs. Both share the same controls and the **Restore default appearance** action (position, shown levels and Markdown rendering are preserved).
+Settings retain the **General**, **Appearance**, **Motion** and **Advanced** tabs on all supported versions, with Chinese labels and descriptions when Obsidian uses Chinese. On Obsidian 1.13+, searching for a setting name locates this tabbed settings page. The **Restore default appearance** action preserves position, shown levels and Markdown rendering.
 
 | Setting | Default | Description |
 | --- | --- | --- |

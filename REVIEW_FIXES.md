@@ -90,3 +90,14 @@ defects. They need separate profiling and behaviour-preserving changes rather
 than being mixed into this repair. Keyboard roving focus and a unified Escape
 return path are likewise separate interaction enhancements. This record does
 not claim that every architectural suggestion has been implemented.
+
+## Settings interface correction
+
+The initial native-group migration bypassed the custom display() layout on
+modern hosts. The settings page now uses one native render definition that
+mounts the original four tabs, with the 34 control names as page search aliases.
+Search locates the tabbed page rather than individual native control rows.
+Chinese host language now supplies Chinese tabs, setting names, descriptions,
+options and reset-button text. Actual-host checks clicked all four tabs and
+verified Chinese panels and 34 search aliases. The earlier native-group counts
+above describe the superseded implementation, not the current interface.
