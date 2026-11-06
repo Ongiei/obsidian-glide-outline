@@ -1,3 +1,8 @@
+/* Temporary containing block; the mount owns and removes this attribute. */
+[data-glide-outline-anchor] {
+	position: relative;
+}
+
 /* ==========================================================================
    Glide Outline — editor-margin heading rail with dock magnification
 

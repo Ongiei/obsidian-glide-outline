@@ -1,7 +1,6 @@
-# Pointer interaction revision (draft)
+# Pointer interaction revision — historical validation notes
 
-Baseline: remote main a128b5d, version 0.1.7, PR #15 already merged.
-Local comparison branch: codex/interaction-baseline-a128b5d.
+Historical baseline: a128b5d, version 0.1.7. The implementation described below was merged as PR #16 (4939ec3). See REVIEW_FIXES.md for the subsequent review fixes and current validation limits.
 
 ## Decision paths
 
@@ -57,7 +56,7 @@ Manual acceptance in Test Vaults remains necessary: slow movement, 1–3px
 jitter on enlarged cards, rapid reversal/deceleration, long-to-short gap
 crossings and click accuracy after scrolling. Compare the existing zone
 setting with 40px manually; this draft does not overwrite user preferences.
-Do not merge or release until those checks are approved.
+These physical-pointer checks remain an explicit manual acceptance task; automated tests do not certify subjective smoothness or release readiness.
 
 ## Follow-up review: snap ownership and endpoint symmetry
 
@@ -90,4 +89,4 @@ Do not merge or release until those checks are approved.
 
 These checks establish deterministic decision behaviour, not proof of
 subjectively smooth physical-pointer interaction. Test Vaults human acceptance
-is still required before merging this draft.
+remains pending; this document is a historical checklist, not evidence that it was completed.

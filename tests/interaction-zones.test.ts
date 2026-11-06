@@ -108,12 +108,12 @@ describe("interaction zones: rail versus 126 heading cards", () => {
 		f.event(f.view.hitZoneEl, "pointerenter", f.railX, 497); step(50);
 		expect(f.view.viewportEl.scrollTop).toBe(900);
 	});
-	it("A: a deliberate card gesture releases hover snap without losing its samples", () => {
+	it("A: a sustained card sweep releases hover snap without losing its samples", () => {
 		f = fixture(); f.settings.pointerAutoScroll = false;
 		const card = f.card(f.nearest(280));
 		f.event(card, "pointerenter", f.cardX, 290); step(40);
 		const before = f.view.viewportEl.scrollTop;
-		for (let i = 0; i < 7; i++) {
+		for (let i = 0; i < 12; i++) {
 			f.event(card, "pointermove", f.cardX, 295 + i * 10); step();
 		}
 		expect(f.view.viewportEl.scrollTop).toBeGreaterThan(before + 2);
@@ -150,6 +150,40 @@ describe("interaction zones: rail versus 126 heading cards", () => {
 		const state = f.controller as unknown as { pointerSnap: { targetKey: string | null } };
 		expect(state.pointerSnap.targetKey).toBe(b.closest(".glide-outline-row")?.getAttribute("data-key"));
 	});
+	it.each(["left", "right"] as const)("%s neighbouring selection keeps scroll still through gaps in both directions", side => {
+		f = fixture(side);
+		f.settings.pointerAutoScroll = false;
+		f.settings.pointerFollowStrength = 2.5;
+		f.settings.maxScale = 1.85;
+		const i = f.nearest(280), card = f.card(i), initial = card.getBoundingClientRect();
+		const x = side === "left" ? initial.left + 40 : initial.right - 40;
+		let y = (initial.top + initial.bottom) / 2;
+		f.event(card, "pointerenter", x, y); step(40);
+		const state = f.controller as unknown as { pointerSnap: { targetKey: string | null } };
+		for (const destination of [i + 1, i, i - 1]) {
+			const key = f.items[destination].key;
+			const origin = state.pointerSnap.targetKey;
+			const rect = f.card(destination).getBoundingClientRect();
+			const end = (rect.top + rect.bottom) / 2;
+			const direction = Math.sign(end - y);
+			let transferred = false;
+			while (Math.abs(end - y) > 0.1) {
+				y += direction * Math.min(3, Math.abs(end - y));
+				// Browser hit testing follows the animated cards, including transparent gaps.
+				const hit = f.rows.map((_, n) => f.card(n)).find(el => {
+					const r = el.getBoundingClientRect();
+					return y >= r.top && y <= r.bottom && x >= r.left && x <= r.right;
+				}) ?? f.view.listEl;
+				f.event(hit, "pointermove", x, y); step();
+				expect(f.view.viewportEl.scrollTop).toBe(900);
+				expect(transferred ? [key] : [origin, key]).toContain(state.pointerSnap.targetKey);
+				transferred ||= state.pointerSnap.targetKey === key;
+			}
+			step(40);
+			expect(state.pointerSnap.targetKey).toBe(key);
+			expect(f.view.viewportEl.scrollTop).toBe(900);
+		}
+	});
 	it.each(["left", "right"] as const)("D: %s micro-moves keep one owner despite alternating DOM targets", side => {
 		f = fixture(side);
 		const i = f.nearest(280), card = f.card(i), r = card.getBoundingClientRect();
@@ -166,11 +200,11 @@ describe("interaction zones: rail versus 126 heading cards", () => {
 	});
 	it("acquires a slow neighbouring card without waiting for visual release easing", () => {
 		f = fixture(); f.settings.pointerAutoScroll = false;
-		const a = f.card(f.nearest(280)), b = f.card(f.nearest(350));
+		const i = f.nearest(280), a = f.card(i), b = f.card(i + 1);
 		a.getBoundingClientRect = () => ({ left: 136, right: 600, top: 270, bottom: 300 }) as DOMRect;
 		b.getBoundingClientRect = () => ({ left: 136, right: 600, top: 330, bottom: 370 }) as DOMRect;
 		f.event(a, "pointerenter", f.cardX, 280); step(40);
-		// A slow move across a real gap first releases the held heading.
+		// A slow move across a real gap keeps the old owner until the next card.
 		f.event(f.view.listEl, "pointermove", f.cardX, 329); step();
 		f.event(b, "pointermove", f.cardX, 330); step();
 		const state = f.controller as unknown as { pointerSnap: { targetKey: string | null } };

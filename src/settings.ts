@@ -1,5 +1,7 @@
 import { PluginSettingTab, Setting } from "obsidian";
-import type { App } from "obsidian";
+import type { App, SettingDefinitionItem } from "obsidian";
+import { SettingDefinitionRow, groupSettingDefinitions } from "./ui/settingDefinitions";
+import type { SettingRow } from "./ui/settingDefinitions";
 import type GlideOutlinePlugin from "./main";
 import { OWNER_ATTR, OWNER_VALUE } from "./ui/mount";
 
@@ -462,11 +464,39 @@ function withValueReadout<T extends SliderLike>(
  */
 export class GlideOutlineSettingTab extends PluginSettingTab {
 	private activeTab: SettingsTabId = "general";
+	private collectingDefinitions: SettingDefinitionRow[] | null = null;
 	private panelEl: HTMLElement | null = null;
 	private tabButtons = new Map<SettingsTabId, HTMLElement>();
 
 	constructor(app: App, private readonly plugin: GlideOutlinePlugin) {
 		super(app, plugin);
+	}
+
+	/** Native search/rendering on 1.13+; older hosts continue to call display(). */
+	override getSettingDefinitions(): SettingDefinitionItem[] {
+		const sections = [
+			["Placement", (el: HTMLElement) => this.renderGeneral(el)],
+			["Appearance", (el: HTMLElement) => this.renderAppearance(el)],
+			["Motion", (el: HTMLElement) => this.renderMotion(el)],
+			["Diagnostics and compatibility", (el: HTMLElement) => this.renderAdvanced(el)],
+		] as const;
+		return sections.flatMap(([heading, render]) => {
+			const rows: SettingDefinitionRow[] = [];
+			this.collectingDefinitions = rows;
+			try {
+				render(this.containerEl);
+			} finally {
+				this.collectingDefinitions = null;
+			}
+			return groupSettingDefinitions(heading, rows);
+		});
+	}
+
+	private createSettingRow(containerEl: HTMLElement): SettingRow {
+		if (!this.collectingDefinitions) return new Setting(containerEl);
+		const row = new SettingDefinitionRow();
+		this.collectingDefinitions.push(row);
+		return row;
 	}
 
 	override display(): void {
@@ -588,7 +618,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 	private renderGeneral(containerEl: HTMLElement): void {
 		const s = this.plugin.settings;
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Enable outline")
 			.setDesc("Show the outline rail in the margin of the active Markdown editor.")
 			.addToggle((toggle) =>
@@ -598,7 +628,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Position")
 			.setDesc("Which editor margin the rail sits in.")
 			.addDropdown((dropdown) =>
@@ -612,7 +642,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Horizontal offset")
 			.setDesc("Move the outline inward from the editor edge. Increase it on the right to leave space beside the editor scrollbar.")
 			.addSlider((slider) =>
@@ -625,7 +655,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Vertical offset")
 			.setDesc("Shift the rail down (positive) or up (negative), in pixels.")
 			.addSlider((slider) =>
@@ -638,9 +668,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl).setName("Show heading levels").setHeading();
+		this.createSettingRow(containerEl).setName("Show heading levels").setHeading();
 		for (let level = 1; level <= 6; level++) {
-			new Setting(containerEl).setName(`H${level}`).addToggle((toggle) =>
+			this.createSettingRow(containerEl).setName(`H${level}`).addToggle((toggle) =>
 				toggle.setValue(s.showLevels[level - 1]).onChange(async (value) => {
 					s.showLevels[level - 1] = value;
 					await this.plugin.applySettings();
@@ -654,7 +684,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 	private renderAppearance(containerEl: HTMLElement): void {
 		const s = this.plugin.settings;
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Marker style")
 			.setDesc("Line length or dot size encodes the heading level.")
 			.addDropdown((dropdown) =>
@@ -669,9 +699,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		// --- Typography
-		new Setting(containerEl).setName("Typography").setHeading();
+		this.createSettingRow(containerEl).setName("Typography").setHeading();
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Base font size")
 			.setDesc("Label font size in pixels, before magnification.")
 			.addSlider((slider) =>
@@ -684,7 +714,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Maximum label width")
 			.setDesc("Longer headings are truncated with an ellipsis.")
 			.addSlider((slider) =>
@@ -698,9 +728,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		// --- Label card
-		new Setting(containerEl).setName("Label card").setHeading();
+		this.createSettingRow(containerEl).setName("Label card").setHeading();
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Background opacity")
 			.setDesc("0 turns the card into pure text.")
 			.addSlider((slider) =>
@@ -713,7 +743,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Border")
 			.addToggle((toggle) =>
 				toggle.setValue(s.card.border).onChange(async (value) => {
@@ -722,7 +752,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Corner radius")
 			.addSlider((slider) =>
 				withValueReadout(slider)
@@ -734,7 +764,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Shadow")
 			.addToggle((toggle) =>
 				toggle.setValue(s.card.shadow).onChange(async (value) => {
@@ -743,7 +773,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Horizontal padding")
 			.addSlider((slider) =>
 				withValueReadout(slider)
@@ -755,7 +785,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Vertical padding")
 			.addSlider((slider) =>
 				withValueReadout(slider)
@@ -767,7 +797,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Minimum card gap")
 			.setDesc("Minimum vertical space maintained between neighbouring label cards, including during magnification.")
 			.addSlider((slider) =>
@@ -781,9 +811,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		// --- Hierarchy
-		new Setting(containerEl).setName("Hierarchy").setHeading();
+		this.createSettingRow(containerEl).setName("Hierarchy").setHeading();
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Level badge")
 			.setDesc("Show a small H1–H6 tag on the edge-facing side of each label. The primary hierarchy cue, together with per-level typography.")
 			.addToggle((toggle) =>
@@ -796,9 +826,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		// --- Rendering
-		new Setting(containerEl).setName("Rendering").setHeading();
+		this.createSettingRow(containerEl).setName("Rendering").setHeading();
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Render Markdown in labels")
 			.setDesc("Show inline formatting such as bold, code and links in heading labels.")
 			.addToggle((toggle) =>
@@ -814,7 +844,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 	private renderMotion(containerEl: HTMLElement): void {
 		const s = this.plugin.settings;
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Maximum magnification")
 			.setDesc("Peak scale of the heading nearest the pointer.")
 			.addSlider((slider) =>
@@ -827,7 +857,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Magnification radius")
 			.setDesc("Distance in pixels over which magnification decays to normal size.")
 			.addSlider((slider) =>
@@ -841,9 +871,9 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 			);
 
 		// --- Overflow
-		new Setting(containerEl).setName("Overflow").setHeading();
+		this.createSettingRow(containerEl).setName("Overflow").setHeading();
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Edge fade")
 			.setDesc("Softly fade the top and bottom of the list when more headings are hidden beyond the edge.")
 			.addToggle((toggle) =>
@@ -853,7 +883,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Edge fade size")
 			.setDesc("Height of the fade zone, in pixels.")
 			.addSlider((slider) =>
@@ -866,7 +896,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Pointer edge auto-scroll")
 			.setDesc("Slowly scroll the list when the pointer dwells near its top or bottom edge, bringing hidden headings into reach.")
 			.addToggle((toggle) =>
@@ -876,7 +906,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Pointer movement assist")
 			.setDesc("Pre-scroll the list in the direction of quick vertical pointer movement, before the pointer reaches an edge. Strength is set independently below.")
 			.addToggle((toggle) =>
@@ -886,7 +916,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Edge auto-scroll speed")
 			.setDesc("Speed multiplier for pointer EDGE auto-scroll only. 1 is the tuned default; lower is gentler, higher is brisker. Does not affect Pointer movement assist.")
 			.addSlider((slider) =>
@@ -903,7 +933,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Pointer movement assist strength")
 			.setDesc("How strongly quick vertical pointer movements pre-scroll the outline. 1 is the tuned default; 0.5 is gentle; 2.5 is aggressive. Independent of edge auto-scroll speed.")
 			.addSlider((slider) =>
@@ -920,7 +950,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Auto-scroll trigger area")
 			.setDesc("Height of the edge zone that starts auto-scroll, in pixels from each list edge. Capped at half the list height on short panes.")
 			.addSlider((slider) =>
@@ -943,7 +973,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 	private renderAdvanced(containerEl: HTMLElement): void {
 		const s = this.plugin.settings;
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Developer mode")
 			.setDesc(
 				"Reveal the performance-capture and cold-start tracing commands in the command palette. Leave off for everyday use; turning it off also stops and discards any capture already running.",
@@ -955,7 +985,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 				}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Level indentation (legacy)")
 			.setDesc("Pixels each deeper level steps toward the text body. Superseded by the level badge; kept for vaults that prefer the staircase. 0 = off.")
 			.addSlider((slider) =>
@@ -968,7 +998,7 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					}),
 			);
 
-		new Setting(containerEl)
+		this.createSettingRow(containerEl)
 			.setName("Restore default appearance")
 			.setDesc("Reset marker, typography and label card settings. Position, shown levels and Markdown rendering are kept.")
 			.addButton((button) =>
@@ -978,7 +1008,8 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					// "change it twice" bug.
 					resetAppearanceInPlace(this.plugin.settings);
 					await this.plugin.applySettings();
-					this.display();
+					if (typeof this.update === "function") this.update();
+					else this.display();
 				}),
 			);
 	}

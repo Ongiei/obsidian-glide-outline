@@ -23,6 +23,16 @@ const VIEWPORT_TOP = 100;
 const VIEWPORT_BOTTOM = 500;
 const CENTER = (VIEWPORT_TOP + VIEWPORT_BOTTOM) / 2; // 300
 
+it("short aiming travel expires and reversals cancel net browsing travel", () => {
+	const samples = new PointerSampleRing();
+	samples.push(100, 0);
+	samples.push(150, 40);
+	expect(samples.displacementY(40)).toBe(50);
+	samples.push(103, 80);
+	expect(samples.displacementY(80)).toBe(3);
+	expect(samples.displacementY(171)).toBe(0);
+});
+
 function input(overrides: Partial<KineticIntentInput> = {}): KineticIntentInput {
 	return {
 		pointerY: CENTER,

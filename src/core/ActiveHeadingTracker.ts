@@ -1,6 +1,6 @@
 import type { MarkdownView } from "obsidian";
 import type { HeadingItem } from "../model/HeadingItem";
-import { selectActiveIndex } from "../utils/geometry";
+import { activeHeadingIndex } from "../utils/activeHeadingIndex";
 import { matchPreviewHeadings } from "../utils/previewHeadings";
 import { DisposableStore } from "../utils/disposable";
 import { EditorPositionAdapter } from "./EditorPositionAdapter";
@@ -678,8 +678,9 @@ export class ActiveHeadingTracker {
 	private computeCursorIndex(): number {
 		try {
 			const cursor = this.view.editor.getCursor("head");
-			return selectActiveIndex(
-				this.items.map((item) => item.line),
+			return activeHeadingIndex(
+				this.items.length,
+				(index) => this.items[index].line,
 				cursor.line,
 			);
 		} catch {
@@ -698,12 +699,12 @@ export class ActiveHeadingTracker {
 				const adapter = new EditorPositionAdapter(cm);
 				const activationY = adapter.activationLineDocument(ACTIVATION_RATIO);
 				const lastLine = Math.max(0, editor.lineCount() - 1);
-				const tops = this.items.map((item) => {
+				return activeHeadingIndex(this.items.length, (index) => {
+					const item = this.items[index];
 					const line = Math.min(item.line, lastLine);
 					const offset = editor.posToOffset({ line, ch: 0 });
 					return adapter.documentTopOfOffset(offset);
-				});
-				return selectActiveIndex(tops, activationY);
+				}, activationY);
 			} catch {
 				// CM internals shifted — fall through to the line approximation.
 			}
@@ -718,8 +719,7 @@ export class ActiveHeadingTracker {
 		const lineHeightGuess = 24;
 		const activationY =
 			scrollInfo.top + (scrollInfo.clientHeight ?? 400) * ACTIVATION_RATIO;
-		const tops = this.items.map((item) => item.line * lineHeightGuess);
-		return selectActiveIndex(tops, activationY);
+		return activeHeadingIndex(this.items.length, (index) => this.items[index].line * lineHeightGuess, activationY);
 	}
 
 	private computePreviewIndex(): number {

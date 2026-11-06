@@ -9,11 +9,11 @@ export default defineConfig(
 		"esbuild.config.mjs",
 		"versions.json",
 		"main.js",
-		"package.json",
 		"pnpm-lock.yaml",
 		"tsconfig.json",
 	]),
 	{
+		files: ["**/*.{ts,tsx,mts,cts,js,mjs,cjs,jsx}"],
 		languageOptions: {
 			globals: {
 				...globals.browser,
@@ -26,7 +26,6 @@ export default defineConfig(
 					],
 				},
 				tsconfigRootDir: import.meta.dirname,
-				extraFileExtensions: [".json"],
 			},
 		},
 	},
@@ -44,6 +43,7 @@ export default defineConfig(
 		},
 	},
 	{
+		files: ["**/*.{ts,tsx,mts,cts,js,mjs,cjs,jsx}"],
 		rules: {
 			"@typescript-eslint/no-explicit-any": "error",
 			"@typescript-eslint/no-unused-vars": [

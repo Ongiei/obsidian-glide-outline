@@ -96,6 +96,37 @@ describe("controller navigation sessions", () => {
 		expect(fixture.scrollTo).toHaveBeenCalledTimes(2);
 	});
 
+	it("does not replace live headings with an older metadata snapshot", () => {
+		fixture.view.editor.getValue = () => "# Current heading";
+		fixture.controller.refreshFromEditor();
+		if (!fixture.view.file) throw new Error("Missing fixture file");
+		fixture.controller.handleMetadataChanged(fixture.view.file, "# Older heading");
+		expect(fixture.host.querySelector(".glide-outline-label")?.textContent).toBe("Current heading");
+		fixture.headings[0].heading = "Current heading";
+		fixture.headings.splice(1);
+		fixture.controller.handleMetadataChanged(fixture.view.file, "# Current heading");
+		expect(fixture.host.querySelectorAll(".glide-outline-label")).toHaveLength(1);
+	});
+
+	it("skips row measurements for motion and paint-only settings but measures geometry changes", () => {
+		vi.advanceTimersByTime(100);
+		const card = fixture.host.querySelector<HTMLElement>(".glide-outline-card")!;
+		const reads = vi.spyOn(card, "offsetHeight", "get");
+		fixture.settings.pointerAutoScrollSpeed = 2;
+		fixture.controller.applySettings();
+		vi.advanceTimersByTime(50);
+		expect(reads).not.toHaveBeenCalled();
+		fixture.settings.card.opacity = 50;
+		fixture.controller.applySettings();
+		vi.advanceTimersByTime(50);
+		expect(reads).not.toHaveBeenCalled();
+		expect(fixture.host.querySelector<HTMLElement>(".glide-outline-root")?.style.getPropertyValue("--glide-card-opacity")).toBe("50%");
+		fixture.settings.baseFontSize++;
+		fixture.controller.applySettings();
+		vi.advanceTimersByTime(50);
+		expect(reads).toHaveBeenCalled();
+	});
+
 	it("does not cancel a jump for an unrelated workspace layout event", () => {
 		fixture.jump();
 		fixture.controller.handleContextChange("mode-change");

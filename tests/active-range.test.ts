@@ -41,6 +41,19 @@ describe("displacementAllowance", () => {
 });
 
 describe("computeActiveMotionRange", () => {
+	it("uses the geometry revision's maximum height without scanning every row", () => {
+		const { centers, heights } = rows(10_000);
+		const expected = computeActiveMotionRange({ ...BASE, centers, heights });
+		let reads = 0;
+		const measured = new Proxy(heights, {
+			get(target, property, receiver) {
+				if (typeof property === "string" && /^\d+$/.test(property)) reads++;
+				return Reflect.get(target, property, receiver) as unknown;
+			},
+		});
+		expect(computeActiveMotionRange({ ...BASE, centers, heights: measured, maxRowHeight: 24 })).toEqual(expected);
+		expect(reads).toBeLessThan(40);
+	});
 	it("returns the empty range for an empty list", () => {
 		const range = computeActiveMotionRange({
 			...BASE,

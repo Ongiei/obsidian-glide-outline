@@ -5,6 +5,18 @@ import { DEFAULT_SETTINGS } from "../src/settings";
 import { GlideOutlineView } from "../src/ui/GlideOutlineView";
 
 describe("fixed outline controls", () => {
+	it.each([
+		[true, false, false, false, false, false],
+		[false, false, false, true, false, true],
+		[false, false, false, false, false, false],
+	])("identifies custom level selection %j without claiming a continuous range", (...levels) => {
+		const s = structuredClone(DEFAULT_SETTINGS);
+		s.showLevels = levels as typeof s.showLevels;
+		const toolbar = new OutlineToolbar(document, { onSetDepth: () => undefined });
+		toolbar.refresh(s);
+		expect((toolbar.el.querySelector(".glide-outline-depth") as HTMLElement).dataset.depth).toBe("Custom");
+		expect(toolbar.el.querySelector("input")?.getAttribute("aria-valuetext")).toContain("Custom selection:");
+	});
 	it("opens settings and previews/commits depth with a native range", () => {
 		const open = vi.fn(), depth = vi.fn();
 		const toolbar = new OutlineToolbar(document, { onOpenSettings: open, onSetDepth: depth });

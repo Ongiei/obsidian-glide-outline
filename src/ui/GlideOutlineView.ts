@@ -849,7 +849,7 @@ export class GlideOutlineView {
 	}
 
 	/** Re-apply CSS variables and position classes after a settings change. */
-	applySettings(): void {
+	applySettings(remeasure = true): void {
 		const s = this.getSettings();
 		this.toolbar.refresh(s);
 		const root = this.rootEl;
@@ -894,6 +894,7 @@ export class GlideOutlineView {
 			s.levelIndicatorStyle === "badge",
 		);
 
+		if (!remeasure) return;
 		// Hierarchy staircase: per-item indent is (level - 1) × this step.
 		for (const record of this.itemRecords.values()) {
 			const level = Number(record.rowEl.dataset.level ?? "1");
