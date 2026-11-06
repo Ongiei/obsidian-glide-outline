@@ -145,4 +145,22 @@ describe("interaction zones: rail versus 126 heading cards", () => {
 		expect(state.integrator.kineticIntentVelocity).toBe(0);
 		expect(state.integrator.combinedTargetVelocity).toBe(state.integrator.edgeIntentVelocity);
 	});
+	it("F: a stopped follow gesture settles promptly without a long tail", () => {
+		f = fixture(); f.settings.pointerAutoScroll = false;
+		f.event(f.view.hitZoneEl, "pointerenter", f.railX, 250);
+		for (let y = 260; y <= 380; y += 15) { f.event(f.view.hitZoneEl, "pointermove", f.railX, y); step(); }
+		step(20); const stopped = f.view.viewportEl.scrollTop;
+		step(20); expect(f.view.viewportEl.scrollTop).toBe(stopped);
+		expect(f.controller.getInteractionDiagnostics()).toHaveLength(0);
+	});
+	it("E: a press freezes and activates its own target even if the release hits a neighbour", () => {
+		f = fixture(); const i = f.nearest(280), card = f.card(i), b = card.getBoundingClientRect();
+		const x = (b.left + b.right) / 2, y = (b.top + b.bottom) / 2;
+		f.event(card, "pointerenter", x, y); step(40);
+		const r = card.getBoundingClientRect(), cy = (r.top + r.bottom) / 2;
+		f.event(card, "pointerdown", x, cy); const scroll = f.view.viewportEl.scrollTop; step(20);
+		expect(f.view.viewportEl.scrollTop).toBe(scroll);
+		f.event(f.card(i + 1), "pointerup", x, cy);
+		expect(f.jump).toHaveBeenCalledExactlyOnceWith(f.items[i]);
+	});
 });

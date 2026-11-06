@@ -209,6 +209,7 @@ export class GlideOutlineController {
 			// §八: collapsed active-heading follow — pending target, safe
 			// band, and the outcome of the last positioning attempt.
 			activeFollow: this.outlineView.getActiveFollowDiagnostics(),
+			interactionTrace: this.magnification.getInteractionDiagnostics(),
 			// §十一: read-only mount host mutation diagnostics.
 			mountInstanceId: this.outlineView.getMountInstanceId(),
 			mount: this.outlineView.getMountDiagnostics(),

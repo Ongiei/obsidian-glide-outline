@@ -489,6 +489,13 @@ export class MagnificationController {
 	private kineticActive = false;
 	/** An exiting edge session brakes before yielding to a new follow. */
 	private edgeCoasting = false;
+	private interactionTrace: Record<string, unknown>[] = [];
+	private interactionRecording = false;
+
+	getInteractionDiagnostics(): readonly Record<string, unknown>[] {
+		if (!this.getSettings().developerMode) this.interactionTrace = [];
+		return this.interactionTrace;
+	}
 	/** Shared integrator that combines the two intents. */
 	private integrator: ScrollIntegratorState = {
 		edgeIntentVelocity: 0,
@@ -1511,8 +1518,10 @@ export class MagnificationController {
 		// Once held, geometry is frozen and speed/acceleration cannot eject it.
 		const canAcquire = !scrollOwnsPointer && !this.aimSettling;
 		const bounds = !held && canAcquire && card ? card.getBoundingClientRect() : undefined;
+		const staleHit = bounds && bounds.right > bounds.left && bounds.bottom > bounds.top &&
+			!pointInRect(bounds, this.lastPointerX, this.lastPointerY);
 		this.pointerSnap.update(
-			!canAcquire && !held ? null : row?.getAttribute("data-key") ?? null,
+			(!canAcquire && !held) || staleHit ? null : row?.getAttribute("data-key") ?? null,
 			this.lastPointerX, this.lastPointerY, now, bounds,
 		);
 		const wasSnapped = this.snappedRow !== null;
@@ -2135,6 +2144,21 @@ export class MagnificationController {
 			}
 		}
 		// Keep the loop alive until every displayed value converged.
+		const recording = settings.developerMode && measure;
+		if (recording && !this.interactionRecording) this.interactionTrace = [];
+		this.interactionRecording = recording;
+		if (!settings.developerMode) this.interactionTrace.length = 0;
+		if (recording) {
+			this.interactionTrace.push({ time: now, x: this.lastPointerX, y: this.lastPointerY,
+				region: pointInRect(this.railRect, this.lastPointerX, this.lastPointerY) ? "Rail" :
+					closestOwned(this.snapTarget, ".glide-outline-card", this.ownsNode) ? "Card" : this.pointer.insideEnvelope ? "Gap" : "Outside",
+				edgeZone: this.edgeIntent.dwellTimer !== 0 || this.edgeIntent.latched,
+				edgeActive: this.integrator.edgeIntentVelocity !== 0,
+				followActive: this.integrator.kineticIntentVelocity !== 0,
+				snapKey: this.pointerSnap.targetKey, anchorKey: this.pointerAnchorEl?.dataset.key ?? null,
+				velocity: this.integrator.appliedVelocity, edgeStopReason: this.edgeIntent.lastStopReason });
+			if (this.interactionTrace.length > 300) this.interactionTrace.shift();
+		}
 		if (converging || this.aimSettling) this.schedule("motionConverging");
 
 		if (measure && perf) {
@@ -2317,6 +2341,10 @@ export class MagnificationController {
 			);
 			if (Math.abs(kin.velocityY) < 1) kin.velocityY = 0;
 		}
+		// Stale pointer samples are not sustained intent. Stop requesting
+		// follow after one sample window, then let the integrator brake.
+		if (now - kin.lastSampleTime > 90) kin.velocityY = 0;
+		kin.predictedY = predictedPointerY(this.lastPointerY, kin.velocityY);
 		if (measureDeep && perf) {
 			perf.addPhaseSample(
 				"scrollEligibility",
