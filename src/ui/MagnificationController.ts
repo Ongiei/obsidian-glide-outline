@@ -1676,7 +1676,9 @@ export class MagnificationController {
 			snap?: boolean;
 		}[] = [];
 		if (!collisionEmpty) {
-			const anchorIndex = this.resolveAnchorIndex();
+			// Continuous pointer inversion drives Dock motion while browsing;
+			// moving DOM hits must not feed back into the solver's focus.
+			const anchorIndex = lockedIndex;
 			const activeLayout = this.layout.slice(cStart, cEnd + 1);
 			const activeShifts = this.shifts.slice(cStart, cEnd + 1);
 			const anchorInSlice =
@@ -3171,7 +3173,8 @@ export class MagnificationController {
 	private insideHoverSession(x: number, y: number): boolean {
 		this.hoverSession.include(this.envelope);
 		return pointInEnvelope(this.envelope, x, y, this.clientYToContentY(y)) ||
-			this.hoverSession.contains(x, y, this.viewportTop, this.viewportBottom);
+			this.hoverSession.contains(x, this.clientYToContentY(y), this.currentScrollTop,
+				this.currentScrollTop + this.viewportBottom - this.viewportTop);
 	}
 
 	/** Bridge rect builder exposed for tests / geometry verification. */
