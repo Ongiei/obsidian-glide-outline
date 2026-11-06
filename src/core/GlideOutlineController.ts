@@ -86,7 +86,7 @@ export class GlideOutlineController {
 	 * Reading-Mode headings we temporarily made focusable. They are
 	 * Obsidian's nodes, so the attribute must never outlive us.
 	 */
-	private readonly tempTabindexEls = new Set<HTMLElement>();
+	private readonly previewFocusCleanups = new Map<HTMLElement, () => void>();
 
 	constructor(
 		private readonly view: MarkdownView,
@@ -181,6 +181,7 @@ export class GlideOutlineController {
 		if (path !== this.contextPath || mode !== this.contextMode) {
 			this.cancelPendingJump();
 			this.tracker.resetContext();
+			this.restorePreviewTabindexes();
 			this.contextPath = path;
 			this.contextMode = mode;
 		}
@@ -644,21 +645,18 @@ export class GlideOutlineController {
 			// attribute forever — so the undo is also registered as a
 			// disposal, and whichever fires first wins.
 			const restore = (): void => {
-				if (!this.tempTabindexEls.delete(element)) return;
-				element.removeAttribute("tabindex");
 				element.removeEventListener("blur", restore);
+				this.previewFocusCleanups.delete(element);
+				if (element.getAttribute("tabindex") === "-1") element.removeAttribute("tabindex");
 			};
-			this.tempTabindexEls.add(element);
+			this.previewFocusCleanups.set(element, restore);
 			element.addEventListener("blur", restore);
 		}
 	}
 
 	/** Undo every `tabindex` we wrote onto Obsidian's own heading elements. */
 	private restorePreviewTabindexes(): void {
-		for (const element of [...this.tempTabindexEls]) {
-			this.tempTabindexEls.delete(element);
-			element.removeAttribute("tabindex");
-		}
+		for (const cleanup of this.previewFocusCleanups.values()) cleanup();
 	}
 
 	private prefersReducedMotion(): boolean {

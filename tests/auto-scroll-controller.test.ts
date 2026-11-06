@@ -155,6 +155,44 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		expect(view.viewportEl.scrollTop).toBe(before);
 	});
 
+	it.each([300, 105])("restarts dwell after moving away from the pending bottom edge to %i", (awayY) => {
+		settings.pointerFollowEnabled = false;
+		pointer("pointerenter", 495);
+		pointer("pointermove", 495);
+		flushFrame();
+		vi.advanceTimersByTime(30);
+		pointer("pointermove", awayY);
+		flushFrame();
+		vi.advanceTimersByTime(AUTO_SCROLL_DWELL_MS + 30);
+		const before = view.viewportEl.scrollTop;
+		pointer("pointermove", 495);
+		flushFrame();
+		vi.advanceTimersByTime(50);
+		flushFrame();
+		expect(view.viewportEl.scrollTop).toBe(before);
+		vi.advanceTimersByTime(AUTO_SCROLL_DWELL_MS);
+		flushFrame();
+		vi.advanceTimersByTime(16);
+		flushFrame();
+		expect(view.viewportEl.scrollTop).toBeGreaterThan(before);
+	});
+
+	it("rechecks dwell eligibility when a pointer sample arrives before the next frame", () => {
+		settings.pointerFollowEnabled = false;
+		pointer("pointerenter", 495);
+		pointer("pointermove", 495);
+		flushFrame();
+		pointer("pointermove", 300);
+		// No frame: the timer must inspect current input, not its old zone.
+		vi.advanceTimersByTime(AUTO_SCROLL_DWELL_MS + 10);
+		pointer("pointermove", 495);
+		flushFrame();
+		const before = view.viewportEl.scrollTop;
+		vi.advanceTimersByTime(50);
+		flushFrame();
+		expect(view.viewportEl.scrollTop).toBe(before);
+	});
+
 	it("does not scroll while the pointer rests in the middle", () => {
 		pointer("pointerenter", 300);
 		pointer("pointermove", 300);
@@ -332,6 +370,47 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		}
 		card.dispatchEvent(new MouseEvent("click", { detail: 1, bubbles: true }));
 		expect(jump).toHaveBeenCalledExactlyOnceWith(HEADINGS[0]);
+	});
+
+	it.each([1, 2])("does not jump or lock for mouse button %i", (button) => {
+		controller.dispose();
+		const jump = vi.fn();
+		controller = new MagnificationController(view, () => settings, null, jump);
+		const card = view.rootEl.querySelector<HTMLElement>(".glide-outline-card")!;
+		for (const type of ["pointerdown", "pointerup"]) {
+			const event = new MouseEvent(type, { button, bubbles: true });
+			Object.defineProperty(event, "pointerId", { value: 1 });
+			card.dispatchEvent(event);
+		}
+		expect(jump).not.toHaveBeenCalled();
+	});
+
+	it("leaves nested links to their own activation handler", () => {
+		controller.dispose();
+		const jump = vi.fn();
+		controller = new MagnificationController(view, () => settings, null, jump);
+		const card = view.rootEl.querySelector<HTMLElement>(".glide-outline-card")!;
+		const link = document.createElement("a");
+		card.append(link);
+		for (const type of ["pointerdown", "pointerup"]) {
+			const event = new MouseEvent(type, { button: 0, bubbles: true });
+			Object.defineProperty(event, "pointerId", { value: 1 });
+			link.dispatchEvent(event);
+		}
+		expect(jump).not.toHaveBeenCalled();
+	});
+
+	it.each(["pointercancel", "lostpointercapture"])("cancels a held target on %s", (cancel) => {
+		controller.dispose();
+		const jump = vi.fn();
+		controller = new MagnificationController(view, () => settings, null, jump);
+		const card = view.rootEl.querySelector<HTMLElement>(".glide-outline-card")!;
+		for (const type of ["pointerdown", cancel, "pointerup"]) {
+			const event = new MouseEvent(type, { bubbles: true });
+			Object.defineProperty(event, "pointerId", { value: 1 });
+			card.dispatchEvent(event);
+		}
+		expect(jump).not.toHaveBeenCalled();
 	});
 
 	/** Dispatch a pointer event with a deterministic timeStamp (px/s math). */
