@@ -418,6 +418,7 @@ export interface ItemRecord {
  */
 export class GlideOutlineView {
 	private renderContext = "";
+	private deepestVisibleLevel = 1;
 	readonly toolbar: OutlineToolbar;
 	readonly rootEl: HTMLElement;
 	readonly hitZoneEl: HTMLElement;
@@ -726,6 +727,11 @@ export class GlideOutlineView {
 
 		// Empty state: hide the rail entirely when nothing is visible.
 		this.rootEl.classList.toggle("is-empty", visible.length === 0);
+		const deepest = visible.reduce((level, item) => Math.max(level, item.level), 1);
+		if (deepest !== this.deepestVisibleLevel) {
+			this.deepestVisibleLevel = deepest;
+			this.applyResponsiveWidth();
+		}
 		// §五.1: rows came and went — the cached scroll height is a lie now.
 		this.invalidateOverflowMetrics();
 		this.scheduleMeasure();
@@ -1160,10 +1166,6 @@ export class GlideOutlineView {
 		if (this.disposed) return;
 		const s = this.getSettings();
 		// Deepest VISIBLE heading level drives the worst-case indent.
-		let deepestLevel = 1;
-		for (const item of this.items) {
-			if (item.level > deepestLevel) deepestLevel = item.level;
-		}
 		// NOTE: the solver still reports `interactionWidth`, but nothing
 		// consumes it as a CSS var anymore — the transparent interaction
 		// surface is gone; hover is maintained by the geometric Pointer
@@ -1181,7 +1183,7 @@ export class GlideOutlineView {
 			safeSlack: SAFE_SLACK,
 			compactThreshold: COMPACT_THRESHOLD,
 			horizontalOffset: s.horizontalOffset,
-			maxLevelIndent: (deepestLevel - 1) * s.levelIndent,
+			maxLevelIndent: (this.deepestVisibleLevel - 1) * s.levelIndent,
 			badgeAllowance:
 				s.levelIndicatorStyle === "badge" ? LEVEL_BADGE_ALLOWANCE : 0,
 		});

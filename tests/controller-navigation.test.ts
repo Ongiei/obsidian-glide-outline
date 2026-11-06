@@ -244,4 +244,33 @@ describe("controller navigation sessions", () => {
 		fixture.controller.refreshFromCache();
 		expect(cleanup).toHaveBeenCalledTimes(1);
 	});
+
+	it.each(["blur", "dispose", "mode"])("cleans up preview focus listeners on %s", (reason) => {
+		fixture.state.mode = "preview";
+		fixture.controller.handleContextChange();
+		const preview = document.createElement("div");
+		preview.className = "markdown-preview-view";
+		const sizer = document.createElement("div");
+		sizer.className = "markdown-preview-sizer";
+		const heading = document.createElement("h2");
+		heading.dataset.line = "10";
+		heading.scrollIntoView = vi.fn();
+		sizer.append(heading);
+		preview.append(sizer);
+		fixture.host.append(preview);
+		const remove = vi.spyOn(heading, "removeEventListener");
+		fixture.jump();
+		expect(heading.getAttribute("tabindex")).toBe("-1");
+		if (reason === "blur") heading.dispatchEvent(new FocusEvent("blur"));
+		else if (reason === "dispose") fixture.controller.dispose();
+		else {
+			fixture.state.mode = "source";
+			fixture.controller.handleContextChange();
+		}
+		expect(heading.hasAttribute("tabindex")).toBe(false);
+		expect(remove).toHaveBeenCalledWith("blur", expect.any(Function));
+		const count = remove.mock.calls.length;
+		heading.dispatchEvent(new FocusEvent("blur"));
+		expect(remove).toHaveBeenCalledTimes(count);
+	});
 });

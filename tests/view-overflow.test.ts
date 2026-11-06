@@ -78,6 +78,22 @@ describe("GlideOutlineView placement & hierarchy variables", () => {
 		expect(indents).toEqual(["0px", "3px", "6px", "15px"]);
 	});
 
+	it("recomputes narrow-pane width when the deepest heading changes", () => {
+		Object.defineProperty(host, "clientWidth", { value: 360 });
+		settings.levelIndent = 8;
+		view.setItems([HEADINGS[0]]);
+		view.applySettings();
+		const width = () => Number.parseFloat(view.rootEl.style.getPropertyValue("--glide-label-content-width"));
+		const shallow = width();
+		view.setItems(HEADINGS);
+		const deep = width();
+		expect(deep).toBeLessThan(shallow);
+		view.applySettings();
+		expect(width()).toBe(deep);
+		view.setItems([HEADINGS[0]]);
+		expect(width()).toBe(shallow);
+	});
+
 	it("collapses the staircase when levelIndent is 0", () => {
 		settings.levelIndent = 0;
 		view.applySettings();

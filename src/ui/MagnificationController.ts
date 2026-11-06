@@ -712,6 +712,7 @@ export class MagnificationController {
 		this.disposables.listen(rootEl, "pointerdown", this.onRootPointerDown);
 		this.disposables.listen(rootEl, "pointerup", this.onRootPointerUp);
 		this.disposables.listen(rootEl, "pointercancel", this.onRootPointerCancel);
+		this.disposables.listen(rootEl, "lostpointercapture", this.onRootPointerCancel);
 
 		// Keyboard focus keeps the outline open (P1-2).
 		this.disposables.listen(rootEl, "focusin", () => {
@@ -1205,6 +1206,9 @@ export class MagnificationController {
 	}
 
 	private onRootPointerDown = (event: PointerEvent): void => {
+		if (event.button !== 0 || event.isPrimary === false || event.defaultPrevented ||
+			event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+		if (closestOwned(event.target, "a", this.ownsNode)) return;
 		const activation = resolveClickTarget(event.target, this.ownsNode);
 		if (!activation) return; // not on a real marker / card
 		const item = this.view.getItems().find((c) => c.key === activation.key);
@@ -1248,6 +1252,7 @@ export class MagnificationController {
 	};
 
 	private onRootPointerUp = (event: PointerEvent): void => {
+		if (event.button !== 0) return;
 		const pressed = this.pressed;
 		if (!pressed || event.pointerId !== pressed.pointerId) return;
 		this.pressed = null;
@@ -1323,6 +1328,7 @@ export class MagnificationController {
 	private clearPressed(): void {
 		if (!this.pressed) return;
 		const pressed = this.pressed;
+		this.pressed = null;
 		if (pressed.captured) {
 			try {
 				pressed.captured.releasePointerCapture(pressed.pointerId);
@@ -1330,7 +1336,6 @@ export class MagnificationController {
 				// Already released.
 			}
 		}
-		this.pressed = null;
 		// §四: press cleared — reflect the ambient interaction state.
 		this.view.setInteractionState(this.currentInteractionState());
 	}
@@ -2393,6 +2398,11 @@ export class MagnificationController {
 			});
 			edgeTarget = result.velocity;
 			edgeStopReason = result.stopReason;
+			const candidateDirection = edgeTarget < 0 ? -1 : edgeTarget > 0 ? 1 : 0;
+			if ((candidateDirection === 0 && !edge.latched) ||
+				(candidateDirection !== 0 && edge.direction !== 0 && candidateDirection !== edge.direction)) {
+				this.stopEdgeIntent("zone-exit");
+			}
 			edgeOwnsScroll = edgeTarget !== 0 || (edge.latched && this.withinZoneHysteresis(zonePx));
 			if (edgeTarget !== 0) this.edgeCoasting = false;
 			// Dwell gate — EDGE only (§九: kinetic has no dwell). Brushing
@@ -2401,6 +2411,22 @@ export class MagnificationController {
 				if (edge.dwellTimer === 0) {
 					edge.dwellTimer = this.win.setTimeout(() => {
 						edge.dwellTimer = 0;
+						const settings = this.getSettings();
+						const overflow = this.view.getOverflowState();
+						const current = computeRailEdgeScrollIntent({
+							pointerX: this.lastPointerX, pointerY: this.lastPointerY,
+							railRect: this.railRect, viewportTop: this.viewportTop,
+							viewportBottom: this.viewportBottom,
+							maxSpeed: AUTO_SCROLL_MAX_SPEED * settings.pointerAutoScrollSpeed,
+							triggerZonePx: settings.pointerAutoScrollZone,
+							canScrollUp: overflow.canScrollUp, canScrollDown: overflow.canScrollDown,
+							enabled: settings.pointerAutoScroll && overflow.hasOverflow &&
+								pointInRect(this.railRect, this.lastPointerX, this.lastPointerY),
+						});
+						if (Math.sign(current.velocity) !== candidateDirection) {
+							this.stopEdgeIntent("zone-exit");
+							return;
+						}
 						edge.dwellPassed = true;
 						integ.lastFrameTime = Number.NaN;
 						this.schedule("autoScrollDwell");
@@ -2415,7 +2441,7 @@ export class MagnificationController {
 				perf?.count("autoScrollStartCount");
 				perf?.count("edgeIntentActivationCount");
 			}
-			edge.direction = edgeTarget < 0 ? -1 : edgeTarget > 0 ? 1 : 0;
+			if (candidateDirection !== 0) edge.direction = candidateDirection;
 		} else if (
 			edge.latched ||
 			edge.dwellPassed ||
