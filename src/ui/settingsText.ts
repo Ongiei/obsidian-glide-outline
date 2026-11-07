@@ -1,4 +1,4 @@
-import { getLanguage } from "obsidian";
+import { getLanguage, requireApiVersion } from "obsidian";
 
 const chinese: Record<string, string> = {
   "General": "常规",
@@ -75,5 +75,5 @@ const chinese: Record<string, string> = {
 
 /** Follow the host language without changing persisted preferences. */
 export function settingsText(text: string): string {
-	return typeof getLanguage === "function" && getLanguage().startsWith("zh") ? chinese[text] ?? text : text;
+	return requireApiVersion("1.8.7") && getLanguage().startsWith("zh") ? chinese[text] ?? text : text;
 }

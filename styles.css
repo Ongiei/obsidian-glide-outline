@@ -26,7 +26,7 @@
    geometric Pointer Envelope (union of each heading's actual marker /
    card / bridge rects — see MagnificationController), NOT by any large
    transparent DOM plane. The editor underneath stays fully clickable
-   everywhere outside the rail strip and the visible cards.
+   everywhere outside the rail strip, visible cards and their small shared-width gaps.
 
    Transform responsibilities:
      .glide-outline-motion  vertical displacement → --glide-shift-y
@@ -47,12 +47,11 @@
    rule cannot be undone that precisely, and it would also mutate a node the
    plugin does not own. */
 
-/* The owned wrapper. `display: contents` means it generates no box, so the
-   rail is laid out exactly as if it were a direct child of the host — the
-   wrapper buys ownership and a one-node unmount, and costs no layout.
-   Compound (not descendant) selector: this element IS the owner. */
+/* The owned wrapper fills the host without affecting its normal flow. */
 :where([data-glide-outline-owner]).glide-outline-mount {
-	display: contents;
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
 }
 
 :where([data-glide-outline-owner]) .glide-outline-root {
@@ -112,7 +111,6 @@
 	flex-direction: column;
 	padding-block: var(--glide-viewport-pad, 14px);
 	pointer-events: none;
-	scrollbar-width: none;
 	overscroll-behavior: contain;
 }
 
@@ -235,7 +233,7 @@
 	   i.e. toward the text body on BOTH sides, because the flex direction
 	   flips with the outline position. Static spacing, deliberately kept
 	   out of the reveal/motion transforms so it never fights animation. */
-	column-gap: calc(
+	gap: calc(
 		var(--glide-label-gap, 6px) + var(--glide-level-indent, 0px)
 	);
 	height: 100%;
@@ -422,7 +420,7 @@
 :where([data-glide-outline-owner]) .glide-outline-card {
 	display: flex;
 	align-items: baseline;
-	column-gap: 6px;
+	gap: 6px;
 	box-sizing: border-box;
 	width: max-content;
 	max-width: 100%;
@@ -544,7 +542,7 @@
 	padding: 0;
 	margin: -1px;
 	overflow: hidden;
-	clip-path: inset(50%);
+	clip: rect(0, 0, 0, 0);
 	white-space: nowrap;
 	border: 0;
 	pointer-events: none;
@@ -985,14 +983,6 @@
    Settings tab (P1-5): four-section tabbed page. Pure Obsidian theme
    variables — follows light/dark themes and accent color automatically.
    -------------------------------------------------------------------------- */
-/* Ownership wrapper for the settings page — same contract as the view mount:
-   it exists so every rule below can be scoped fail-closed, and it is
-   `display: contents` so Obsidian's settings layout is byte-for-byte
-   unchanged. Compound selector: this element IS the owner. */
-:where([data-glide-outline-owner]).glide-settings-root {
-	display: contents;
-}
-
 :where([data-glide-outline-owner]) .glide-settings-tablist {
 	display: flex;
 	gap: 4px;
@@ -1051,4 +1041,21 @@
 	display: block;
 	border: 0;
 	padding: 0;
+}
+
+/* Connect only the small shared-width gap between adjacent labels. These
+   strips retain hover but are not heading activation targets. */
+:where([data-glide-outline-owner]) .glide-outline-gap-layer {
+ position: absolute;
+ inset: 0 0 auto;
+ height: 0;
+ pointer-events: none;
+}
+:where([data-glide-outline-owner]) .glide-outline-heading-gap {
+ position: absolute;
+ left: var(--glide-gap-left);
+ top: var(--glide-gap-top);
+ width: var(--glide-gap-width);
+ height: var(--glide-gap-height);
+ pointer-events: auto;
 }

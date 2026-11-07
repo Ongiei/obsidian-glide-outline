@@ -61,7 +61,7 @@ describe("hierarchy staircase", () => {
 	it("adds the level indent to the marker→card column gap", () => {
 		const motion = declarations(".glide-outline-motion").join(";");
 		expect(motion).toMatch(
-			/column-gap:\s*calc\(\s*var\(--glide-label-gap[^)]*\)\s*\+\s*var\(--glide-level-indent/,
+			/gap:\s*calc\(\s*var\(--glide-label-gap[^)]*\)\s*\+\s*var\(--glide-level-indent/,
 		);
 	});
 });

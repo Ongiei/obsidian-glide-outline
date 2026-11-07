@@ -136,7 +136,7 @@ interface PendingViewportIntent {
  */
 export class ActiveHeadingTracker {
 	private readonly disposables = new DisposableStore();
-	private readonly win: Window & typeof globalThis;
+	private readonly win: Window & Pick<typeof window, "HTMLElement">;
 	private items: readonly HeadingItem[] = [];
 	private activeKey: string | null = null;
 	private source: ActiveHeadingSource = "viewport";

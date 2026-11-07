@@ -3,6 +3,7 @@
  * provide the smallest faithful test shim used by the mount lifecycle.
  */
 if (typeof window !== "undefined") {
+	Object.defineProperty(Node.prototype, "instanceOf", { configurable: true, value(this: Node, type: typeof Node) { return this instanceof type; } });
 	Object.defineProperty(Document.prototype, "win", { configurable: true, get(this: Document) { return this.defaultView; } });
 	Object.defineProperty(window, "createEl", { configurable: true, value: (tag: string) => document.createElement(tag) });
 	Object.defineProperty(window, "createDiv", { configurable: true, value: () => document.createElement("div") });

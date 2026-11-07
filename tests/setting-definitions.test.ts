@@ -41,4 +41,13 @@ describe("native search preserves the tabbed settings interface", () => {
   expect(definition.aliases).toContain("启用大纲");
   expect(definition.aliases).toContain("恢复默认外观");
  });
+ it("uses English without accessing the newer language API on older hosts", () => {
+  vi.spyOn(obsidian, "requireApiVersion").mockReturnValue(false);
+  const getLanguage = vi.spyOn(obsidian, "getLanguage");
+  const {tab} = fixture();
+  const definition = tab.getSettingDefinitions()[0] as SettingDefinition;
+  expect(definition.name).toBe("Plugin settings");
+  expect(getLanguage).not.toHaveBeenCalled();
+ });
+
 });

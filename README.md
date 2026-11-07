@@ -129,3 +129,8 @@ Sidebar TOC panels cost horizontal space permanently and live far away from the 
 ## License
 
 [MIT](LICENSE) — implemented independently; no source code was copied from other plugins.
+
+## Diagnostics and privacy
+
+The copy diagnostics and developer capture commands write their reports to the
+clipboard when invoked. They never read existing clipboard contents.

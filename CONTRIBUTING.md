@@ -53,5 +53,7 @@ squash-merged, so the per-commit history is for review clarity, not permanence.
 
 Releases are cut from `main` only when explicitly requested. Bump
 `manifest.json`, `package.json`, and `versions.json` together, tag
-`X.Y.Z` **without** a `v` prefix, and publish a GitHub Release with the three
-build artifacts (`main.js`, `manifest.json`, `styles.css`) attached.
+`X.Y.Z` **without** a `v` prefix and push that tag after CI passes. The
+Attested plugin build workflow builds the tagged source, attests `main.js`,
+`manifest.json` and `styles.css`, and publishes those exact files. Run the
+workflow manually on a branch to validate attestations before a release.

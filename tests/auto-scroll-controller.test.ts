@@ -233,7 +233,7 @@ describe("MagnificationController pointer edge auto-scroll", () => {
 		runScrollFrames();
 		const scrolled = view.viewportEl.scrollTop;
 
-		pointer("pointerleave", 495);
+		pointer("pointerleave", 510);
 		vi.advanceTimersByTime(500);
 		flushFrame();
 		expect(view.viewportEl.scrollTop).toBe(scrolled);

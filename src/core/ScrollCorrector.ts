@@ -112,7 +112,7 @@ export interface ScrollCorrectorOptions {
 	requestInstantFallback?: () => void;
 	/** Called exactly once when correction finishes. */
 	done: (summary: JumpCorrectionSummary) => void;
-	win: Window & typeof globalThis;
+	win: Window;
 	scroller: HTMLElement;
 }
 

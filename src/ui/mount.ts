@@ -9,8 +9,7 @@
  * 1. **One owned node.** Everything the plugin renders hangs off a single
  *    wrapper tagged `data-glide-outline-owner`. Nothing else is added to the
  *    host, so unmounting is `wrapper.remove()` and cannot leave debris.
- *    The wrapper is `display: contents`, so it generates no box and the rail
- *    lays out exactly as if it were a direct child of the host.
+ *    The wrapper fills the host without adding anything to its normal flow.
  *
  * 2. **Ownership is checkable.** `owns()` and `OWNED_SELECTOR` let every
  *    `closest()` in the codebase ask "is this actually mine?" instead of
@@ -103,7 +102,7 @@ export function createOutlineMount(hostEl: HTMLElement): OutlineMount {
 	const staleMountsRemoved = sweepStaleMounts(hostEl);
 	const inlinePositionBefore = hostEl.style.position;
 
-	const mountEl = doc.createElement("div");
+	const mountEl = (doc.win as Window & { createDiv: typeof createDiv }).createDiv();
 	mountEl.className = "glide-outline-mount";
 	mountEl.setAttribute(OWNER_ATTR, OWNER_VALUE);
 	mountEl.setAttribute(INSTANCE_ATTR, instanceId);
