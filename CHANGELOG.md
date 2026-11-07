@@ -2,6 +2,13 @@
 
 All notable changes to Glide Outline will be documented in this file.
 
+## 0.1.10 — stable hover and verified release files
+
+- Keep pointer hover on the outline across the small gaps between heading cards, avoiding repeated editor hover transitions.
+- Hide the outline scrollbar while keeping the list scrollable and preserving editor scrollbar behavior.
+- Guard newer Obsidian APIs while retaining the compatible settings path and Chinese tabs.
+- Build and attest all three installation files in GitHub Actions.
+
 ## 0.1.9 — stable heading selection and restored settings tabs
 
 - Prevent cumulative whole-column drift during sequential heading selection.
