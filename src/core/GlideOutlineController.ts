@@ -126,6 +126,13 @@ export class GlideOutlineController {
 			// Pointer activation (pointerup lock, section 9/10).
 			(item) => this.jumpTo(item),
 			this.perf,
+			() => {
+				this.cancelPendingJump();
+				if (view.getMode() === "preview") {
+					return view.contentEl.querySelector<HTMLElement>(".markdown-preview-view");
+				}
+				return (view.editor as unknown as { cm?: CmView }).cm?.scrollDOM ?? null;
+			},
 		);
 		this.tracker = new ActiveHeadingTracker(
 			view,

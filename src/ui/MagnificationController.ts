@@ -1,3 +1,4 @@
+import { HeadingGapBridges } from "./HeadingGapBridges";
 import { computeCollisionFreeMagnification } from "../utils/geometry";
 import { type AutoScrollStopReason } from "../utils/overflow";
 import {
@@ -15,6 +16,7 @@ import {
 } from "../utils/scrollIntent";
 import {
 	MANUAL_WHEEL_COOLDOWN_MS,
+	normalizeWheelDelta,
 	resolveWheelRoute,
 } from "../utils/wheelRouting";
 import { DisposableStore } from "../utils/disposable";
@@ -351,7 +353,7 @@ interface PressedHeadingState {
  */
 export class MagnificationController {
 	private readonly disposables = new DisposableStore();
-	private readonly win: Window & typeof globalThis;
+	private readonly win: Window & Pick<typeof window, "Node" | "HTMLElement">;
 	private cache: CachedItem[] = [];
 	/** O(1) element → cache index (anchor resolution, rebuild carry). */
 	private cacheIndexByEl = new Map<HTMLElement, number>();
@@ -530,6 +532,8 @@ export class MagnificationController {
 	 * and the locked target cannot slide away (section 12). */
 	private pressed: PressedHeadingState | null = null;
 	private readonly pointerSnap = new PointerSnap();
+	private readonly gapBridges: HeadingGapBridges;
+	private viewportLeft = 0;
 	private snapTarget: EventTarget | null = null;
 	private readonly hoverSession = new HoverSession();
 	private snappedRow: HTMLElement | null = null;
@@ -554,6 +558,7 @@ export class MagnificationController {
 		private readonly onJump: ((item: HeadingItem) => void) | null = null,
 		/** On-demand performance capture (section 3); null = zero cost. */
 		private readonly perf: PerfCapture | null = null,
+		private readonly getEditorScroller: (() => HTMLElement | null) | null = null,
 	) {
 		const doc = view.rootEl.ownerDocument;
 		const win = doc.defaultView;
@@ -561,6 +566,11 @@ export class MagnificationController {
 		this.win = win;
 
 		const { hitZoneEl, listEl, rootEl, viewportEl } = view;
+		this.gapBridges = new HeadingGapBridges(viewportEl);
+		this.disposables.add(() => this.gapBridges.dispose());
+		this.disposables.listen(this.gapBridges.el, "pointerenter", this.onPointerEnter);
+		this.disposables.listen(this.gapBridges.el, "pointermove", this.onPointerMove);
+		this.disposables.listen(this.gapBridges.el, "pointerleave", this.onPointerLeave);
 		// Seed both observed and commanded scroll positions before any input
 		// can arrive. In particular, a wheel routed immediately after expand
 		// must build on the restored scroll position, not the field default 0.
@@ -568,8 +578,8 @@ export class MagnificationController {
 		this.commandedScrollTop = this.currentScrollTop;
 
 		// Rail strip + real cards/markers: enter/move/leave. The motion
-		// corridor and the removed interaction surface are NOT interactive,
-		// so the only elements that bubble here are the rail, markers and
+		// corridor and row slack remain non-interactive; the gap strips below
+		// are registered separately. Elements bubbling here are rail, markers and
 		// cards — exactly what may keep the outline open or trigger a jump.
 		this.disposables.listen(hitZoneEl, "pointerenter", this.onPointerEnter);
 		this.disposables.listen(hitZoneEl, "pointermove", this.onPointerMove);
@@ -1004,10 +1014,9 @@ export class MagnificationController {
 	/**
 	 * §十: window capture-phase wheel routing. Decides ownership with
 	 * `resolveWheelRoute` on cached booleans/numbers only — no layout
-	 * reads on the wheel hot path. Outline-owned wheels scroll the
-	 * outline viewport (delta-normalized) and start the manual-wheel
-	 * cooldown; editor handoffs and ignores fall through untouched so
-	 * the editor keeps its native scrolling.
+	 * reads to decide ownership. Outline wheels start the manual-wheel
+	 * cooldown. A gap strip at the boundary routes vertical scrolling to
+	 * the editor because it sits above the editor's native hit surface.
 	 */
 	private onWindowWheel = (event: WheelEvent): void => {
 		// Collapsed → never ours (§十.1). Single boolean read; the editor
@@ -1044,7 +1053,18 @@ export class MagnificationController {
 				perf.count("wheelIgnoredCount");
 			}
 		}
-		if (decision.action !== "outline") return; // native path untouched
+		if (decision.action === "editor" && event.cancelable && target instanceof this.win.Node &&
+			this.gapBridges.el.contains(target)) {
+			// The strip owns hit testing, so native scrolling cannot reach the
+			// sibling editor here. Preserve the former transparent-gap route.
+			const scroller = this.getEditorScroller?.();
+			if (scroller) {
+				event.preventDefault();
+				scroller.scrollTop += normalizeWheelDelta(event.deltaY, event.deltaMode,
+					event.deltaMode === 2 ? scroller.clientHeight : 0);
+			}
+		}
+		if (decision.action !== "outline") return;
 		this.clearPointerSnap();
 		event.preventDefault();
 		event.stopPropagation();
@@ -1367,6 +1387,7 @@ export class MagnificationController {
 	private syncExpanded(): void {
 		const expanded = this.isExpanded();
 		const state = this.currentInteractionState();
+		if (!this.pointerExpanded) this.gapBridges.clear();
 		if (expanded === this.view.isExpanded()) {
 			// Still update follow state: pointer inside ⇒ follow paused.
 			this.view.setFollowEnabled(!expanded);
@@ -1523,11 +1544,10 @@ export class MagnificationController {
 		// §六: the range slides with the pointer. Cached rects stay valid
 		// for the rows they were collected for, and only for those.
 		if (!this.envelopeCoversActiveRange()) this.envelopeDirty = true;
-		// §十四 gating: a stale envelope is only rebuilt when a containment
-		// decision actually needs it (a deferred window check is pending).
-		// Motion keeps the cached rects fresh mathematically (see the write
-		// phase), so frames without a pending check skip the rect reads.
-		if (this.envelopeDirty && this.windowCheckPending) {
+		// Refresh before a deferred containment check or before placing gap
+		// strips. Motion updates the cached rectangles between rebuilds.
+		const refreshEnvelope = this.envelopeDirty && (this.windowCheckPending || this.pointerExpanded);
+		if (refreshEnvelope) {
 			this.rebuildEnvelope();
 		}
 
@@ -2205,6 +2225,9 @@ export class MagnificationController {
 					this.win.performance.now(),
 				);
 			}
+		}
+		if (this.pointerExpanded && (refreshEnvelope || writes > 0)) {
+			this.gapBridges.update(this.envelope.items, this.viewportLeft);
 		}
 		// Keep the loop alive until every displayed value converged.
 		const recording = settings.developerMode && measure;
@@ -3030,6 +3053,7 @@ export class MagnificationController {
 		// Viewport bounds are cached here (not per frame) — they only move
 		// on layout changes, which also dirty this cache.
 		const viewportRect = this.view.viewportEl.getBoundingClientRect();
+		this.viewportLeft = viewportRect.left;
 		this.viewportTop = viewportRect.top;
 		this.viewportBottom = viewportRect.bottom;
 		const rail = this.view.hitZoneEl.getBoundingClientRect();
@@ -3056,7 +3080,7 @@ export class MagnificationController {
 		for (let i = 0; i < children.length; i++) {
 			const el = children[i];
 			// Pop-out safe instanceof (P1-1).
-			if (!(el instanceof this.win.HTMLElement)) continue;
+			if (!el.instanceOf(this.win.HTMLElement)) continue;
 			// Row rects are transform-free (only the inner motion element
 			// carries --glide-shift-y), so this measures the BASE center.
 			const rect = el.getBoundingClientRect();

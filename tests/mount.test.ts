@@ -447,10 +447,11 @@ describe("styles.css is scoped fail-closed", () => {
 		expect(stripped).not.toContain(".glide-outline-host");
 	});
 
-	it("keeps the wrapper boxless so layout is unchanged", () => {
-		expect(stripped).toMatch(
-			/:where\(\[data-glide-outline-owner\]\)\.glide-outline-mount\s*\{[^}]*display:\s*contents/,
-		);
+	it("keeps the host-sized wrapper outside normal layout and pointer targeting", () => {
+		const block = stripped.match(/:where\(\[data-glide-outline-owner\]\)\.glide-outline-mount\s*\{([^}]*)\}/)?.[1];
+		expect(block).toMatch(/position:\s*absolute/);
+		expect(block).toMatch(/inset:\s*0/);
+		expect(block).toMatch(/pointer-events:\s*none/);
 	});
 
 	it("contains no :has and no !important", () => {

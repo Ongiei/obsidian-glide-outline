@@ -868,7 +868,7 @@ export class PerfCapture {
 	 * that should be reached for by default, and the expensive one has to
 	 * be asked for by name.
 	 */
-	start(win: Window & typeof globalThis, mode: PerfCaptureMode = "light"): void {
+	start(win: Window, mode: PerfCaptureMode = "light"): void {
 		if (this.active) return;
 		this.mode = mode;
 		this.counters = zeroCounters();
@@ -933,7 +933,7 @@ export class PerfCapture {
 	 * sample. On a clock without real resolution (test stubs) both costs
 	 * come out 0 and the modelled overhead is simply 0.
 	 */
-	private calibrateTelemetryCost(win: Window & typeof globalThis): void {
+	private calibrateTelemetryCost(win: Window): void {
 		this.nowCallCostMs = 0;
 		this.phaseSampleCostMs = 0;
 		const clock = (win as { performance?: { now?: () => number } }).performance;
@@ -1048,7 +1048,7 @@ export class PerfCapture {
 	 * listeners are ALWAYS removed here — sampling has zero standing cost
 	 * afterwards.
 	 */
-	stop(win: Window & typeof globalThis): PerfReport | null {
+	stop(win: Window): PerfReport | null {
 		if (!this.active) return null;
 		this.active = false;
 		this.deepActive = false;
@@ -1656,7 +1656,7 @@ export class PerfCapture {
 	 * math at all — the >250 ms threshold is only the fallback for gaps
 	 * these events do not cover (e.g. OS-level sleep without an event).
 	 */
-	private observeSuspension(win: Window & typeof globalThis): void {
+	private observeSuspension(win: Window): void {
 		// Accessed defensively like the longtask observer: a stripped-down
 		// runtime without events still gets the >250 ms threshold fallback.
 		const doc = (win as { document?: Document }).document;
@@ -1677,7 +1677,7 @@ export class PerfCapture {
 		};
 	}
 
-	private observeLongTasks(win: Window & typeof globalThis): void {
+	private observeLongTasks(win: Window): void {
 		const PO = (
 			win as unknown as {
 				PerformanceObserver?: new (

@@ -426,6 +426,7 @@ export class GlideOutlineView {
 	readonly listEl: HTMLElement;
 
 	private readonly doc: Document;
+	private readonly dom: { createEl: typeof createEl; createDiv: typeof createDiv; createSpan: typeof createSpan };
 	/** Owns every node this view creates; the only thing added to the host. */
 	private readonly mount: OutlineMount;
 	private readonly hostResizeObserver: ResizeObserver | null = null;
@@ -588,27 +589,28 @@ export class GlideOutlineView {
 		private readonly perf: PerfCapture | null = null,
 	) {
 		this.doc = hostEl.ownerDocument;
+		this.dom = this.doc.win as Window & { createEl: typeof createEl; createDiv: typeof createDiv; createSpan: typeof createSpan };
 		// Every node below hangs off the owned wrapper; the host itself is
 		// left alone (see src/ui/mount.ts).
 		this.mount = createOutlineMount(hostEl);
 
-		this.rootEl = this.doc.createElement("div");
+		this.rootEl = this.dom.createDiv();
 		this.rootEl.className = "glide-outline-root";
 		this.toolbar = new OutlineToolbar(this.doc, handlers);
 		this.rootEl.append(this.toolbar.el);
 
-		this.hitZoneEl = this.doc.createElement("div");
+		this.hitZoneEl = this.dom.createDiv();
 		this.hitZoneEl.className = "glide-outline-hit-zone";
 
-		this.viewportEl = this.doc.createElement("div");
+		this.viewportEl = this.dom.createDiv();
 		this.viewportEl.className = "glide-outline-viewport";
 
-		this.listEl = this.doc.createElement("nav");
+		this.listEl = this.dom.createEl("nav");
 		this.listEl.className = "glide-outline-list";
 		// Accessible name via a hidden span, NOT `aria-label`: Obsidian
 		// renders aria-label as a hover tooltip, and a tooltip over the rail
 		// is exactly what this plugin exists to replace.
-		const listLabel = this.doc.createElement("span");
+		const listLabel = this.dom.createSpan();
 		listLabel.className = "glide-outline-a11y-label";
 		listLabel.id = `glide-outline-a11y-${a11yLabelSeq++}`;
 		listLabel.textContent = "Document outline";
@@ -621,12 +623,12 @@ export class GlideOutlineView {
 
 		// §六: center spacers inside the scroll content so the first and
 		// last rows can reach the playhead at the vertical center.
-		this.topSpacerEl = this.doc.createElement("div");
+		this.topSpacerEl = this.dom.createDiv();
 		this.topSpacerEl.className = "glide-outline-center-spacer glide-outline-center-spacer--top";
 		this.topSpacerEl.setAttribute("aria-hidden", "true");
 		this.viewportEl.insertBefore(this.topSpacerEl, this.listEl);
 
-		this.bottomSpacerEl = this.doc.createElement("div");
+		this.bottomSpacerEl = this.dom.createDiv();
 		this.bottomSpacerEl.className = "glide-outline-center-spacer glide-outline-center-spacer--bottom";
 		this.bottomSpacerEl.setAttribute("aria-hidden", "true");
 		this.viewportEl.appendChild(this.bottomSpacerEl);
@@ -636,10 +638,10 @@ export class GlideOutlineView {
 		// to the 28px marker rail — an earlier version stretched it across
 		// the whole root and painted a dot in the middle of the user's
 		// prose. pointer-events: none, aria-hidden, no tooltip, no hit area.
-		this.playheadEl = this.doc.createElement("div");
+		this.playheadEl = this.dom.createDiv();
 		this.playheadEl.className = "glide-outline-playhead";
 		this.playheadEl.setAttribute("aria-hidden", "true");
-		const playheadMarker = this.doc.createElement("span");
+		const playheadMarker = this.dom.createSpan();
 		playheadMarker.className = "glide-outline-playhead-marker";
 		this.playheadEl.appendChild(playheadMarker);
 		this.rootEl.appendChild(this.playheadEl);
@@ -2120,34 +2122,34 @@ export class GlideOutlineView {
 	}
 
 	private createItemRecord(item: HeadingItem): ItemRecord {
-		const row = this.doc.createElement("div");
+		const row = this.dom.createDiv();
 		row.className = "glide-outline-row";
 
-		const button = this.doc.createElement("button");
+		const button = this.dom.createEl("button");
 		button.type = "button";
 		button.className = "glide-outline-item";
 
-		const motion = this.doc.createElement("span");
+		const motion = this.dom.createSpan();
 		motion.className = "glide-outline-motion";
 
-		const marker = this.doc.createElement("span");
+		const marker = this.dom.createSpan();
 		marker.className = "glide-outline-marker";
 		marker.setAttribute("aria-hidden", "true");
 
-		const reveal = this.doc.createElement("span");
+		const reveal = this.dom.createSpan();
 		reveal.className = "glide-outline-reveal";
 
-		const card = this.doc.createElement("span");
+		const card = this.dom.createSpan();
 		card.className = "glide-outline-card";
 
 		// Edge level badge (H1…H6). DOM order is badge → label; CSS flips
 		// the card's flex direction so the badge always sits on the
 		// rail-facing side (right edge on the right outline, left on left).
-		const badge = this.doc.createElement("span");
+		const badge = this.dom.createSpan();
 		badge.className = "glide-outline-level-badge";
 		badge.setAttribute("aria-hidden", "true");
 
-		const label = this.doc.createElement("span");
+		const label = this.dom.createSpan();
 		label.className = "glide-outline-label";
 
 		// Visually hidden accessible name. Keeping it OUTSIDE the visual
@@ -2155,7 +2157,7 @@ export class GlideOutlineView {
 		// card never affects it, and `aria-labelledby` gives keyboard and
 		// screen-reader users the same "H2: Title" announcement the old
 		// `aria-label` did — without Obsidian's hover tooltip.
-		const a11yLabel = this.doc.createElement("span");
+		const a11yLabel = this.dom.createSpan();
 		a11yLabel.className = "glide-outline-a11y-label";
 		a11yLabel.id = `glide-outline-a11y-${a11yLabelSeq++}`;
 		button.setAttribute("aria-labelledby", a11yLabel.id);
@@ -2238,7 +2240,7 @@ export class GlideOutlineView {
 		// Each async render owns its element. A late host render can only
 		// mutate the detached old label, never overwrite the current one.
 		if (rich || record.renderedRich) {
-			const replacement = this.doc.createElement("span");
+			const replacement = this.dom.createSpan();
 			replacement.className = labelEl.className;
 			labelEl.replaceWith(replacement);
 			record.labelEl = replacement;

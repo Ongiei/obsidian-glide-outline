@@ -1,0 +1,80 @@
+name: Attested plugin build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Validate release tag
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          node --input-type=commonjs <<'JS'
+          const assert = require('node:assert/strict');
+          const manifest = require('./manifest.json');
+          const tag = process.env.RELEASE_TAG;
+          assert.match(tag, /^\d+\.\d+\.\d+$/);
+          assert.equal(manifest.version, tag);
+          assert.equal(require('./package.json').version, tag);
+          assert.equal(require('./versions.json')[tag], manifest.minAppVersion);
+          JS
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check:community
+      - run: pnpm run build
+      - name: Attest the installation files
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            main.js
+            manifest.json
+            styles.css
+      - uses: actions/upload-artifact@v4
+        with:
+          name: glide-outline
+          path: |
+            main.js
+            manifest.json
+            styles.css
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: glide-outline
+      - name: Publish the attested files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPO: ${{ github.repository }}
+        run: |
+          gh release create "$RELEASE_TAG" main.js manifest.json styles.css \
+            --repo "$RELEASE_REPO" --verify-tag --generate-notes

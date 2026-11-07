@@ -94,3 +94,5 @@ export const MarkdownRenderer = {
 };
 
 export function getLanguage(): string { return "en"; }
+
+export function requireApiVersion(): boolean { return true; }

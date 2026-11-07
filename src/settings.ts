@@ -1,5 +1,5 @@
 import { settingsText as t } from "./ui/settingsText";
-import { PluginSettingTab, Setting } from "obsidian";
+import { PluginSettingTab, Setting, requireApiVersion } from "obsidian";
 import type { App, SettingDefinitionItem } from "obsidian";
 import { SettingDefinitionRow, groupSettingDefinitions } from "./ui/settingDefinitions";
 import type { SettingRow } from "./ui/settingDefinitions";
@@ -437,7 +437,7 @@ function withValueReadout<T extends SliderLike>(
 	format: (value: number) => string = (value) => String(value),
 ): T {
 	const el = slider.sliderEl;
-	const readout = el.ownerDocument.createElement("span");
+	const readout = (el.ownerDocument.win as Window & { createSpan: typeof createSpan }).createSpan();
 	readout.className = "glide-settings-value";
 	readout.setAttribute("aria-hidden", "true");
 	const paint = (): void => {
@@ -1027,8 +1027,8 @@ export class GlideOutlineSettingTab extends PluginSettingTab {
 					// "change it twice" bug.
 					resetAppearanceInPlace(this.plugin.settings);
 					await this.plugin.applySettings();
-					if (typeof this.update === "function") this.update();
-					else this.display();
+					if (requireApiVersion("1.13.0")) this.update();
+					else this.renderTabs(this.containerEl);
 				}),
 			);
 	}
