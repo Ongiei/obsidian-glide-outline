@@ -111,6 +111,8 @@
 	flex-direction: column;
 	padding-block: var(--glide-viewport-pad, 14px);
 	pointer-events: none;
+	/* Native scrollbar styling can override the WebKit fallback. */
+	scrollbar-width: none;
 	overscroll-behavior: contain;
 }
 
